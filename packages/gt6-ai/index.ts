@@ -1,5 +1,2 @@
-export interface GT6Driver {
-  id: string;
-  skill: number;
-  aggression: number;
-}
+export { decideDriverAction, stepAI } from "../../config/emergent/ai-drivers";
+export type { DriverProfile, DriverPersonality } from "../../config/emergent/ai-drivers";

@@ -1,37 +1,39 @@
-import type { NextFunction, Request, Response } from 'express';
-import { GatewayError, type ApiKey } from './api-key';
-import { getApiKeyByHash } from './api-key-store';
-import { hashApiKey } from './api-key-hash';
-import { extractApiKey } from './api-key-validator';
+import { ApiKeyStore } from "./api-key-store";
+import { validateApiKey } from "./api-key-validator";
+import { requirePermission } from "./api-key-permissions";
+import { trackUsage } from "./api-key-usage";
 
-declare global {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
-  namespace Express {
-    interface Request {
-      apiKey?: ApiKey;
-      ownerId?: string;
-      workspaceId?: string;
-      requestId?: string;
+// Gateway flow: Request -> API Key -> Validate -> Owner -> Workspace -> Plan
+//            -> Permissions -> Rate Limits -> Luchii Router -> Model
+// Precise errors only: 401 key_not_found, 403 permission_denied, 429 rate_limit_exceeded, 503 service_unavailable.
+export function apiKeyMiddleware(
+  store: ApiKeyStore,
+  options: { required?: string; dailyLimit?: number } = {},
+) {
+  return (req, res, next) => {
+    const auth: string = req.headers["authorization"] ?? "";
+    const raw = auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+
+    const validated = validateApiKey(store, raw);
+    if (!validated.ok) {
+      return res.status(validated.status).json({ error: validated.error, message: validated.message });
     }
-  }
-}
 
-export async function apiKeyMiddleware(req: Request, res: Response, next: NextFunction) {
-  try {
-    const raw = extractApiKey(req.headers);
-    if (!raw) throw new GatewayError('KEY_NOT_PROVIDED');
+    if (options.required) {
+      const perm = requirePermission(validated.key, options.required);
+      if (!perm.ok) {
+        return res.status(403).json({ error: "permission_denied", required: perm.required });
+      }
+    }
 
-    const record = await getApiKeyByHash(hashApiKey(raw), raw);
-    if (!record) throw new GatewayError('KEY_NOT_FOUND');
-    if (record.status === 'suspended') throw new GatewayError('ACCOUNT_SUSPENDED');
-    if (record.status !== 'active') throw new GatewayError('KEY_DISABLED');
+    const usage = trackUsage(validated.key, options.dailyLimit ?? 10000);
+    if (!usage.ok) {
+      return res.status(429).json({ error: "rate_limit_exceeded", limit: usage.limit });
+    }
 
-    req.apiKey = record;
-    req.ownerId = record.ownerId;
-    req.workspaceId = record.workspaceId;
-    return next();
-  } catch (err) {
-    const e = err instanceof GatewayError ? err : new GatewayError('SERVICE_UNAVAILABLE');
-    return res.status(e.status).json(e.toBody(req.requestId));
-  }
+    req.apiKey = validated.key;
+    req.owner = validated.key.ownerId;
+    req.workspace = validated.key.workspaceId;
+    next();
+  };
 }

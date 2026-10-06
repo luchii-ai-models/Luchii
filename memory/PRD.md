@@ -1,5 +1,11 @@
 # Frasberg / Luchii
 
+## June 2026 — Precise error semantics + luchii packages + runtime health (curl-verified)
+- Error contract live (spec: never "invalid_key" unless hash truly missing): engine_auth_factory/_check_rate_limit (server.py), engine_ctx (routes_engines), gateway main.py → 401 {"error":"key_not_found"}, 403 {"error":"permission_denied","required":perm} (FK-003), 403 key_revoked/owner_not_found (FK-002/FK-004), 429 {"error":"rate_limit_exceeded"}, 503 {"error":"service_unavailable"} (gateway 502s→503; FRB-UPSTREAM 503s tagged). Lowercased legacy UPPERCASE labels (server/routes_engines/routes_shield).
+- NEW GET /api/v1/runtime/health (open, routes_engines): luchii-health RuntimeHealth[] contract — database/luchii-router/platform-api w/ status healthy|degraded|offline + latencyMs; overall worst-of.
+- 33 new monorepo files (gen script /app/scripts/gen_luchii_packages.py): packages/frasberg-agents/emergent-agent.ts (EmergentAgent single runtime, verbatim), luchii-api-keys (7 files: ApiKey model w/ hash/status/permissions/requestsToday, store/validator/hash/permissions/usage/middleware — full gateway flow Request→Key→Validate→Owner→Workspace→Plan→Perms→RateLimits→Router→Model), luchii-health (status/monitor/health-check/failover), luchii-core/model-router/rate-limiter, frasberg-core/identity/checkout/memory, gt6-physics/ai/race (re-export config/emergent) + gt6-audio/video/world, apps/{gateway,api,studio,checkout,runtime}/index.ts.
+- /settings/api-keys frontend route already existed (ApiKeysSettings). Verified: 401 key_not_found on fake key, 403 permission_denied+required=music_generation on image/video key→/generate/music, health endpoint, /v1/behavior regression 200.
+
 ## June 2026 — EMERGENT_LLM_KEY fully OPTIONAL (user mandate: "we do not use any EMERGENT_LLM_KEY, period")
 - All 5 hard `os.environ["EMERGENT_LLM_KEY"]` (core.py, asset_pipeline, builder, mesh_ws, studio) → `.get(...,"")`. App boots + all modules import with EMPTY key (verified). NEVER reintroduce as hard requirement.
 - Routing: /v1/chat/completions (routes_provider) now upstream-FIRST (server._try_upstream) in both non-stream + SSE paths; falls back to engine core only if key present; else 503 {"code":"FRB-UPSTREAM"} (stream emits the message as a chunk). /generate/image: upstream miss + no key → 503 FRB-UPSTREAM.

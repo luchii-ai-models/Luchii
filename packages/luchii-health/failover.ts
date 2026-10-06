@@ -1,10 +1,14 @@
-import { GatewayError } from '../luchii-api-keys/api-key';
-import type { RuntimeHealth } from './status';
+import { RuntimeHealth } from "./status";
 
-// Returns the first non-offline service; 503 RUNTIME_UNAVAILABLE when none remain.
-export function pickHealthy(candidates: RuntimeHealth[]): RuntimeHealth {
-  const pick =
-    candidates.find((c) => c.status === 'healthy') ?? candidates.find((c) => c.status === 'degraded');
-  if (!pick) throw new GatewayError('RUNTIME_UNAVAILABLE');
-  return pick;
+// 503 means YOUR infrastructure (ECS restarting, gateway down, runtime crashed,
+// Luchii offline, queue saturated) — return service_unavailable, never invalid_key.
+export function pickHealthy(report: RuntimeHealth[]): RuntimeHealth | undefined {
+  return (
+    report.find((r) => r.status === "healthy") ??
+    report.find((r) => r.status === "degraded")
+  );
+}
+
+export function serviceUnavailable() {
+  return { status: 503, body: { error: "service_unavailable" } };
 }

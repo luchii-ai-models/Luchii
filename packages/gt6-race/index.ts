@@ -1,6 +1,2 @@
-export interface GT6Race {
-  id: string;
-  trackId: string;
-  laps: number;
-  driverIds: string[];
-}
+export { createInitialRaceState } from "../../config/emergent/simulation-state";
+export type { RaceState, CarState, TrackState } from "../../config/emergent/simulation-state";

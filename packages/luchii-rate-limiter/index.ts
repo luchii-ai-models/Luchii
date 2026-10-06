@@ -1,12 +1,16 @@
-import { GatewayError } from '../luchii-api-keys/api-key';
+export class RateLimiter {
+  private readonly hits = new Map<string, number[]>();
 
-export * from './rate-limit';
+  constructor(private readonly maxPerMinute = 60) {}
 
-export interface Plan {
-  id: string;
-  dailyRequests: number;
-}
-
-export function enforceRateLimit(plan: Plan, requestsToday: number): void {
-  if (requestsToday > plan.dailyRequests) throw new GatewayError('RATE_LIMIT_EXCEEDED');
+  check(keyId: string): { ok: true } | { ok: false; status: 429; error: "rate_limit_exceeded"; retryAfterSec: number } {
+    const now = Date.now();
+    const window = (this.hits.get(keyId) ?? []).filter((t) => now - t < 60000);
+    if (window.length >= this.maxPerMinute) {
+      return { ok: false, status: 429, error: "rate_limit_exceeded", retryAfterSec: Math.ceil((60000 - (now - window[0])) / 1000) };
+    }
+    window.push(now);
+    this.hits.set(keyId, window);
+    return { ok: true };
+  }
 }

@@ -1,17 +1,8 @@
-export interface Owner {
-  id: string;
-  email?: string;
+// Frasberg API Keys authenticate users. x-owner-id is read-only context — never overridden.
+export function resolveOwner(headers: Record<string, string | undefined>, keyOwnerId: string): string {
+  const header = headers["x-owner-id"];
+  if (header && header !== keyOwnerId) {
+    throw Object.assign(new Error("x-owner-id does not match authenticated owner"), { status: 403 });
+  }
+  return keyOwnerId;
 }
-
-export interface Workspace {
-  id: string;
-  ownerId: string;
-}
-
-export interface IdentityResolver {
-  getOwner(ownerId: string): Promise<Owner | null>;
-  getWorkspace(workspaceId: string): Promise<Workspace | null>;
-}
-
-export * from './owner-resolver';
-export * from './workspace-resolver';

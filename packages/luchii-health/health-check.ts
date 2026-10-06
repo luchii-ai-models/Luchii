@@ -1,13 +1,19 @@
-import type { RuntimeHealth } from './status';
+import { RuntimeHealth } from "./status";
 
-export async function checkService(service: string, url: string, degradedMs = 1500, timeoutMs = 5000): Promise<RuntimeHealth> {
-  const started = Date.now();
+export async function checkService(
+  service: string,
+  url: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<RuntimeHealth> {
+  const start = Date.now();
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    const latencyMs = Date.now() - started;
-    if (!res.ok) return { service, status: 'offline', latencyMs };
-    return { service, status: latencyMs > degradedMs ? 'degraded' : 'healthy', latencyMs };
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(4000) });
+    return {
+      service,
+      status: res.ok ? "healthy" : "degraded",
+      latencyMs: Date.now() - start,
+    };
   } catch {
-    return { service, status: 'offline', latencyMs: Date.now() - started };
+    return { service, status: "offline", latencyMs: Date.now() - start };
   }
 }

@@ -1,24 +1,13 @@
-import { GatewayError } from './api-key';
+import { ApiKey } from "./api-key";
 
-export const PERMISSIONS = [
-  'chat.generate',
-  'image.generate',
-  'vision.generate',
-  'music.generate',
-  'gt6.run',
-  'memory.read',
-  'memory.write',
-  'agents.execute',
-  'checkout.access',
-] as const;
-export type Permission = (typeof PERMISSIONS)[number];
+export type PermissionResult =
+  | { ok: true }
+  | { ok: false; status: 403; error: "permission_denied"; required: string };
 
-export function hasPermission(granted: string[], required: string): boolean {
-  if (granted.includes('*') || granted.includes(required)) return true;
-  const alias = required === 'vision.generate' ? 'image.generate' : undefined;
-  return alias ? granted.includes(alias) : false;
-}
-
-export function assertPermission(granted: string[], required: string): void {
-  if (!hasPermission(granted, required)) throw new GatewayError('PERMISSION_DENIED', { required });
+// 403 = permission missing — tell the user exactly WHICH permission.
+export function requirePermission(key: ApiKey, required: string): PermissionResult {
+  if (key.permissions.includes(required) || key.permissions.includes("*")) {
+    return { ok: true };
+  }
+  return { ok: false, status: 403, error: "permission_denied", required };
 }

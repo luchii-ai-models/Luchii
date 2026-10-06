@@ -1,5 +1,7 @@
-import type { Plan } from '../luchii-rate-limiter';
-
-export interface PlanResolver {
-  getPlan(ownerId: string): Promise<Plan>;
+export interface CheckoutSession {
+  id: string;
+  ownerId: string;
+  planId: string;
+  status: "open" | "complete" | "expired";
+  createdAt: number;
 }

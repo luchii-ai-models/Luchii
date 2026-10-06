@@ -20,10 +20,10 @@ app = FastAPI(title="Frasberg Gateway")
 def validate_auth(request: Request) -> str:
     auth = request.headers.get("authorization", "")
     if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail={"error": "FK-001", "message": "missing bearer token"})
+        raise HTTPException(status_code=401, detail={"code": "FK-001", "error": "key_not_found", "message": "missing bearer token"})
     token = auth[len("Bearer "):]
     if not token.startswith(FRB_LIVE_PREFIX):
-        raise HTTPException(status_code=401, detail={"error": "FK-001", "message": "invalid frb_live key"})
+        raise HTTPException(status_code=401, detail={"code": "FK-001", "error": "key_not_found", "message": "invalid frb_live key"})
     return token
 
 
@@ -60,7 +60,7 @@ async def chat_completions(request: Request):
         return JSONResponse(r.json())
     except httpx.HTTPError as e:
         logger.exception("luchii engine unreachable")
-        raise HTTPException(status_code=502, detail=f"Luchii engine unreachable: {e}")
+        raise HTTPException(status_code=503, detail={"error": "service_unavailable", "message": f"Luchii engine unreachable: {e}"})
 
 
 @app.post("/v1/images/generations")
@@ -92,7 +92,7 @@ async def images_generations(request: Request):
             return JSONResponse(r.json())
         except httpx.HTTPError as e:
             logger.exception("self-hosted image engine unreachable")
-            raise HTTPException(status_code=502, detail=f"Image engine unreachable: {e}")
+            raise HTTPException(status_code=503, detail={"error": "service_unavailable", "message": f"Image engine unreachable: {e}"})
 
     # Platform engine path — X-Frasberg-Gateway header stops the platform from
     # routing back upstream to this gateway (loop guard).
@@ -112,5 +112,5 @@ async def images_generations(request: Request):
                 data.append({"b64_json": r.json()["image_base64"]})
     except httpx.HTTPError as e:
         logger.exception("luchii image engine unreachable")
-        raise HTTPException(status_code=502, detail=f"Luchii image engine unreachable: {e}")
+        raise HTTPException(status_code=503, detail={"error": "service_unavailable", "message": f"Luchii image engine unreachable: {e}"})
     return {"created": int(time.time()), "model": model, "data": data}

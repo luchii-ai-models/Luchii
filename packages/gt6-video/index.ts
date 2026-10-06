@@ -1,6 +1,6 @@
-export interface GT6VideoShot {
-  id: string;
-  camera: string;
-  startMs: number;
-  endMs: number;
+// Video is the primary heavy modality — keep clips short unless long-form is requested.
+export interface Gt6VideoJob {
+  raceId: string;
+  kind: "replay" | "preview" | "summary";
+  durationSec: number;
 }

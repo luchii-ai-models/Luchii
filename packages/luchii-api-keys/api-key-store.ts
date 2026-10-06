@@ -1,34 +1,17 @@
-import type { ApiKey } from './api-key';
+import { ApiKey } from "./api-key";
 
-export interface ApiKeyStore {
-  findByHash(hash: string, legacyRaw?: string): Promise<ApiKey | null>;
-  findById(id: string): Promise<ApiKey | null>;
-  save(key: ApiKey): Promise<void>;
-}
+export class ApiKeyStore {
+  private readonly byHash = new Map<string, ApiKey>();
 
-export class InMemoryApiKeyStore implements ApiKeyStore {
-  private keys = new Map<string, ApiKey>();
-
-  async findByHash(hash: string) {
-    return this.keys.get(hash) ?? null;
+  save(key: ApiKey) {
+    this.byHash.set(key.hash, key);
   }
 
-  async findById(id: string) {
-    return [...this.keys.values()].find((k) => k.id === id) ?? null;
+  findByHash(hash: string): ApiKey | undefined {
+    return this.byHash.get(hash);
   }
 
-  async save(key: ApiKey) {
-    this.keys.set(key.hash, key);
+  remove(hash: string) {
+    this.byHash.delete(hash);
   }
-}
-
-let activeStore: ApiKeyStore | undefined;
-
-export function setApiKeyStore(store: ApiKeyStore): void {
-  activeStore = store;
-}
-
-export function getApiKeyByHash(hash: string, legacyRaw?: string): Promise<ApiKey | null> {
-  if (!activeStore) throw new Error('API key store has not been configured');
-  return activeStore.findByHash(hash, legacyRaw);
 }

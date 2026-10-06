@@ -1012,7 +1012,7 @@ async def generate_image(req: ImageGenRequest, request: Request, user: dict = De
         img_bytes = None if from_gateway else await _try_upstream_image(prompt)
         if img_bytes is None and not EMERGENT_LLM_KEY:
             raise HTTPException(status_code=503, detail={
-                "code": "FRB-UPSTREAM",
+                "code": "FRB-UPSTREAM", "error": "service_unavailable",
                 "message": "No image route available. Configure LUCHII_UPSTREAM_URL + LUCHII_UPSTREAM_API_KEY (Frasberg gateway)."})
         if img_bytes is None:
             image_gen = OpenAIImageGeneration(api_key=EMERGENT_LLM_KEY)
@@ -1083,7 +1083,7 @@ def _check_rate_limit(key_val: str, limit: int):
     if len(hits) >= limit:
         retry = max(1, int(61 - (now - hits[0])))
         raise HTTPException(status_code=429,
-                            detail={"error": "RATE_LIMIT_EXCEEDED", "code": "FK-429", "message": f"Rate limit exceeded: {limit} requests per minute"},
+                            detail={"error": "rate_limit_exceeded", "code": "FK-429", "message": f"Rate limit exceeded: {limit} requests per minute"},
                             headers={"Retry-After": str(retry)})
     hits.append(now)
 
@@ -1106,7 +1106,7 @@ def engine_auth_factory(required_perm=None):
         if key_val:
             doc = await db.api_keys.find_one({"key": key_val, "status": {"$ne": "revoked"}}, {"_id": 0})
             if not doc:
-                raise HTTPException(status_code=401, detail={"error": "KEY_NOT_FOUND", "code": "FK-001", "message": "Invalid API key"})
+                raise HTTPException(status_code=401, detail={"error": "key_not_found", "code": "FK-001", "message": "Invalid API key"})
             _check_rate_limit(key_val, int(doc.get("rate_limit_per_min") or ENGINE_KEY_RATE_LIMIT))
             if required_perm:
                 perms = doc.get("permissions") or {}
@@ -1115,10 +1115,10 @@ def engine_auth_factory(required_perm=None):
                     aliases = LEGACY_PERM_ALIASES.get(required_perm, ())
                     granted = any(perms.get(a) not in (None, "no_access") for a in aliases)
                 if not granted:
-                    raise HTTPException(status_code=403, detail={"error": "PERMISSION_DENIED", "required": required_perm, "code": "FK-003", "message": f"Missing permission: {required_perm}"})
+                    raise HTTPException(status_code=403, detail={"error": "permission_denied", "required": required_perm, "code": "FK-003", "message": f"Missing permission: {required_perm}"})
             u = await db.users.find_one({"id": doc["user_id"]}, {"_id": 0, "password": 0})
             if not u:
-                raise HTTPException(status_code=401, detail={"code": "FK-001", "message": "Invalid API key"})
+                raise HTTPException(status_code=403, detail={"error": "owner_not_found", "code": "FK-004", "message": "Key owner account no longer exists"})
             return u
         return await auth_module.get_current_user(request)
     return dep

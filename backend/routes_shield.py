@@ -288,7 +288,7 @@ async def shield_middleware(request: Request, call_next):
                 "strikes": entry["strikes"], "ip": ip,
                 "notice": "FRASBERG INC. security systems have flagged and banned this IP."})
         return JSONResponse(status_code=429, content={
-            "error": "RATE_LIMIT_EXCEEDED", "message": f"Too many requests. Limit: {SHIELD_RATE_MAX} req/min.",
+            "error": "rate_limit_exceeded", "message": f"Too many requests. Limit: {SHIELD_RATE_MAX} req/min.",
             "strikes": entry["strikes"], "strikeLimit": SHIELD_STRIKE_LIMIT,
             "retryAfter": int(entry["ws"] + 60 - now_t),
             "warning": f"{SHIELD_STRIKE_LIMIT - entry['strikes']} strike(s) remaining before IP ban.",

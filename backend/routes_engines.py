@@ -169,10 +169,10 @@ async def engine_ctx(request: Request) -> dict:
     if key_val:
         doc = await db.api_keys.find_one({"key": key_val, "status": {"$ne": "revoked"}}, {"_id": 0})
         if not doc:
-            raise HTTPException(status_code=401, detail={"error": "KEY_NOT_FOUND", "code": "FK-001", "message": "Invalid API key"})
+            raise HTTPException(status_code=401, detail={"error": "key_not_found", "code": "FK-001", "message": "Invalid API key"})
         u = await db.users.find_one({"id": doc["user_id"]}, {"_id": 0, "password": 0})
         if not u:
-            raise HTTPException(status_code=401, detail={"error": "KEY_NOT_FOUND", "code": "FK-001", "message": "Invalid API key"})
+            raise HTTPException(status_code=401, detail={"error": "key_not_found", "code": "FK-001", "message": "Invalid API key"})
         return {"user": u, "key": doc}
     u = await auth_module.get_current_user(request)
     return {"user": u, "key": None}
@@ -326,6 +326,37 @@ class GT6Request(BaseModel):
     max_cost_weight: int = 8
     steps: int = 10
     race_config: Optional[Dict[str, Any]] = None
+
+
+@router.get("/v1/runtime/health")
+async def runtime_health():
+    """luchii-health contract: RuntimeHealth[] — service / healthy|degraded|offline / latencyMs."""
+    import server as _srv
+    services = []
+    t0 = time.time()
+    try:
+        await db.command("ping")
+        services.append({"service": "database", "status": "healthy", "latencyMs": round((time.time() - t0) * 1000, 1)})
+    except Exception:
+        services.append({"service": "database", "status": "offline", "latencyMs": round((time.time() - t0) * 1000, 1)})
+    up = getattr(_srv, "ACTIVE_UPSTREAM", None)
+    if up:
+        import httpx
+        t1 = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=4) as c:
+                r = await c.get(f"{up.split('/v1/')[0].rstrip('/')}/v1/health")
+            services.append({"service": "luchii-router", "status": "healthy" if r.status_code == 200 else "degraded",
+                             "latencyMs": round((time.time() - t1) * 1000, 1)})
+        except Exception:
+            services.append({"service": "luchii-router", "status": "offline", "latencyMs": round((time.time() - t1) * 1000, 1)})
+    else:
+        services.append({"service": "luchii-router", "status": "degraded", "latencyMs": 0,
+                         "note": "LUCHII_UPSTREAM_URL not configured — engine core serving"})
+    services.append({"service": "platform-api", "status": "healthy", "latencyMs": 0})
+    worst = "offline" if any(s["status"] == "offline" for s in services) else (
+        "degraded" if any(s["status"] == "degraded" for s in services) else "healthy")
+    return {"status": worst, "services": services, "timestamp": _now_ms()}
 
 
 @router.get("/v1/engines")

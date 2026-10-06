@@ -1,8 +1,13 @@
-import type { ApiKey } from './api-key';
-import type { ApiKeyStore } from './api-key-store';
+import { ApiKey } from "./api-key";
 
-export async function recordUsage(store: ApiKeyStore, key: ApiKey): Promise<ApiKey> {
-  const updated = { ...key, requestsToday: key.requestsToday + 1 };
-  await store.save(updated);
-  return updated;
+export type UsageResult =
+  | { ok: true }
+  | { ok: false; status: 429; error: "rate_limit_exceeded"; limit: number };
+
+export function trackUsage(key: ApiKey, dailyLimit: number): UsageResult {
+  if (key.requestsToday >= dailyLimit) {
+    return { ok: false, status: 429, error: "rate_limit_exceeded", limit: dailyLimit };
+  }
+  key.requestsToday += 1;
+  return { ok: true };
 }

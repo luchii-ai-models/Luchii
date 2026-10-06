@@ -1,18 +1,16 @@
-import { checkService } from './health-check';
-import type { RuntimeHealth } from './status';
+import { RuntimeHealth } from "./status";
+import { checkService } from "./health-check";
 
-export class HealthMonitor {
-  private latest = new Map<string, RuntimeHealth>();
-
-  constructor(private targets: Record<string, string>) {}
-
-  async poll(): Promise<RuntimeHealth[]> {
-    const results = await Promise.all(Object.entries(this.targets).map(([name, url]) => checkService(name, url)));
-    results.forEach((r) => this.latest.set(r.service, r));
-    return results;
-  }
-
-  get(service: string): RuntimeHealth | undefined {
-    return this.latest.get(service);
-  }
+export function startMonitor(
+  targets: { service: string; url: string }[],
+  onReport: (report: RuntimeHealth[]) => void,
+  intervalMs = 30000,
+) {
+  const tick = async () => {
+    const report = await Promise.all(targets.map((t) => checkService(t.service, t.url)));
+    onReport(report);
+  };
+  tick();
+  const timer = setInterval(tick, intervalMs);
+  return () => clearInterval(timer);
 }

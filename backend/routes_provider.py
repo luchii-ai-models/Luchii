@@ -172,7 +172,7 @@ async def oai_chat_completions(body: OAIChatBody, authorization: Optional[str] =
             return up
         if not EMERGENT_LLM_KEY:
             raise HTTPException(status_code=503, detail={
-                "code": "FRB-UPSTREAM",
+                "code": "FRB-UPSTREAM", "error": "service_unavailable",
                 "message": "No inference route available. Configure LUCHII_UPSTREAM_URL + LUCHII_UPSTREAM_API_KEY (Frasberg gateway)."})
         llm = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"oai-{completion_id}",
                       system_message=sb).with_model("anthropic", "claude-sonnet-4-6")
