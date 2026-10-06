@@ -1,10 +1,10 @@
-# FrasbergAI Enterprise Contract
+# Frasberg Enterprise Contract
 Version 1.0 — August 2026
 
-This Enterprise Contract ("Contract") governs the use of FrasbergAI's Luchii model family, dedicated infrastructure, and enterprise services.
+This Enterprise Contract ("Contract") governs the use of Frasberg's Luchii model family, dedicated infrastructure, and enterprise services.
 
 ## 1. Scope
-FrasbergAI provides enterprise access to:
+Frasberg provides enterprise access to:
 - Luchii-6-Plus (chat) · Luchii-6-Mini (chat) · Luchii-6-Embed (embeddings)
 - Dedicated clusters · Multi-region failover · Enterprise SLA guarantees
 
@@ -33,7 +33,7 @@ Delaware, United States.
 
 ---
 
-# FrasbergAI Dedicated Cluster Agreement
+# Frasberg Dedicated Cluster Agreement
 Version 1.0 — August 2026
 
 ## 1. Cluster Types
@@ -55,4 +55,4 @@ GPU hours · Replica hours · Region multipliers
 99.995% uptime · <250ms latency · <0.1% error rate
 
 ## 7. Termination
-FrasbergAI may deprovision clusters after contract termination.
+Frasberg may deprovision clusters after contract termination.

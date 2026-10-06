@@ -1,0 +1,32 @@
+{
+  "name": "frasberg-gateway-workspace",
+  "private": true,
+  "scripts": {
+    "start": "RUN_GATEWAY=1 tsx apps/gateway/src/server.ts",
+    "test": "vitest run",
+    "test:gateway": "vitest run apps/gateway/tests packages",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:gateway:coverage": "vitest run apps/gateway/tests packages --coverage",
+    "test:frasberg-core": "vitest run packages/frasberg-core/tests",
+    "test:frasberg-core:coverage": "vitest run packages/frasberg-core/tests --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.5",
+    "express": "^4.19.2",
+    "helmet": "^8.3.0",
+    "ioredis": "^5.4.1",
+    "mongodb": "^6.21.0",
+    "tsx": "^4.20.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.0.0",
+    "@types/supertest": "^6.0.2",
+    "@vitest/coverage-v8": "^2.1.9",
+    "supertest": "^7.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}

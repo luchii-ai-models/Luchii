@@ -1,4 +1,4 @@
-# FrasbergAI Provider SLA Contract
+# Frasberg Provider SLA Contract
 Version 1.0 — August 2026
 
 ## 1. Uptime Guarantee
@@ -27,4 +27,4 @@ Multi-region failover is automatic for enterprise tenants.
 All incidents are posted on https://status.frasberg.com
 
 ## 7. Remedies
-If SLA is not met, FrasbergAI provides service credits.
+If SLA is not met, Frasberg provides service credits.

@@ -169,10 +169,10 @@ async def engine_ctx(request: Request) -> dict:
     if key_val:
         doc = await db.api_keys.find_one({"key": key_val, "status": {"$ne": "revoked"}}, {"_id": 0})
         if not doc:
-            raise HTTPException(status_code=401, detail={"code": "FK-001", "message": "Invalid API key"})
+            raise HTTPException(status_code=401, detail={"error": "KEY_NOT_FOUND", "code": "FK-001", "message": "Invalid API key"})
         u = await db.users.find_one({"id": doc["user_id"]}, {"_id": 0, "password": 0})
         if not u:
-            raise HTTPException(status_code=401, detail={"code": "FK-001", "message": "Invalid API key"})
+            raise HTTPException(status_code=401, detail={"error": "KEY_NOT_FOUND", "code": "FK-001", "message": "Invalid API key"})
         return {"user": u, "key": doc}
     u = await auth_module.get_current_user(request)
     return {"user": u, "key": None}

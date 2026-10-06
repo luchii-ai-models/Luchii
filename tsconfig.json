@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "apps/gateway/src/**/*.ts",
+    "packages/frasberg-core/**/*.ts",
+    "packages/frasberg-identity/**/*.ts",
+    "packages/luchii-api-keys/**/*.ts",
+    "packages/luchii-rate-limiter/**/*.ts",
+    "packages/luchii-model-router/**/*.ts"
+  ],
+  "exclude": ["**/tests/**", "node_modules"]
+}

@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@frasberg-core/*": ["packages/frasberg-core/*"],
+      "@frasberg-identity/*": ["packages/frasberg-identity/*"],
+      "@frasberg-memory/*": ["packages/frasberg-memory/*"],
+      "@frasberg-agents/*": ["packages/frasberg-agents/*"],
+      "@luchii-core/*": ["packages/luchii-core/*"],
+      "@luchii-api-keys/*": ["packages/luchii-api-keys/*"],
+      "@luchii-rate-limiter/*": ["packages/luchii-rate-limiter/*"]
+    }
+  }
+}

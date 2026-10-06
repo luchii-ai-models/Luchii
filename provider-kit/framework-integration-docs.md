@@ -1,4 +1,4 @@
-# Framework Integration Docs — FrasbergAI
+# Framework Integration Docs — Frasberg
 
 ## Vercel AI SDK
 ```ts

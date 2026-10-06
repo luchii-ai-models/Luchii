@@ -1,0 +1,8 @@
+{
+  "name": "@frasberg/luchii-api-keys",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "peerDependencies": { "express": "^4.19.0" },
+  "devDependencies": { "@types/express": "^4.17.21", "@types/node": "^20.0.0" }
+}

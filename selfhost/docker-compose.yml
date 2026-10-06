@@ -10,6 +10,7 @@ services:
     environment:
       MONGO_URL: mongodb://mongo:27017
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
     depends_on:
       - mongo
       - redis

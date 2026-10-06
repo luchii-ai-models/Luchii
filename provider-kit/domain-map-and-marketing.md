@@ -1,4 +1,4 @@
-# FrasbergAI — Official Domain Map (Aug 2026)
+# Frasberg — Official Domain Map (Aug 2026)
 
 | Surface | URL |
 |---|---|
@@ -15,13 +15,13 @@ DNS setup needed at Cloudflare: `api`, `status`, `docs` subdomains pointing at t
 
 # Marketing Kit
 
-**Tagline:** FrasbergAI — Intelligence, delivered.
+**Tagline:** Frasberg — Intelligence, delivered.
 
 **Brand messaging:** Enterprise-grade AI infrastructure · Developer-first design · Global reliability · Privacy by default · Modern, OpenAI-compatible API
 
 **Ad copy (short):** Build with Luchii. Deploy with confidence.
 
-**Ad copy (long):** FrasbergAI delivers long-context reasoning, high-performance embeddings, and real-time streaming through a modern, OpenAI-compatible API. Built for developers. Trusted by enterprise.
+**Ad copy (long):** Frasberg delivers long-context reasoning, high-performance embeddings, and real-time streaming through a modern, OpenAI-compatible API. Built for developers. Trusted by enterprise.
 
 **Banner headlines:**
 - "Meet Luchii — your new AI engine."
@@ -29,14 +29,14 @@ DNS setup needed at Cloudflare: `api`, `status`, `docs` subdomains pointing at t
 - "128k context. Real-time streaming. Zero retention."
 
 **Social launch post:**
-> FrasbergAI is now live. The Luchii model family delivers long-context reasoning, high-performance embeddings, and real-time SSE streaming — all through a modern, OpenAI-compatible API. Build with confidence. Deploy at scale. FrasbergAI — Intelligence, delivered.
+> Frasberg is now live. The Luchii model family delivers long-context reasoning, high-performance embeddings, and real-time SSE streaming — all through a modern, OpenAI-compatible API. Build with confidence. Deploy at scale. Frasberg — Intelligence, delivered.
 
 # Hero / Website Copy (canonical)
 
-**Hero:** FrasbergAI — Intelligence, delivered.
-The Luchii model family is now publicly available through the FrasbergAI Platform — offering long-context reasoning, high-performance embeddings, and real-time SSE streaming through a modern, OpenAI-compatible API.
+**Hero:** Frasberg — Intelligence, delivered.
+The Luchii model family is now publicly available through the Frasberg Platform — offering long-context reasoning, high-performance embeddings, and real-time SSE streaming through a modern, OpenAI-compatible API.
 CTAs: Get Started → · View Docs → · Generate API Key →
 
-**Why FrasbergAI:** Enterprise-grade performance (128k context, low latency, multi-region) · Developer-first design (OpenAI-compatible, SSE, SDKs) · Global reliability (99.99% SLA, failover, dedicated clusters) · Privacy by default (no prompt/output retention, metadata-only logging)
+**Why Frasberg:** Enterprise-grade performance (128k context, low latency, multi-region) · Developer-first design (OpenAI-compatible, SSE, SDKs) · Global reliability (99.99% SLA, failover, dedicated clusters) · Privacy by default (no prompt/output retention, metadata-only logging)
 
-**Footer:** © 2026 FrasbergAI — Powered by Frasberg.com
+**Footer:** © 2026 Frasberg — Powered by Frasberg.com

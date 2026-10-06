@@ -1,0 +1,9 @@
+{
+  "name": "@frasberg/luchii-rate-limiter",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "dependencies": { "ioredis": "^5.4.1" },
+  "peerDependencies": { "express": "^4.19.0" },
+  "devDependencies": { "@types/express": "^4.17.21" }
+}

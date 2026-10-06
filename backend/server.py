@@ -1,5 +1,6 @@
 from fastapi import FastAPI, APIRouter, Header, HTTPException, Depends, Request, UploadFile, File, Response
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.exception_handlers import http_exception_handler
 import subprocess
 from sse_utils import guard_stream
 from dotenv import load_dotenv
@@ -162,6 +163,23 @@ async def _try_upstream(message: str, system_base: str, model: str):
 
 
 app = FastAPI()
+
+
+@app.exception_handler(HTTPException)
+async def _standard_http_error(request: Request, exc: HTTPException):
+    """Gateway-standard error body; legacy `detail` is kept so existing clients and tests keep working."""
+    d = exc.detail
+    if not (isinstance(d, dict) and isinstance(d.get("error"), str)):
+        return await http_exception_handler(request, exc)
+    incoming = request.headers.get("x-request-id", "")
+    rid = incoming if re.fullmatch(r"req_[A-Za-z0-9_-]{8,128}", incoming) else f"req_{uuid.uuid4().hex}"
+    err = {"code": d["error"], "message": d.get("message", "")}
+    if d.get("required"):
+        err["required"] = d["required"]
+    headers = dict(exc.headers or {})
+    headers["x-request-id"] = rid
+    return JSONResponse(status_code=exc.status_code, headers=headers,
+                        content={"success": False, "requestId": rid, "error": err, "detail": d})
 
 
 
@@ -1061,7 +1079,7 @@ def _check_rate_limit(key_val: str, limit: int):
     if len(hits) >= limit:
         retry = max(1, int(61 - (now - hits[0])))
         raise HTTPException(status_code=429,
-                            detail={"code": "FK-429", "message": f"Rate limit exceeded: {limit} requests per minute"},
+                            detail={"error": "RATE_LIMIT_EXCEEDED", "code": "FK-429", "message": f"Rate limit exceeded: {limit} requests per minute"},
                             headers={"Retry-After": str(retry)})
     hits.append(now)
 
@@ -1084,7 +1102,7 @@ def engine_auth_factory(required_perm=None):
         if key_val:
             doc = await db.api_keys.find_one({"key": key_val, "status": {"$ne": "revoked"}}, {"_id": 0})
             if not doc:
-                raise HTTPException(status_code=401, detail={"code": "FK-001", "message": "Invalid API key"})
+                raise HTTPException(status_code=401, detail={"error": "KEY_NOT_FOUND", "code": "FK-001", "message": "Invalid API key"})
             _check_rate_limit(key_val, int(doc.get("rate_limit_per_min") or ENGINE_KEY_RATE_LIMIT))
             if required_perm:
                 perms = doc.get("permissions") or {}
@@ -1093,7 +1111,7 @@ def engine_auth_factory(required_perm=None):
                     aliases = LEGACY_PERM_ALIASES.get(required_perm, ())
                     granted = any(perms.get(a) not in (None, "no_access") for a in aliases)
                 if not granted:
-                    raise HTTPException(status_code=403, detail={"code": "FK-003", "message": f"Missing permission: {required_perm}"})
+                    raise HTTPException(status_code=403, detail={"error": "PERMISSION_DENIED", "required": required_perm, "code": "FK-003", "message": f"Missing permission: {required_perm}"})
             u = await db.users.find_one({"id": doc["user_id"]}, {"_id": 0, "password": 0})
             if not u:
                 raise HTTPException(status_code=401, detail={"code": "FK-001", "message": "Invalid API key"})
@@ -2161,7 +2179,7 @@ async def create_indexes():
     def _preload_ml():
         try:
             avail = voice_engine._mem_available_gb()
-            if avail < 5:
+            if avail < 2.5:
                 logger.warning("Deferring ML preload — only %.1f GB memory available (memory vault + voice engines will lazy-load on demand)", avail)
                 return
             memory_vault.preload_sync()

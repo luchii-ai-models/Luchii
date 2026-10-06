@@ -2,7 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app/backend
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
+COPY .emergent/system_deps.txt /tmp/system_deps.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && xargs -r apt-get install -y --no-install-recommends < /tmp/system_deps.txt \
+    && rm -rf /var/lib/apt/lists/* /tmp/system_deps.txt
 
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \

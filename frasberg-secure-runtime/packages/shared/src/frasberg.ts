@@ -18,15 +18,40 @@ export interface FrasbergGatewayKeys {
 export interface FrasbergClientOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
+  sleepImpl?: (ms: number) => Promise<void>;
 }
 
 export type FrasbergEndpoints = Partial<Record<FrasbergDomain, string>>;
+
+export interface FrasbergProviderStatus {
+  domain: FrasbergDomain;
+  keyConfigured: boolean;
+  endpoint: string;
+  reachable?: boolean;
+  endpointStatus?: number;
+  keyAccepted?: boolean;
+  keyStatus?: number;
+  error?: string;
+}
 
 export class FrasbergClient {
   readonly baseUrl: string;
 
   constructor(private readonly options: FrasbergClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? 'https://frasberg.com/api';
+  }
+
+  resolveUrl(path: string): string {
+    return /^https?:\/\//i.test(path) ? path : `${this.baseUrl}${path}`;
+  }
+
+  async probe(url: string, key?: string): Promise<number> {
+    const fetchImpl = this.options.fetchImpl ?? fetch;
+    const response = await fetchImpl(url, {
+      method: 'GET',
+      headers: key ? { authorization: ['Bearer', key].join(' ') } : {},
+    });
+    return response.status;
   }
 
   async request<TResponse>(
@@ -44,28 +69,66 @@ export class FrasbergClient {
       ? path
       : `${this.baseUrl}${path}`;
     const isFormData = payload instanceof FormData;
-    const response = await fetchImpl(requestUrl, {
-      method,
-      headers: {
-        authorization: ['Bearer', key].join(' '),
-        ...(payload === undefined || isFormData
+    // Only idempotent reads are retried; retrying a POST could duplicate a job.
+    const attempts =
+      method === 'GET' ? TRANSIENT_RETRY_DELAYS_MS.length + 1 : 1;
+    let response: Response;
+    for (let attempt = 0; ; attempt += 1) {
+      response = await fetchImpl(requestUrl, {
+        method,
+        headers: {
+          authorization: ['Bearer', key].join(' '),
+          ...(payload === undefined || isFormData
+            ? {}
+            : { 'content-type': 'application/json' }),
+        },
+        ...(payload === undefined
           ? {}
-          : { 'content-type': 'application/json' }),
-      },
-      ...(payload === undefined
-        ? {}
-        : { body: isFormData ? payload : JSON.stringify(payload) }),
-    });
-
-    const body = (await response.json()) as TResponse;
-    if (!response.ok) {
-      throw new Error(
-        `Frasberg request failed (${response.status}): ${JSON.stringify(body)}`,
+          : { body: isFormData ? payload : JSON.stringify(payload) }),
+      });
+      if (
+        !TRANSIENT_EDGE_STATUSES.has(response.status) ||
+        attempt + 1 >= attempts
+      ) {
+        break;
+      }
+      await (this.options.sleepImpl ?? defaultSleep)(
+        TRANSIENT_RETRY_DELAYS_MS[attempt] ?? 0,
       );
     }
-    return body;
+
+    const text = await response.text();
+    let body: unknown;
+    try {
+      body = text.length > 0 ? JSON.parse(text) : {};
+    } catch {
+      // Edge errors (for example Cloudflare 520) return HTML, not JSON.
+      body = undefined;
+    }
+    if (!response.ok) {
+      const detail =
+        body === undefined
+          ? 'non-JSON response from provider edge'
+          : JSON.stringify(body);
+      throw new Error(
+        `Frasberg request failed (${response.status}): ${detail}`,
+      );
+    }
+    if (body === undefined) {
+      throw new Error(
+        `Frasberg request returned a non-JSON response (${response.status}).`,
+      );
+    }
+    return body as TResponse;
   }
 }
+
+const TRANSIENT_EDGE_STATUSES = new Set([
+  502, 503, 504, 520, 521, 522, 523, 524,
+]);
+const TRANSIENT_RETRY_DELAYS_MS = [500, 1500];
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 const DOMAIN_KEY_MAP: Record<FrasbergDomain, keyof FrasbergGatewayKeys> = {
   music: 'FRASBERG_MUSIC_KEY',
@@ -106,6 +169,13 @@ export class FrasbergGateway {
     return this.submit<TResponse>('image', '/image', payload);
   }
 
+  async imageForUser<TResponse>(
+    payload: unknown,
+    accessToken: string,
+  ): Promise<TResponse> {
+    return this.submit<TResponse>('image', '/image', payload, accessToken);
+  }
+
   async voice<TResponse>(payload: unknown): Promise<TResponse> {
     return this.submit<TResponse>('voice', '/voice', payload);
   }
@@ -124,7 +194,7 @@ export class FrasbergGateway {
 
   async job<TResponse>(
     id: string,
-    options: { domain?: FrasbergDomain } = {},
+    options: { domain?: FrasbergDomain; accessToken?: string } = {},
   ): Promise<TResponse> {
     const domain = options.domain ?? this.jobDomains.get(id) ?? 'music';
     const engineKeyName =
@@ -137,7 +207,51 @@ export class FrasbergGateway {
     return this.client.request(
       'GET',
       `/jobs/${id}`,
-      engineKey ?? this.keyFor(domain),
+      options.accessToken ?? engineKey ?? this.keyFor(domain),
+    );
+  }
+
+  // Read-only: never submits a job and never returns key values.
+  async diagnose(): Promise<FrasbergProviderStatus[]> {
+    const domains: FrasbergDomain[] = [
+      'music',
+      'video',
+      'image',
+      'voice',
+      'stt',
+      'tts',
+      'audio',
+    ];
+    return Promise.all(
+      domains.map(async (domain): Promise<FrasbergProviderStatus> => {
+        const keyName = DOMAIN_KEY_MAP[domain];
+        const key = this.keys[keyName];
+        const endpoint = this.client.resolveUrl(
+          this.endpoints[domain] ?? `/${domain}`,
+        );
+        const status: FrasbergProviderStatus = {
+          domain,
+          keyConfigured: Boolean(key),
+          endpoint,
+        };
+        try {
+          const reach = await this.client.probe(endpoint);
+          status.endpointStatus = reach;
+          status.reachable = reach < 500;
+          if (key) {
+            const auth = await this.client.probe(
+              this.client.resolveUrl('/jobs/diagnostic-probe'),
+              key,
+            );
+            status.keyAccepted = auth !== 401 && auth !== 403;
+            status.keyStatus = auth;
+          }
+        } catch (error) {
+          status.reachable = false;
+          status.error = (error as Error).message;
+        }
+        return status;
+      }),
     );
   }
 
@@ -145,11 +259,12 @@ export class FrasbergGateway {
     domain: FrasbergDomain,
     path: string,
     payload: unknown,
+    accessToken?: string,
   ): Promise<TResponse> {
     const response = await this.client.request<TResponse>(
       'POST',
       this.endpoints[domain] ?? path,
-      this.keyFor(domain),
+      accessToken ?? this.keyFor(domain),
       payload,
     );
     const id = extractJobId(response);
@@ -250,7 +365,7 @@ function readBundledEngineKeys(raw: string | undefined): FrasbergGatewayKeys {
   return {
     FRASBERG_MUSIC_KEY: readKey('FRB_MUSIC_GENERATION_KEY'),
     FRASBERG_MUSIC_ENGINE_KEY: readKey('FRB_MUSIC_ENGINE_KEY'),
-    FRASBERG_VIDEO_KEY: readKey('FRB_VIDEO_ENGINE_KEY'),
+    FRASBERG_VIDEO_KEY: readKey('FRB_IMAGE_VIDEO_GENERATION_KEY'),
     FRASBERG_VIDEO_ENGINE_KEY: readKey('FRB_VIDEO_ENGINE_KEY'),
     FRASBERG_IMAGE_KEY: readKey('FRB_IMAGE_VIDEO_GENERATION_KEY'),
     FRASBERG_VOICE_KEY: readKey('FRB_VOICE_CLONING_KEY'),

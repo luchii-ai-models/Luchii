@@ -10,6 +10,7 @@ import Landing from "./pages/Landing";
 import Contact from "./pages/Contact";
 import DatabaseManager from "./pages/DatabaseManager";
 import Dashboard from "./pages/Dashboard";
+import ApiKeysSettings from "./pages/ApiKeysSettings";
 import Docs from "./pages/Docs";
 import Legal from "./pages/Legal";
 import Court from "./pages/Court";
@@ -117,6 +118,7 @@ function App() {
               <Route path="/luchii-code" element={<LuchiiCode />} />
               <Route path="/coding-agents" element={<CodingAgents />} />
               <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/settings/api-keys" element={<AuthGate><ApiKeysSettings /></AuthGate>} />
               <Route path="/docs" element={<Docs />} />
               <Route path="/legal" element={<Legal />} />
               <Route path="/court" element={<CourtGate><Court /></CourtGate>} />

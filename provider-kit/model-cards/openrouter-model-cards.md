@@ -1,5 +1,5 @@
 # Luchii-6-Plus
-Provider: FrasbergAI
+Provider: Frasberg
 Model Type: Chat / Text Generation
 Context Window: 128,000 tokens
 Streaming: SSE (Server-Sent Events)
@@ -7,7 +7,7 @@ Authentication: Bearer Token
 Endpoint: https://api.frasberg.com/v1/chat/completions
 
 ## Description
-Luchii-6-Plus is FrasbergAI's flagship chat model optimized for reasoning, multi-step tasks, and long-context conversations. Fully compatible with OpenAI-style chat completions.
+Luchii-6-Plus is Frasberg's flagship chat model optimized for reasoning, multi-step tasks, and long-context conversations. Fully compatible with OpenAI-style chat completions.
 
 ## Capabilities
 - Advanced reasoning
@@ -28,7 +28,7 @@ Luchii-6-Plus is FrasbergAI's flagship chat model optimized for reasoning, multi
 ---
 
 # Luchii-6-Mini
-Provider: FrasbergAI
+Provider: Frasberg
 Model Type: Chat / Lightweight Text Generation
 Context Window: 64,000 tokens
 Streaming: SSE
@@ -44,7 +44,7 @@ Luchii-6-Mini is a fast, cost-efficient chat model ideal for assistants, agents,
 ---
 
 # Luchii-6-Embed
-Provider: FrasbergAI
+Provider: Frasberg
 Model Type: Embeddings
 Embedding Size: 384 dimensions
 Authentication: Bearer Token

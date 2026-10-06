@@ -15,16 +15,46 @@ The gateway task reads the governance admin and consolidated engine-key
 secrets from Secrets Manager. The engine-key JSON maps its FRB_* fields to the
 FRASBERG_* domain clients and fails on malformed JSON. Music generation uses
 `FRB_MUSIC_GENERATION_KEY`, while music job polling uses
-`FRB_MUSIC_ENGINE_KEY`. Video operations use `FRB_VIDEO_ENGINE_KEY`; image
-operations use `FRB_IMAGE_VIDEO_GENERATION_KEY`. Audio, voice, STT, and TTS use
-their matching FRB_* keys. Provider submission routes are configured through
-the matching `FRASBERG_*_URL` task environment variables so each engine uses
-its explicit provider endpoint.
+`FRB_MUSIC_ENGINE_KEY`. Image and video generation both use
+`FRB_IMAGE_VIDEO_GENERATION_KEY`; video job polling uses
+`FRB_VIDEO_ENGINE_KEY`. Voice uses `FRB_VOICE_CLONING_KEY`; STT and TTS use
+`FRB_GATEWAY_STT_KEY` and `FRB_GATEWAY_TTS_KEY`; audio enhancement uses
+`FRB_AUDIO_TOOLS_KEY`. Explicit `FRASBERG_*_KEY` environment variables
+override their corresponding values from the consolidated secret. Provider
+submission routes are configured through the matching `FRASBERG_*_URL` task
+environment variables so each engine uses its explicit provider endpoint.
 The provider's own application uses `/api/audio/tools/enhance`,
 `/api/voice/transcribe`, and `/api/voice/speak` for audio enhancement,
 transcription, and speech generation respectively; the production task uses
 those exact routes. STT requests to this gateway must upload an audio file as
-`multipart/form-data`.
+`multipart/form-data`. Image requests may authenticate with a verified
+Supabase user session; the gateway verifies the user with Supabase Auth and
+forwards that session to the configured image endpoint so website entitlement
+checks remain authoritative. Existing API-key image requests continue to use
+the `media` permission and the configured image API key.
+
+## Shared runtime state and Studio
+
+`infra/aws/runtime-storage.yaml` provisions the private S3 bucket,
+DynamoDB table, and ECS task role used by GT6 state, replay frames, Studio
+stories/camera selections, creator records, and export-job status. The
+production stack `frasberg-secure-runtime-storage` has been deployed in
+`us-west-2`. Its outputs are injected as `RUNTIME_STATE_TABLE` and
+`RUNTIME_ASSETS_BUCKET`, and the ECS task definition uses the
+`frasberg-secure-runtime-task` role. The S3 bucket blocks public access;
+completed export jobs return short-lived presigned download URLs.
+
+The gateway image builds `studio/` and serves its Vite output from the same
+origin as the `/api` routes. Studio CI checks the frontend build, and the ECS
+image build repeats it before deployment. The container includes FFmpeg and
+uses 1 GiB of memory. The current FFmpeg worker still emits a color placeholder
+because no GT6 rendered-frame source or audio-mixing pipeline exists yet; Studio
+labels that output instead of presenting it as race footage.
+
+GitHub releases are listed through `GET /api/releases`. Publishing from Studio
+requires a dedicated `GITHUB_RELEASE_TOKEN` secret with release-write access;
+the production task does not currently receive that token. Releases can still
+be published by the repository's authorized GitHub maintainers.
 
 `infra/iam/frasberg-secure-runtime-role.json` is an IAM permissions policy for
 the ECS task execution role, which retrieves task-definition secrets and

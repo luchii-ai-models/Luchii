@@ -72,6 +72,56 @@ describe('FrasbergClient', () => {
     expect(headers.get('authorization')).toBe('Bearer stt-key');
     expect(headers.has('content-type')).toBe(false);
   });
+
+  it('retries transient edge errors on GET and then succeeds', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(
+        async () => new Response('<html>520</html>', { status: 520 }),
+      )
+      .mockImplementationOnce(async () =>
+        jsonResponse({ id: 'j', state: 'completed' }),
+      );
+    const sleepImpl = vi.fn(async () => undefined);
+    const client = new FrasbergClient({
+      fetchImpl: fetchImpl as typeof fetch,
+      sleepImpl,
+    });
+
+    await expect(client.request('GET', '/jobs/j', 'k')).resolves.toEqual({
+      id: 'j',
+      state: 'completed',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(sleepImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry POST on edge errors and reports status for non-JSON bodies', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('<html>520</html>', { status: 520 }),
+    );
+    const client = new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch });
+
+    await expect(
+      client.request('POST', '/tts', 'k', { text: 'hi' }),
+    ).rejects.toThrow(
+      'Frasberg request failed (520): non-JSON response from provider edge',
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops retrying GET after the bounded attempts', async () => {
+    const fetchImpl = vi.fn(async () => new Response('x', { status: 520 }));
+    const client = new FrasbergClient({
+      fetchImpl: fetchImpl as typeof fetch,
+      sleepImpl: async () => undefined,
+    });
+
+    await expect(client.request('GET', '/jobs/j', 'k')).rejects.toThrow(
+      '(520)',
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('FrasbergGateway', () => {
@@ -105,6 +155,15 @@ describe('FrasbergGateway', () => {
     await gateway.job('job-1');
 
     expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://frasberg.com/api/music',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: ['Bearer', 'music-key'].join(' '),
+        }),
+      }),
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
       2,
       'https://frasberg.com/api/jobs/job-1',
       expect.objectContaining({
@@ -135,6 +194,15 @@ describe('FrasbergGateway', () => {
     await gateway.video({ prompt: 'generate video' });
     await gateway.job('video-job');
 
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://frasberg.com/api/video',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: ['Bearer', 'video-generation-key'].join(' '),
+        }),
+      }),
+    );
     expect(fetchImpl).toHaveBeenNthCalledWith(
       2,
       'https://frasberg.com/api/jobs/video-job',
@@ -192,6 +260,46 @@ describe('FrasbergGateway', () => {
     );
   });
 
+  it('forwards a Supabase user token for website-authenticated image jobs', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ job_id: 'image-user-job' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'image-user-job' }));
+    const gateway = new FrasbergGateway(
+      new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch }),
+      { FRASBERG_IMAGE_KEY: 'service-image-key' },
+      { image: 'https://frasberg.com/api/generate/image' },
+    );
+
+    await gateway.imageForUser(
+      { prompt: 'a track at sunset' },
+      'supabase-user-token',
+    );
+    await gateway.job('image-user-job', {
+      domain: 'image',
+      accessToken: 'supabase-user-token',
+    });
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://frasberg.com/api/generate/image',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: 'Bearer supabase-user-token',
+        }),
+      }),
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      'https://frasberg.com/api/jobs/image-user-job',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: 'Bearer supabase-user-token',
+        }),
+      }),
+    );
+  });
+
   it('routes provider requests to configured domain endpoints', async () => {
     const fetchImpl = vi.fn(async () =>
       jsonResponse({ job_id: 'job-1', state: 'queued' }),
@@ -223,7 +331,7 @@ describe('FrasbergGateway', () => {
     );
   });
 
-  it('maps the consolidated engine secret and lets explicit keys override it', () => {
+  it('maps each consolidated provider key to its domain', () => {
     const resolved = resolveFrasbergGatewayKeys({
       FRASBERG_ENGINE_KEYS_JSON: JSON.stringify({
         FRB_MUSIC_GENERATION_KEY: 'music-from-secret',
@@ -231,19 +339,42 @@ describe('FrasbergGateway', () => {
         FRB_IMAGE_VIDEO_GENERATION_KEY: 'image-video-from-secret',
         FRB_VIDEO_ENGINE_KEY: 'video-engine-from-secret',
         FRB_VOICE_CLONING_KEY: 'voice-from-secret',
+        FRB_GATEWAY_STT_KEY: 'stt-field',
+        FRB_GATEWAY_TTS_KEY: 'tts-field',
+        FRB_AUDIO_TOOLS_KEY: 'audio-tools-from-secret',
       }),
-      FRASBERG_MUSIC_KEY: 'music-override',
-      FRASBERG_IMAGE_KEY: '',
     } as NodeJS.ProcessEnv);
 
     expect(resolved).toMatchObject({
-      FRASBERG_MUSIC_KEY: 'music-override',
+      FRASBERG_MUSIC_KEY: 'music-from-secret',
       FRASBERG_MUSIC_ENGINE_KEY: 'music-engine-from-secret',
-      FRASBERG_VIDEO_KEY: 'video-engine-from-secret',
+      FRASBERG_VIDEO_KEY: 'image-video-from-secret',
       FRASBERG_VIDEO_ENGINE_KEY: 'video-engine-from-secret',
       FRASBERG_IMAGE_KEY: 'image-video-from-secret',
       FRASBERG_VOICE_KEY: 'voice-from-secret',
+      FRASBERG_STT_KEY: 'stt-field',
+      FRASBERG_TTS_KEY: 'tts-field',
+      FRASBERG_AUDIO_KEY: 'audio-tools-from-secret',
     });
+
+    expect(
+      resolveFrasbergGatewayKeys({
+        FRASBERG_ENGINE_KEYS_JSON: JSON.stringify({
+          FRB_MUSIC_GENERATION_KEY: 'music-from-secret',
+        }),
+        FRASBERG_MUSIC_KEY: 'music-override',
+      } as NodeJS.ProcessEnv).FRASBERG_MUSIC_KEY,
+    ).toBe('music-override');
+
+    const sharedImageVideo = resolveFrasbergGatewayKeys({
+      FRASBERG_ENGINE_KEYS_JSON: JSON.stringify({
+        FRB_IMAGE_VIDEO_GENERATION_KEY: 'shared-image-video-key',
+        FRB_VIDEO_ENGINE_KEY: 'video-polling-key',
+      }),
+    } as NodeJS.ProcessEnv);
+    expect(sharedImageVideo.FRASBERG_IMAGE_KEY).toBe('shared-image-video-key');
+    expect(sharedImageVideo.FRASBERG_VIDEO_KEY).toBe('shared-image-video-key');
+    expect(sharedImageVideo.FRASBERG_VIDEO_ENGINE_KEY).toBe('video-polling-key');
   });
 
   it('fails startup for malformed consolidated engine-key JSON', () => {
