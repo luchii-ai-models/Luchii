@@ -20,7 +20,10 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 auth_module.setup(db)
 
-EMERGENT_LLM_KEY = os.environ['EMERGENT_LLM_KEY']
+# EMERGENT_LLM_KEY is OPTIONAL everywhere. Primary inference route = Frasberg gateway
+# (LUCHII_UPSTREAM_URL + LUCHII_UPSTREAM_API_KEY). Without either, endpoints return a
+# clean 503 FRB-UPSTREAM. User mandate: never make this key a hard requirement again.
+EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
 
 logging.basicConfig(
     level=logging.INFO,

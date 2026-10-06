@@ -1010,6 +1010,10 @@ async def generate_image(req: ImageGenRequest, request: Request, user: dict = De
         # Loop guard: requests arriving FROM the gateway must not route back upstream to it
         from_gateway = bool(request.headers.get("x-frasberg-gateway"))
         img_bytes = None if from_gateway else await _try_upstream_image(prompt)
+        if img_bytes is None and not EMERGENT_LLM_KEY:
+            raise HTTPException(status_code=503, detail={
+                "code": "FRB-UPSTREAM",
+                "message": "No image route available. Configure LUCHII_UPSTREAM_URL + LUCHII_UPSTREAM_API_KEY (Frasberg gateway)."})
         if img_bytes is None:
             image_gen = OpenAIImageGeneration(api_key=EMERGENT_LLM_KEY)
             images = await image_gen.generate_images(prompt=prompt, model="gpt-image-1", number_of_images=1)

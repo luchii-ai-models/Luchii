@@ -166,6 +166,14 @@ async def oai_chat_completions(body: OAIChatBody, authorization: Optional[str] =
     async def generate_full() -> str:
         if refused:
             return "I can't help with that request."
+        import server as _srv
+        up = await _srv._try_upstream(last_user, sb, internal_model)
+        if up is not None:
+            return up
+        if not EMERGENT_LLM_KEY:
+            raise HTTPException(status_code=503, detail={
+                "code": "FRB-UPSTREAM",
+                "message": "No inference route available. Configure LUCHII_UPSTREAM_URL + LUCHII_UPSTREAM_API_KEY (Frasberg gateway)."})
         llm = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"oai-{completion_id}",
                       system_message=sb).with_model("anthropic", "claude-sonnet-4-6")
         resp = await llm.send_message(UserMessage(text=last_user))
@@ -185,17 +193,26 @@ async def oai_chat_completions(body: OAIChatBody, authorization: Optional[str] =
                 full = "I can't help with that request."
                 yield chunk({"content": full})
             else:
-                llm = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"oai-{completion_id}",
-                              system_message=sb).with_model("anthropic", "claude-sonnet-4-6")
-                try:
-                    async for event in llm.stream_message(UserMessage(text=last_user)):
-                        if isinstance(event, TextDelta):
-                            full += event.content
-                            yield chunk({"content": event.content})
-                        elif isinstance(event, StreamDone):
-                            break
-                except Exception:
-                    logger.exception("oai stream error")
+                import server as _srv
+                up = await _srv._try_upstream(last_user, sb, internal_model)
+                if up is not None:
+                    full = up
+                    yield chunk({"content": full})
+                elif not EMERGENT_LLM_KEY:
+                    full = "[FRB-UPSTREAM] No inference route available. Configure LUCHII_UPSTREAM_URL + LUCHII_UPSTREAM_API_KEY (Frasberg gateway)."
+                    yield chunk({"content": full})
+                else:
+                    llm = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=f"oai-{completion_id}",
+                                  system_message=sb).with_model("anthropic", "claude-sonnet-4-6")
+                    try:
+                        async for event in llm.stream_message(UserMessage(text=last_user)):
+                            if isinstance(event, TextDelta):
+                                full += event.content
+                                yield chunk({"content": event.content})
+                            elif isinstance(event, StreamDone):
+                                break
+                    except Exception:
+                        logger.exception("oai stream error")
             yield chunk({}, finish="stop")
             yield "data: [DONE]\n\n"
             await _meter_key(key_doc["id"], len(full.split()), deduct=not key_doc["_unmetered"])

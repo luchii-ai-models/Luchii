@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
-EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
+EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
 
 router = APIRouter()
 

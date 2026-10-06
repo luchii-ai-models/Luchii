@@ -1,5 +1,11 @@
 # Frasberg / Luchii
 
+## June 2026 — EMERGENT_LLM_KEY fully OPTIONAL (user mandate: "we do not use any EMERGENT_LLM_KEY, period")
+- All 5 hard `os.environ["EMERGENT_LLM_KEY"]` (core.py, asset_pipeline, builder, mesh_ws, studio) → `.get(...,"")`. App boots + all modules import with EMPTY key (verified). NEVER reintroduce as hard requirement.
+- Routing: /v1/chat/completions (routes_provider) now upstream-FIRST (server._try_upstream) in both non-stream + SSE paths; falls back to engine core only if key present; else 503 {"code":"FRB-UPSTREAM"} (stream emits the message as a chunk). /generate/image: upstream miss + no key → 503 FRB-UPSTREAM.
+- Gateway (backend/gateway/main.py): NEW POST /v1/images/generations (OpenAI-compatible: prompt/model/n≤4/response_format b64_json). FRB_IMAGE_ENGINE_URL(+FRB_IMAGE_ENGINE_KEY) env = fully self-hosted passthrough; else forwards to platform /generate/image with X-Frasberg-Gateway:1 loop-guard header (platform skips _try_upstream_image when header present — prevents platform↔gateway recursion). Tested on :10010: 401/401/400 guards, real image e2e, platform 401 passthrough.
+- Regressions green: chat completions (OK), SSE streaming, image auth. User deploys were initiated BEFORE these edits — needs fresh deploy to take key-optional behavior live.
+
 ## June 2026 — Runtime Router ↔ Platform WorldGraph hookup (ONE shared state, e2e tested)
 - NEW `packages/runtime-router/src/platform-worldgraph-service.ts` (frasberg-secure-runtime): PlatformWorldGraphService implements WorldGraphService against live `/api/v1/worldgraph` (env: FRASBERG_PLATFORM_URL, FRASBERG_PLATFORM_API_KEY, FRASBERG_SIGN_REQUESTS=true adds x-api-signature HMAC). Maps router contract (nodes/kind 'world' etc./status/schemaVersion) ↔ platform WorldDefinition (routerKind preserved in metadata; unwraps apiEnvelope; 404→undefined/'does not exist' errors for runtime's 404 mapping).
 - Shared `WorldGraphService` interface → MaybePromise returns; `worldgraph-runtime.ts` awaits all service calls + auto-selects Platform service when FRASBERG_PLATFORM_URL set (else InMemory). New entry `worldgraph-server.ts` (WORLDGRAPH_RUNTIME_PORT=4100). Exported from index.ts; .env.example updated.
