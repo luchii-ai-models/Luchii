@@ -53,7 +53,7 @@ function SectionTitle({ children, right }) {
 
 const ghostBtn = "inline-flex items-center gap-1.5 rounded-sm border px-3 py-1.5 font-mono text-[15px] transition-colors";
 
-const EDIT_PERM_KEYS = ["text_to_speech","speech_to_speech","speech_to_text","sound_effects","audio_isolation","music_generation","voice_generation","forced_alignment","voices","audio_native","dubbing","frasberg_agents","projects","productions","audiobooks","history","models","pronunciation_dictionaries","user","workspace","workspace_analytics","webhooks","service_accounts","group_members","workspace_members_read","workspace_members_invite","workspace_members_remove","terms_of_service_accept"];
+const EDIT_PERM_KEYS = ["image_generation","video_generation","image_video_generation","voice_changer","text_to_speech","speech_to_speech","speech_to_text","sound_effects","audio_isolation","music_generation","voice_generation","forced_alignment","voices","audio_native","dubbing","frasberg_agents","projects","productions","audiobooks","history","models","pronunciation_dictionaries","user","workspace","workspace_analytics","webhooks","service_accounts","group_members","workspace_members_read","workspace_members_invite","workspace_members_remove","terms_of_service_accept"];
 const permLabel = (k) => (k === "frasberg_agents" ? "Frasberg Agents" : k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()));
 
 function EditKeyModal({ k, onClose, onSaved }) {

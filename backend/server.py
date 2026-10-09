@@ -333,6 +333,7 @@ AGENT_PERSONAS = {
 
 PERMISSION_LEVELS = ("no_access", "read", "write", "access")
 PERMISSION_MATRIX = {
+    "generation_engines": ["image_generation", "video_generation", "image_video_generation", "voice_changer"],
     "core_audio": ["text_to_speech", "speech_to_speech", "speech_to_text", "sound_effects", "audio_isolation", "music_generation"],
     "advanced_audio_voice": ["voice_generation", "forced_alignment", "voices", "audio_native", "dubbing"],
     "agents": ["frasberg_agents"],
@@ -342,6 +343,8 @@ PERMISSION_MATRIX = {
 }
 PERMISSION_KEYS = {p for group in PERMISSION_MATRIX.values() for p in group}
 CANONICAL_DEFAULTS = {
+    "image_generation": "access", "video_generation": "access",
+    "image_video_generation": "access", "voice_changer": "access",
     "text_to_speech": "access", "speech_to_speech": "access", "speech_to_text": "access",
     "sound_effects": "access", "audio_isolation": "access", "music_generation": "access",
     "voice_generation": "access", "forced_alignment": "access", "voices": "read",
@@ -1094,6 +1097,9 @@ LEGACY_PERM_ALIASES = {
     "speech_to_text": ("speech_to_text",),
     "text_to_speech": ("text_to_speech",),
     "music_generation": ("music_generation",),
+    "image_generation": ("image_video_generation",),
+    "video_generation": ("image_video_generation",),
+    "image_video_generation": ("image_generation", "video_generation"),
 }
 
 
