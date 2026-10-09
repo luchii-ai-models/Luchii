@@ -1928,8 +1928,8 @@ async def test_api_key(key_id: str, user: dict = Depends(auth_module.get_current
 
     checks = [("GET /llm/models", "models", "read"),
               ("POST /audio/tts", "text_to_speech", "access"),
-              ("POST /generate/image", "voice_generation", "access"),
-              ("POST /generate/video", "voice_generation", "access"),
+              ("POST /generate/image", "image_generation", "access"),
+              ("POST /generate/video", "video_generation", "access"),
               ("POST /agents/run", "frasberg_agents", "access")]
     results = []
     for route, perm, needed in checks:

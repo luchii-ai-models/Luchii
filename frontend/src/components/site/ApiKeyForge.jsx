@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { AudioWaveform, SlidersHorizontal, Network, Folder, ShieldCheck, Users, Copy, Check, Plus, ShieldAlert, FlaskConical, Loader2 } from "lucide-react";
+import { AudioWaveform, SlidersHorizontal, Network, Folder, ShieldCheck, Users, Copy, Check, Plus, ShieldAlert, FlaskConical, Loader2, Clapperboard } from "lucide-react";
 import { T } from "../../lib/dashTheme";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 const GROUPS = [
+  ["Generation Engines", Clapperboard, ["image_generation", "video_generation", "image_video_generation", "voice_changer"]],
   ["Core Audio", AudioWaveform, ["text_to_speech", "speech_to_speech", "speech_to_text", "sound_effects", "audio_isolation", "music_generation"]],
   ["Advanced Audio / Voice", SlidersHorizontal, ["voice_generation", "forced_alignment", "voices", "audio_native", "dubbing"]],
   ["Agents", Network, ["frasberg_agents"]],
@@ -19,6 +20,8 @@ const LABEL_OVERRIDES = { frasberg_agents: "Frasberg Agents" };
 const label = (k) => LABEL_OVERRIDES[k] || k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
 const CANONICAL = {
+  image_generation: "access", video_generation: "access",
+  image_video_generation: "access", voice_changer: "access",
   text_to_speech: "access", speech_to_speech: "access", speech_to_text: "access",
   sound_effects: "access", audio_isolation: "access", music_generation: "access",
   voice_generation: "access", forced_alignment: "access", voices: "read",
