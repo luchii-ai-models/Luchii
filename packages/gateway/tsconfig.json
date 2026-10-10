@@ -9,6 +9,11 @@
   "references": [
     {
       "path": "../shared"
-    }
+    },
+    {
+      "path": "../engine-flow"
+    },
+    { "path": "../frasberg-core" },
+    { "path": "../luchii-api-keys" }
   ]
 }
