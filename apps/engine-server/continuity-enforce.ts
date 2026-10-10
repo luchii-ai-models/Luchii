@@ -1,1 +1,5 @@
-export { enforceContinuity } from '../../packages/engine/src/unified-enforce';
+import { continuity } from "../../packages/shared";
+
+export function enforceContinuity(engine, owner, state) {
+  continuity(engine, owner, state);
+}

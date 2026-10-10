@@ -1,1 +1,4 @@
-export { propagateContinuity } from '../../../packages/runtime-router/src/middleware/continuity';
+export function propagateContinuity(req, res, next) {
+  req.headers["x-continuity-state"] = JSON.stringify(req.continuity);
+  next();
+}

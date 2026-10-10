@@ -1,1 +1,4 @@
-export { propagateIdentity } from '../../../packages/runtime-router/src/middleware/identity';
+export function propagateIdentity(req, res, next) {
+  req.headers["x-owner-id"] = req.owner;
+  next();
+}

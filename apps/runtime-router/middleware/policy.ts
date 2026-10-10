@@ -1,1 +1,4 @@
-export { propagatePolicy } from '../../../packages/runtime-router/src/middleware/policy';
+export function propagatePolicy(req, res, next) {
+  req.headers["x-policy"] = JSON.stringify(req.policy);
+  next();
+}
