@@ -148,3 +148,8 @@ vite.config.ts.timestamp-*
 frontend/node_modules/.cache/default-development/0.pack
 frontend/node_modules/.cache/default-development/1.pack
 frontend/node_modules/.cache/default-development/3.pack
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
