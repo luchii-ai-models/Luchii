@@ -221,3 +221,73 @@ agent_communication:
 agent_communication:
   - agent: "main"
     message: "Re-imported. New backend/luchii_sr.py (Real-ESRGAN Luchii Prime). All local image renders (Nova-Muse, Dreamline, Vision, Painter-X) now get an HD 2x SR finish (JPEG). /api/upscale(/jobs) = real 4K (3840px long edge, ~2.5 min). Large images store thumb_base64; /api/generations and /api/my/generations return the thumb in image_base64 with has_full=true; /api/share/{id} returns full. /create UI: badge moved top-right (no overlap with Download), bottom toolbar with resolution chip (result-resolution), Hold to compare (compare-btn) for remixes, RenderProgress bars (render-progress, upscale-progress), 4K ready state."
+
+## Iteration (2026-10-11): Auto-publish, Remix history, Free Kaggle GPU video
+backend:
+  - task: "Auto-publish setting + per-image publish toggle"
+    implemented: true
+    working: true
+    file: "backend/server.py (wants_publish, /me/settings, /generations/{id}/publish)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "GET/PUT /api/me/settings {auto_publish}; /auth/me returns auto_publish. New images saved public when user's auto_publish on (body.publish overrides). POST /api/generations/{id}/publish {public} owner-only (401 guest, 404 others). Verified by script."
+  - task: "Remix history (lineage parent_id/root_id/step + GET /generations/{id}/history)"
+    implemented: true
+    working: true
+    file: "backend/server.py (resolve_parent, remix_history)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "edit/upscale/remove-bg accept parent_id. Fresh upload -> hidden kind=source doc (step 0). History returns chain items oldest-first with mini_base64. Sources hidden from all lists. Verified source->edit1->edit2."
+  - task: "Free Kaggle GPU on demand for /api/video (Frasberg Motion Free)"
+    implemented: true
+    working: true
+    file: "backend/kaggle_gpu.py, backend/server.py (gpu_render_video, /gpu-admin/kaggle*), backend/frasberg_gpu.py (/worker/boot, /worker/offline, stop), backend/frasberg_gpu_worker/*"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Real E2E verified: POST /api/video (motion-free) auto-pushed a private Kaggle T4 notebook, boot phases surfaced in /api/jobs (phase=gpu-boot/gpu-render), real 4s 704x480 LTX clip returned, engine 'Frasberg Motion Free'. fp16 on T4 (94s render). Worker exits after 20 idle min."
+frontend:
+  - task: "Auto-publish toggle + Publish button on /create, publish/history buttons in gallery"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/pages/Generator.jsx, Gallery.jsx, context/AuthContext.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "testids: auto-publish-toggle (role=switch), result-publish-btn, gallery-publish-{id}, gallery-public-badge-{id}, gallery-history-{id}"
+  - task: "Remix history strip on /create (+ ?gen=<id> deep link)"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/components/RemixHistory.jsx, pages/Generator.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "testids: remix-history, remix-history-count, remix-history-item-{id}"
+  - task: "Video studio free-GPU phases + admin Kaggle panel on /status"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/pages/Studio.jsx, pages/EngineStatus.jsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "testids: video-phase, video-eta, kaggle-panel, kaggle-status, kaggle-launch-btn, kaggle-stop-btn, kaggle-open-link"

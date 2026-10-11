@@ -751,6 +751,7 @@ async def share(gen_id: str):
                                          "parent_id": 1, "root_id": 1, "step": 1, "public": 1, "instruction": 1})
     if not doc:
         raise HTTPException(status_code=404, detail="Not found")
+    doc["public"] = bool(doc.get("public"))
     return doc
 
 
