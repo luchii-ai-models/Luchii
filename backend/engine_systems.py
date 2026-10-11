@@ -3,7 +3,7 @@ packages/engine/src/unified-enforce.ts, apps/engine-server/*-enforce.ts) ported 
 The TypeScript versions read Supabase RPCs; here the same data lives in MongoDB."""
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import engine_runtime
@@ -77,7 +77,13 @@ def enforce_governance(gov: Optional[dict], action: str) -> dict:
 # ---------- policy ----------
 async def load_policy(owner: str) -> dict:
     p = await db.engine_policy.find_one({"owner": owner}, {"_id": 0}) or {}
-    return {"blockedActions": p.get("blockedActions", [])}
+    blocked, until = p.get("blockedActions", []), p.get("creation_block_until")
+    if until and until <= _now():
+        blocked = [a for a in blocked if not a.startswith("create:")]
+        await db.engine_policy.update_one({"owner": owner}, {"$set": {"blockedActions": blocked, "creation_block_until": None,
+                                                                      "updated_by": "expired", "updated_at": _now()}})
+        until = None
+    return {"blockedActions": blocked, "creation_block_until": until}
 
 
 async def save_policy(owner: str, blocked: list, by: str) -> dict:
@@ -88,7 +94,9 @@ async def save_policy(owner: str, blocked: list, by: str) -> dict:
 
 def enforce_policy(policy: Optional[dict], action: str) -> dict:
     if policy and action in (policy.get("blockedActions") or []):
-        return {"allowed": False, "reason": "Action blocked by policy"}
+        until = policy.get("creation_block_until") if action.startswith("create:") else None
+        return {"allowed": False, "reason": f"Action blocked by policy until {until[:16].replace('T', ' ')} UTC" if until
+                else "Action blocked by policy"}
     return {"allowed": True}
 
 
@@ -240,6 +248,11 @@ async def creation_stats(limit: int = 15) -> dict:
 async def user_blocks() -> list:
     rows = await db.engine_policy.find({"owner": {"$regex": "^user:"}, "blockedActions": {"$regex": "^create:"}},
                                        {"_id": 0}).to_list(500)
+    now = _now()
+    expired = [r["owner"] for r in rows if r.get("creation_block_until") and r["creation_block_until"] <= now]
+    for o in expired:
+        await load_policy(o)
+    rows = [r for r in rows if r["owner"] not in expired]
     ids = [r["owner"][5:] for r in rows]
     users = {u["id"]: u for u in await db.users.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "email": 1, "name": 1}).to_list(500)}
     out = []
@@ -247,12 +260,25 @@ async def user_blocks() -> list:
         u = users.get(r["owner"][5:], {})
         out.append({"user_id": r["owner"][5:], "email": u.get("email"), "name": u.get("name"),
                     "kinds": [a[7:] for a in r["blockedActions"] if a.startswith("create:")],
+                    "expires_at": r.get("creation_block_until"),
                     "updated_at": r.get("updated_at"), "updated_by": r.get("updated_by")})
     return sorted(out, key=lambda x: x.get("updated_at") or "", reverse=True)
 
 
-async def set_user_block(user_id: str, kinds: list, by: str) -> dict:
+BLOCK_DURATIONS = {"24h": timedelta(hours=24), "7d": timedelta(days=7)}
+
+
+async def set_user_block(user_id: str, kinds: list, by: str, duration: Optional[str] = None) -> dict:
+    """duration None = permanent; '24h' / '7d' = lifts on its own (checked on every load_policy); 'keep' = same expiry."""
     owner = f"user:{user_id}"
-    keep = [a for a in (await load_policy(owner))["blockedActions"] if not a.startswith("create:")]
+    cur = await load_policy(owner)
+    keep = [a for a in cur["blockedActions"] if not a.startswith("create:")]
     await save_policy(owner, keep + [f"create:{k}" for k in kinds if k in CREATION_KINDS], by)
+    if not kinds or not duration:
+        until = None
+    elif duration == "keep":
+        until = cur["creation_block_until"]
+    else:
+        until = (datetime.now(timezone.utc) + BLOCK_DURATIONS[duration]).isoformat()
+    await db.engine_policy.update_one({"owner": owner}, {"$set": {"creation_block_until": until}})
     return await load_policy(owner)

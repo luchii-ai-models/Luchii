@@ -2044,6 +2044,7 @@ async def engines_diagnostics(component: Optional[str] = None, owner: str = Depe
 class UserBlockIn(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     kinds: list[Literal["image", "video", "music"]] = Field(default_factory=list)
+    duration: Optional[Literal["24h", "7d", "keep"]] = None
 
 
 def _admin_owner(owner: str):
@@ -2063,8 +2064,9 @@ async def engines_user_block_set(body: UserBlockIn, owner: str = Depends(engine_
     u = await db.users.find_one({"email": body.email.strip().lower()}, {"_id": 0, "id": 1, "email": 1})
     if not u:
         raise HTTPException(status_code=404, detail="No user with that email")
-    pol = await engine_systems.set_user_block(u["id"], body.kinds, owner)
-    return {"email": u["email"], "user_id": u["id"], "kinds": [a[7:] for a in pol["blockedActions"] if a.startswith("create:")]}
+    pol = await engine_systems.set_user_block(u["id"], body.kinds, owner, body.duration)
+    return {"email": u["email"], "user_id": u["id"], "kinds": [a[7:] for a in pol["blockedActions"] if a.startswith("create:")],
+            "expires_at": pol["creation_block_until"]}
 
 
 @api.get("/engines/creations")
