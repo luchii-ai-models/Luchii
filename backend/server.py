@@ -29,6 +29,8 @@ import local_engines
 import frasberg_gpu
 import kaggle_gpu
 import aws_gpu
+import engine_rules
+import engine_runtime
 
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
@@ -862,7 +864,7 @@ media_queues = {"video": asyncio.Lock(), "music": asyncio.Lock()}
 
 class JobIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=500)
-    duration: int = 10
+    duration: Optional[int] = None       # None = the engine's short default (engine rules: video 5s, music 15s)
     style: Optional[str] = None
     model: Optional[str] = None          # Frasberg GPU engine id (video only)
     aspect_ratio: Optional[str] = "16:9"
@@ -1079,7 +1081,7 @@ async def run_media(job: dict):
 async def create_media_job(kind: str, body: JobIn, user: Optional[dict], gateway: str = ""):
     lo, hi = MEDIA_LIMITS[kind]
     job = {"id": str(uuid.uuid4()), "kind": kind, "engine": "local", "status": "queued", "prompt": body.prompt.strip(),
-           "style": body.style, "duration": max(lo, min(hi, body.duration)), "error": None,
+           "style": body.style, "duration": max(lo, min(hi, engine_rules.default_duration(kind, body.duration))), "error": None,
            "model": body.model if kind == "video" else None, "aspect_ratio": body.aspect_ratio or "16:9",
            "has_image": bool(body.image_base64 and kind == "video"),
            "luchii_model": luchii_media_model(kind, body.luchii_model, bool(body.image_base64 and kind == "video")),
@@ -1580,6 +1582,15 @@ async def gpu_admin_aws_settings(body: AwsSettingsIn, request: Request, admin: d
     return res
 
 
+@api.get("/gpu-admin/aws/usage")
+async def gpu_admin_aws_usage(request: Request, month: Optional[str] = None, _: dict = Depends(admin_user)):
+    if month and not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+        raise HTTPException(status_code=422, detail="month must look like 2026-10")
+    if not aws_gpu.enabled():
+        return {"configured": False}
+    return {"configured": True, **await aws_gpu.usage(public_gateway(request), month)}
+
+
 @api.post("/gpu-admin/aws/stop")
 async def gpu_admin_aws_stop(request: Request, _: dict = Depends(admin_user)):
     return await aws_gpu.stop(public_gateway(request))
@@ -1636,8 +1647,14 @@ class AgentTaskIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=500)
     style: Optional[str] = None
     model: Optional[str] = None
-    duration: int = 8
+    duration: Optional[int] = None
     conversation_id: Optional[str] = None
+
+
+def enforce_engine_permission(owner: str, engine: str):
+    """Engine rules: API-key callers need a key routed to the engine's feature; decline in one sentence."""
+    if owner.startswith("platform:") and not engine_rules.key_allowed(engine, owner.split(":", 1)[1], KEY_ROUTES):
+        raise HTTPException(status_code=403, detail=engine_rules.decline_sentence(engine))
 
 
 @api.get("/chat/models")
@@ -1738,7 +1755,7 @@ async def _run_agent_task(task: dict, user: Optional[dict]):
             result = {"generation_id": res["id"], "share_url": f"/s/{res['id']}"}
         else:
             res = await create_media_job(task["type"], JobIn(prompt=task["prompt"], style=task.get("style"),
-                                                             duration=task.get("duration", 8)), user)
+                                                             duration=task.get("duration")), user)
             result = {"job_id": res["job_id"]}
         await db.agent_tasks.update_one({"id": task["id"]}, {"$set": {"status": "dispatched", "result": result, "updated_at": now_iso()}})
     except Exception as e:  # noqa: BLE001
@@ -1748,6 +1765,7 @@ async def _run_agent_task(task: dict, user: Optional[dict]):
 
 @api.post("/chat/agents/tasks")
 async def agent_task(body: AgentTaskIn, owner: str = Depends(chat_owner), user: Optional[dict] = Depends(optional_user)):
+    enforce_engine_permission(owner, body.type)
     task = {"id": str(uuid.uuid4()), "owner": owner, **body.model_dump(), "status": "queued",
             "result": None, "error": None, "created_at": now_iso(), "updated_at": now_iso()}
     await db.agent_tasks.insert_one(task.copy())
@@ -1759,6 +1777,7 @@ class AgentBundleIn(BaseModel):
     idea: str = Field(min_length=1, max_length=400)
     image_model: Optional[str] = None
     style: Optional[str] = None
+    include: list[str] = Field(default_factory=lambda: ["image", "video", "music"])  # engines to run (explicit)
 
 
 async def _wait_job(job_id: str, timeout: int = 1800):
@@ -1781,9 +1800,14 @@ async def _run_bundle(tasks: list, user: Optional[dict]):
 async def agent_bundle(body: AgentBundleIn, owner: str = Depends(chat_owner), user: Optional[dict] = Depends(optional_user)):
     bundle_id, now = str(uuid.uuid4()), now_iso()
     idea = body.idea.strip()
-    specs = [("image", idea, body.style or "cinematic", body.image_model, 0),
-             ("video", f"{idea}, cinematic camera movement", body.style or "cinematic", None, 5),
-             ("music", f"Soundtrack for: {idea}", None, None, 15)]
+    include = [k for k in ("image", "video", "music") if k in set(body.include)]
+    if not include:
+        raise HTTPException(status_code=422, detail="include must name at least one of image, video, music")
+    for k in include:
+        enforce_engine_permission(owner, k)
+    specs = [s for s in [("image", idea, body.style or "cinematic", body.image_model, 0),
+                         ("video", f"{idea}, cinematic camera movement", body.style or "cinematic", None, 5),
+                         ("music", f"Soundtrack for: {idea}", None, None, 15)] if s[0] in include]
     tasks = [{"id": str(uuid.uuid4()), "bundle_id": bundle_id, "owner": owner, "type": ty, "prompt": pr[:500],
               "style": st, "model": mo, "duration": du, "conversation_id": None, "status": "queued",
               "result": None, "error": None, "created_at": now, "updated_at": now} for ty, pr, st, mo, du in specs]
@@ -1815,6 +1839,63 @@ async def agent_task_status(tid: str, owner: str = Depends(chat_owner)):
         j = await db.jobs.find_one({"id": t["result"]["job_id"]}, {"_id": 0})
         t["job"] = await job_out(j) if j else None
     return t
+
+
+# ---------- Frasberg Engine Runtime (packages/*-engine, interpreted) + engine rules ----------
+class EngineExecIn(BaseModel):
+    input: str = Field(default="", max_length=2000)
+    state: dict = Field(default_factory=dict)
+
+
+class EngineChainIn(EngineExecIn):
+    engines: list[str] = Field(min_length=1, max_length=12)
+
+
+def _state_ok(state: dict):
+    if len(json.dumps(state, default=str)) > 64_000:
+        raise HTTPException(status_code=413, detail="state is too large (64 KB max)")
+
+
+@api.get("/engines/runtime")
+async def engines_runtime():
+    return {"count": len(engine_runtime.REGISTRY), "source": "packages/*-engine (TypeScript), run by the Frasberg Engine Runtime",
+            "engines": engine_runtime.catalogue()}
+
+
+@api.get("/engines/runtime/{engine_id}")
+async def engines_runtime_one(engine_id: str):
+    if engine_id not in engine_runtime.REGISTRY:
+        raise HTTPException(status_code=404, detail="Unknown engine")
+    return engine_runtime.describe(engine_id, full=True)
+
+
+@api.post("/engines/chain")
+async def engines_chain(body: EngineChainIn):
+    unknown = [e for e in body.engines if e not in engine_runtime.REGISTRY]
+    if unknown:
+        raise HTTPException(status_code=404, detail=f"Unknown engine: {', '.join(unknown)}")
+    _state_ok(body.state)
+    try:
+        return engine_runtime.chain(body.engines, body.input, body.state)
+    except engine_runtime.EngineError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@api.post("/engines/{engine_id}/execute")
+async def engines_execute(engine_id: str, body: EngineExecIn):
+    if engine_id not in engine_runtime.REGISTRY:
+        raise HTTPException(status_code=404, detail="Unknown engine")
+    _state_ok(body.state)
+    try:
+        return engine_runtime.execute(engine_id, body.input, body.state)
+    except engine_runtime.EngineError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@api.get("/engines/rules")
+async def engines_rules():
+    return {"summary": engine_rules.summary(), "engines": engine_rules.RULES,
+            "default_duration": engine_rules.DEFAULT_DURATION}
 
 
 app.include_router(api)

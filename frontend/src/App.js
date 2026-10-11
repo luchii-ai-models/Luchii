@@ -11,6 +11,7 @@ import Models from "./pages/Models";
 import Legal from "./pages/Legal";
 import TextToSpeech from "./pages/TextToSpeech";
 import ApiDocs from "./pages/ApiDocs";
+import Engines from "./pages/Engines";
 import VideoShare from "./pages/VideoShare";
 import Studio from "./pages/Studio";
 import EngineStatus from "./pages/EngineStatus";
@@ -38,6 +39,7 @@ function App() {
               <Route path="/models" element={<Models />} />
               <Route path="/tts" element={<TextToSpeech />} />
               <Route path="/developers" element={<ApiDocs />} />
+              <Route path="/engines" element={<Engines />} />
               <Route path="/legal/:doc" element={<Legal />} />
               <Route path="/s/:id" element={<Share />} />
               <Route path="/video" element={<Studio kind="video" />} />

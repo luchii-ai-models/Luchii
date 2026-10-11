@@ -6,6 +6,7 @@ import { Button } from "../components/ui/button";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import { useAuth } from "../context/AuthContext";
+import EngineRuntime from "../components/EngineRuntime";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -105,6 +106,67 @@ function KagglePanel({ authHeader, onChange }) {
 }
 
 const AWS_TONE = { running: "text-emerald-300", pending: "text-amber-300", stopping: "text-amber-300", stopped: "text-neutral-400" };
+
+const usd = (n) => (n == null ? "—" : `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+const monthKey = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+const monthLabel = (k) => new Date(`${k}-01T00:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+
+function AwsSpend({ authHeader }) {
+  const now = new Date();
+  const cur = monthKey(now);
+  const prev = monthKey(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)));
+  const [month, setMonth] = useState(cur);
+  const [u, setU] = useState(null);
+  const load = useCallback(() => axios.get(`${API}/gpu-admin/aws/usage`, { headers: authHeader, params: { month } })
+    .then(({ data }) => setU(data)).catch(() => {}), [authHeader, month]);
+  useEffect(() => { setU(null); load(); const t = setInterval(() => document.visibilityState === "visible" && load(), 60000); return () => clearInterval(t); }, [load]);
+  if (u && !u.configured) return null;
+  const max = Math.max(1, ...(u?.daily || []).map((d) => d.hours));
+  return (
+    <div className="mt-4 pt-4 border-t border-white/10" data-testid="aws-spend">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <div className="text-xs uppercase tracking-wider text-neutral-500">GPU spend · {monthLabel(month)}</div>
+        <div className="flex gap-1">
+          {[{ k: cur, l: "This month" }, { k: prev, l: "Last month" }].map((m) => (
+            <button key={m.k} type="button" data-testid={`aws-spend-month-${m.k === cur ? "current" : "previous"}`} onClick={() => setMonth(m.k)}
+              className={`h-7 px-3 rounded-full text-xs border ${month === m.k ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-200" : "border-white/15 text-neutral-300 hover:bg-white/10"}`}>
+              {m.l}
+            </button>
+          ))}
+        </div>
+      </div>
+      {!u ? <div className="text-sm text-neutral-500 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading spend…</div> : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {[
+              { id: "hours", label: "GPU hours", value: u.hours.toFixed(1), sub: `${usd(u.hourly_usd)}/h on-demand` },
+              { id: "compute", label: "Compute", value: usd(u.compute_usd), sub: "g5.xlarge running time" },
+              { id: "storage", label: "Disk", value: usd(u.storage_usd), sub: `${u.volume_gb} GB gp3, also while stopped` },
+              { id: "total", label: u.projected_usd != null ? "So far → projected" : "Month total", value: usd(u.total_usd),
+                sub: u.projected_usd != null ? `≈ ${usd(u.projected_usd)} by month end (${u.mode === "always_on" ? "always on" : "current pace"})` : "final estimate" },
+            ].map((c) => (
+              <div key={c.id} className="rounded-xl border border-white/10 bg-white/[0.02] p-3" data-testid={`aws-spend-${c.id}`}>
+                <div className="text-[11px] text-neutral-500">{c.label}</div>
+                <div className="text-lg font-semibold text-white tabular-nums">{c.value}</div>
+                <div className="text-[11px] text-neutral-500 mt-0.5">{c.sub}</div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex items-end gap-[3px] h-16" data-testid="aws-spend-chart" aria-label="GPU hours per day">
+            {u.daily.map((d) => (
+              <div key={d.day} title={`${d.day}: ${d.hours.toFixed(1)} h`} className="flex-1 min-w-0 rounded-t bg-emerald-400/70"
+                style={{ height: `${d.hours ? Math.max(6, (d.hours / max) * 100) : 3}%`, opacity: d.hours ? 1 : 0.2 }} />
+            ))}
+          </div>
+          <p className="text-[11px] text-neutral-500 mt-2">
+            Estimate from tracked run time at AWS on-demand rates (us-east-1). Data transfer and taxes are not included; your AWS bill is the final word.
+            {!u.hours && " No GPU time recorded this month yet."}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
 
 function AwsPanel({ authHeader, onChange }) {
   const [a, setA] = useState(null);
@@ -217,6 +279,7 @@ function AwsPanel({ authHeader, onChange }) {
           </div>
         )}
       </div>
+      <AwsSpend authHeader={authHeader} />
     </div>
   );
 }
@@ -358,6 +421,7 @@ export default function EngineStatus() {
           {data?.engines.map((e) => <EngineCard key={e.id} e={e} />)}
         </div>
         <GpuPanel authHeader={authHeader} />
+        <EngineRuntime compact />
       </main>
       <Footer />
     </div>

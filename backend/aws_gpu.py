@@ -23,7 +23,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -43,6 +43,7 @@ QUOTA_CODE = "L-DB2E81BA"    # Running On-Demand G and VT instances (vCPUs)
 VCPUS = {"g5.xlarge": 4, "g5.2xlarge": 8, "g6.xlarge": 4, "g6e.xlarge": 4, "g5.4xlarge": 16}
 AMI_NAME = "Deep Learning OSS Nvidia Driver AMI GPU PyTorch * (Ubuntu 24.04) *"
 SG_NAME = "frasberg-gpu-worker"
+EBS_GB_MONTH_USD = 0.08      # gp3 us-east-1, billed while the volume exists (also when the box is stopped)
 HOURLY_USD = {"g5.xlarge": 1.006, "g5.2xlarge": 1.212, "g6.xlarge": 0.805, "g6e.xlarge": 1.861, "g5.4xlarge": 1.624}
 
 
@@ -464,6 +465,110 @@ async def _idle_stop(gateway: str):
         log.info("AWS GPU %s stopped after %s idle min (cost saver)", cur["instance_id"], idle_min_())
 
 
+# ---------- spend tracker ----------
+def _month_bounds(month: Optional[str] = None):
+    now = datetime.now(timezone.utc)
+    if month:
+        y, m = (int(x) for x in month.split("-"))
+    else:
+        y, m = now.year, now.month
+    start = datetime(y, m, 1, tzinfo=timezone.utc)
+    end = datetime(y + (m == 12), m % 12 + 1, 1, tzinfo=timezone.utc)
+    return start, end
+
+
+async def record_usage(gateway: str):
+    """Called every minute by the loop: extends the open run session while the box is running, closes it otherwise.
+    A gap while the same instance stays running (backend restart) counts as running time."""
+    cur = await instance(gateway, fresh=True)
+    name = name_for(gateway)
+    now = _now()
+    open_s = await db.aws_gpu_usage.find_one({"name": name, "end": None}, {"_id": 0}, sort=[("start", -1)])
+    running = bool(cur and cur["state"] == "running")
+    if open_s and (not running or open_s["instance_id"] != cur["instance_id"]):
+        await db.aws_gpu_usage.update_one({"id": open_s["id"]}, {"$set": {"end": open_s["last_seen"]}})
+        open_s = None
+    if running:
+        if open_s:
+            await db.aws_gpu_usage.update_one({"id": open_s["id"]}, {"$set": {"last_seen": now}})
+        else:
+            launched = cur.get("launched") or now
+            start = launched if _age_s(launched) < 120 else now
+            await db.aws_gpu_usage.insert_one({"id": uuid.uuid4().hex, "name": name, "instance_id": cur["instance_id"],
+                                               "type": cur.get("type") or instance_type(), "start": start,
+                                               "last_seen": now, "end": None})
+    if cur:
+        await db.aws_gpu.update_one({"name": name}, {"$set": {"volume_seen_at": now},
+                                                      "$min": {"volume_since": now}}, upsert=True)
+
+
+async def usage(gateway: str, month: Optional[str] = None) -> dict:
+    start, end = _month_bounds(month)
+    now = datetime.now(timezone.utc)
+    name = name_for(gateway)
+    rows = await db.aws_gpu_usage.find({"name": name, "start": {"$lt": end.isoformat()},
+                                        "$or": [{"end": None}, {"end": {"$gte": start.isoformat()}}]},
+                                       {"_id": 0}).sort("start", -1).to_list(2000)
+    hours = 0.0
+    compute = 0.0
+    daily: dict = {}
+    sessions = []
+    for r in rows:
+        a = max(datetime.fromisoformat(r["start"]), start)
+        b = min(datetime.fromisoformat(r["end"] or r["last_seen"]), end)
+        if b <= a:
+            continue
+        h = (b - a).total_seconds() / 3600
+        rate = HOURLY_USD.get(r.get("type") or "", HOURLY_USD.get(instance_type(), 1.0))
+        hours += h
+        compute += h * rate
+        t = a
+        while t < b:  # split across UTC days for the daily chart
+            day_end = datetime(t.year, t.month, t.day, tzinfo=timezone.utc) + timedelta(days=1)
+            seg = min(day_end, b)
+            k = t.date().isoformat()
+            daily[k] = daily.get(k, 0.0) + (seg - t).total_seconds() / 3600
+            t = seg
+        if len(sessions) < 10:
+            sessions.append({"instance_id": r["instance_id"], "start": r["start"], "end": r["end"],
+                             "running": r["end"] is None, "hours": round(h, 2)})
+    st = await _state(gateway)
+    vol_since = st.get("volume_since")
+    gb = int(_env("AWS_GPU_VOLUME_GB", "200"))
+    storage = 0.0
+    month_s = (end - start).total_seconds()
+    if vol_since:
+        vs = max(datetime.fromisoformat(vol_since), start)
+        ve = min(datetime.fromisoformat(st.get("volume_seen_at") or vol_since), end)
+        if st.get("last_action") != "terminate":
+            ve = min(now, end)
+        if ve > vs:
+            storage = gb * EBS_GB_MONTH_USD * (ve - vs).total_seconds() / month_s
+    is_current = start <= now < end
+    projected = None
+    if is_current:
+        left_h = (end - now).total_seconds() / 3600
+        rate = HOURLY_USD.get(instance_type(), 1.0)
+        elapsed_h = max((now - start).total_seconds() / 3600, 1)
+        if mode() == "always_on":
+            future_compute = left_h * rate
+        else:  # cost saver: keep the month's usage pace so far
+            future_compute = hours / elapsed_h * left_h * rate
+        future_storage = gb * EBS_GB_MONTH_USD * (end - now).total_seconds() / month_s if vol_since else 0.0
+        projected = round(compute + storage + future_compute + future_storage, 2)
+    days = []
+    d = start
+    last = min(end, now + timedelta(days=1)) if is_current else end
+    while d < last:
+        k = d.date().isoformat()
+        days.append({"day": k, "hours": round(daily.get(k, 0.0), 2)})
+        d += timedelta(days=1)
+    return {"month": start.strftime("%Y-%m"), "hours": round(hours, 2), "compute_usd": round(compute, 2),
+            "storage_usd": round(storage, 2), "total_usd": round(compute + storage, 2), "projected_usd": projected,
+            "hourly_usd": HOURLY_USD.get(instance_type()), "volume_gb": gb, "mode": mode(), "daily": days,
+            "sessions": sessions, "estimate": True}
+
+
 async def reconcile_loop(gateway: str, secret: str):
     """always_on: keep one GPU box running (admin Stop pauses it until Start).
     on_demand (cost saver): stop the box once it has been idle for idle_min minutes."""
@@ -482,4 +587,9 @@ async def reconcile_loop(gateway: str, secret: str):
                 await _idle_stop(gateway)
         except Exception:  # noqa: BLE001
             log.exception("AWS reconcile error")
+        try:
+            if enabled():
+                await record_usage(gateway)
+        except Exception:  # noqa: BLE001
+            log.exception("AWS usage tracking error")
         await asyncio.sleep(IDLE_CHECK_EVERY_S)
