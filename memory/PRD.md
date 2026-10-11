@@ -193,3 +193,8 @@ Hardware reality of this pod: **2 CPU cores, no AVX2/bf16 hardware, ~6GB effecti
 - Admin /status: Kaggle panel (status, boot stage, Start GPU now, Stop, notebook link). /api/gpu/v1/engines marks motion-free on_demand/status "on-demand".
 - Tests: iteration_21 (backend 11/12, the share.public gap fixed; frontend 100%).
 - Production needs KAGGLE_API_TOKEN/KAGGLE_USERNAME in its env too; the kernel slug is per host, so preview and prod each get their own worker.
+
+## Update (2026-10-11, re-import into pod 781d0ae5)
+- /app was empty. Cloned luchii-ai-models/frasberg-secure-runtime main@cdee73d (includes merged PR #2) and copied it into /app without .git. Recreated backend/.env (8 frb_live keys + FRASBERG_KEY_ROUTES, KAGGLE_API_TOKEN, KAGGLE_USERNAME=frasberg, new JWT/worker secrets) and frontend/.env. Deps and ffmpeg installed. Seeded the test accounts.
+- GitHub state: 0 open PRs. PR #2 is merged and PR #1 is closed unmerged. Stale remote branches: merge/frasberg-branches-into-main (only MERGE_NOTES.md + .gitignore), merged-frasberg-branches and merged-frasberg-branches-update-to-main (older snapshots, all their content is already in main). They can be deleted on GitHub. The agent cannot do git writes.
+- Verified: home page matches frasberg-preview.preview.emergentagent.com, auth works, Kaggle API auth works (lists frasberg/* kernels), and a Nova-Muse draft render completed on luchii-local. Frasberg upstream is the same as before: image 502, voice "warming up", video returns sample clips.
