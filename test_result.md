@@ -1,0 +1,293 @@
+#====================================================================================================
+# START - Testing Protocol - DO NOT EDIT OR REMOVE THIS SECTION
+#====================================================================================================
+
+# THIS SECTION CONTAINS CRITICAL TESTING INSTRUCTIONS FOR BOTH AGENTS
+# BOTH MAIN_AGENT AND TESTING_AGENT MUST PRESERVE THIS ENTIRE BLOCK
+
+# Communication Protocol:
+# If the `testing_agent` is available, main agent should delegate all testing tasks to it.
+#
+# You have access to a file called `test_result.md`. This file contains the complete testing state
+# and history, and is the primary means of communication between main and the testing agent.
+#
+# Main and testing agents must follow this exact format to maintain testing data. 
+# The testing data must be entered in yaml format Below is the data structure:
+# 
+## user_problem_statement: {problem_statement}
+## backend:
+##   - task: "Task name"
+##     implemented: true
+##     working: true  # or false or "NA"
+##     file: "file_path.py"
+##     stuck_count: 0
+##     priority: "high"  # or "medium" or "low"
+##     needs_retesting: false
+##     status_history:
+##         -working: true  # or false or "NA"
+##         -agent: "main"  # or "testing" or "user"
+##         -comment: "Detailed comment about status"
+##
+## frontend:
+##   - task: "Task name"
+##     implemented: true
+##     working: true  # or false or "NA"
+##     file: "file_path.js"
+##     stuck_count: 0
+##     priority: "high"  # or "medium" or "low"
+##     needs_retesting: false
+##     status_history:
+##         -working: true  # or false or "NA"
+##         -agent: "main"  # or "testing" or "user"
+##         -comment: "Detailed comment about status"
+##
+## metadata:
+##   created_by: "main_agent"
+##   version: "1.0"
+##   test_sequence: 0
+##   run_ui: false
+##
+## test_plan:
+##   current_focus:
+##     - "Task name 1"
+##     - "Task name 2"
+##   stuck_tasks:
+##     - "Task name with persistent issues"
+##   test_all: false
+##   test_priority: "high_first"  # or "sequential" or "stuck_first"
+##
+## agent_communication:
+##     -agent: "main"  # or "testing" or "user"
+##     -message: "Communication message between agents"
+
+# Protocol Guidelines for Main agent
+#
+# 1. Update Test Result File Before Testing:
+#    - Main agent must always update the `test_result.md` file before calling the testing agent
+#    - Add implementation details to the status_history
+#    - Set `needs_retesting` to true for tasks that need testing
+#    - Update the `test_plan` section to guide testing priorities
+#    - Add a message to `agent_communication` explaining what you've done
+#
+# 2. Incorporate User Feedback:
+#    - When a user provides feedback that something is or isn't working, add this information to the relevant task's status_history
+#    - Update the working status based on user feedback
+#    - If a user reports an issue with a task that was marked as working, increment the stuck_count
+#    - Whenever user reports issue in the app, if we have testing agent and task_result.md file so find the appropriate task for that and append in status_history of that task to contain the user concern and problem as well 
+#
+# 3. Track Stuck Tasks:
+#    - Monitor which tasks have high stuck_count values or where you are fixing same issue again and again, analyze that when you read task_result.md
+#    - For persistent issues, use websearch tool to find solutions
+#    - Pay special attention to tasks in the stuck_tasks list
+#    - When you fix an issue with a stuck task, don't reset the stuck_count until the testing agent confirms it's working
+#
+# 4. Provide Context to Testing Agent:
+#    - When calling the testing agent, provide clear instructions about:
+#      - Which tasks need testing (reference the test_plan)
+#      - Any authentication details or configuration needed
+#      - Specific test scenarios to focus on
+#      - Any known issues or edge cases to verify
+#
+# 5. Call the testing agent with specific instructions referring to test_result.md
+#
+# IMPORTANT: Main agent must ALWAYS update test_result.md BEFORE calling the testing agent, as it relies on this file to understand what to test next.
+
+#====================================================================================================
+# END - Testing Protocol - DO NOT EDIT OR REMOVE THIS SECTION
+#====================================================================================================
+
+
+
+#====================================================================================================
+# Testing Data - Main Agent and testing sub agent both should log testing data below this section
+#====================================================================================================
+
+user_problem_statement: >
+  Imported the Luchii AI platform exactly from GitHub (frasberg-code/luchii-codex) into this workspace,
+  recreated the .env with the owner's real Frasberg keys, and pointed heavy model dirs to /var (disk limits).
+  Now running a full backend test pass to establish a clean baseline after the import, and confirming that
+  the /video tool produces real locally-rendered clips (not Frasberg sample files).
+
+backend:
+  - task: "Auth (register/login/me, JWT, lockout)"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Imported unchanged. Fresh test_database. Seeded admin test account test@luchii.ai / Test1234!."
+  - task: "Image generate/edit/upscale with Frasberg->local fallback"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py, backend/local_engines.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Frasberg image returns 401 (owner's service), so falls back to SD-Turbo local. Verify generate returns image_base64 and engine field."
+  - task: "Video generation (local keyframe engine)"
+    implemented: true
+    working: true
+    file: "backend/server.py, backend/local_engines.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Confirmed via manual run: POST /api/video -> job -> completed, /api/media returns real H.264 MP4 (120 frames, 640x384). This is local render, NOT a Frasberg sample clip. Please retest the full flow incl. queue_position."
+  - task: "Music generation (local MusicGen)"
+    implemented: true
+    working: true
+    file: "backend/server.py, backend/local_engines.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Confirmed via manual run: POST /api/music -> completed, /api/media returns valid 8s WAV (32kHz). First run downloads MusicGen ~2.3GB to /var."
+  - task: "3D Studio generate + glb fetch"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py, backend/local_engines.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Shap-E on CPU (~3-4 min). Verify POST /api/3d queue, GET /api/3d/{id}/model.glb returns model/gltf-binary."
+  - task: "TTS + Speech-to-Speech + voice clone (Frasberg->local)"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py, backend/local_engines.py, backend/vendor/openvoice"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Frasberg voice returns 503; TTS falls back to Piper local. Clone speak uses vendored OpenVoice. STS voice=clone requires auth (400 without). Sample WAVs at /app/tests/src.wav and ref.wav."
+  - task: "Saved voice takes CRUD"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Takes persist in db.voice_takes + GridFS for logged-in users. Verify create/list/stream/delete."
+
+metadata:
+  created_by: "main_agent"
+  version: "2.0"
+  test_sequence: 0
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Video generation (local keyframe engine)"
+    - "Music generation (local MusicGen)"
+    - "Auth (register/login/me, JWT, lockout)"
+    - "Image generate/edit/upscale with Frasberg->local fallback"
+    - "3D Studio generate + glb fetch"
+  stuck_tasks: []
+  test_all: true
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: >
+        Fresh import of the owner's Luchii app. Real Frasberg keys are in backend/.env. IMPORTANT ENV NOTE:
+        heavy jobs (video/music/3D) run on CPU and can take 1-4 minutes; the preview may 502 if 3+ heavy jobs
+        overlap on the 2-CPU box, so run with -n 0 and avoid overlapping heavy jobs. Admin/test login:
+        test@luchii.ai / Test1234!. Please run a full backend pass (high priority first). Special focus:
+        confirm /api/video produces a REAL local MP4 via /api/media (not a Frasberg sample URL), and /api/music
+        returns a real WAV. Do NOT change any .env or key values.
+    -agent: "main"
+    -message: "NEW (iteration 9): Frasberg Serverless GPU Gateway (backend/frasberg_gpu.py, mounted /api/gpu) + standalone worker (/app/frasberg_gpu_worker). Luchii /api/video now accepts model, aspect_ratio, image_base64 (image-to-video) and routes GPU worker -> frasberg.com (stock samples rejected) -> Frasberg Lite (local CPU). /video UI: engine picker (Motion Fast/Pro/Ultra with live online/offline), Format chips, start-image upload, engine label on results. No real GPU in this pod -> all product engines show offline; protocol tested with hidden frasberg-dev-test engine."
+
+
+## Iteration (2026-10, re-import + image quality)
+agent_communication:
+  - agent: "main"
+    message: "Re-imported. New backend/luchii_sr.py (Real-ESRGAN Luchii Prime). All local image renders (Nova-Muse, Dreamline, Vision, Painter-X) now get an HD 2x SR finish (JPEG). /api/upscale(/jobs) = real 4K (3840px long edge, ~2.5 min). Large images store thumb_base64; /api/generations and /api/my/generations return the thumb in image_base64 with has_full=true; /api/share/{id} returns full. /create UI: badge moved top-right (no overlap with Download), bottom toolbar with resolution chip (result-resolution), Hold to compare (compare-btn) for remixes, RenderProgress bars (render-progress, upscale-progress), 4K ready state."
+
+## Iteration (2026-10-11): Auto-publish, Remix history, Free Kaggle GPU video
+backend:
+  - task: "Auto-publish setting + per-image publish toggle"
+    implemented: true
+    working: true
+    file: "backend/server.py (wants_publish, /me/settings, /generations/{id}/publish)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "GET/PUT /api/me/settings {auto_publish}; /auth/me returns auto_publish. New images saved public when user's auto_publish on (body.publish overrides). POST /api/generations/{id}/publish {public} owner-only (401 guest, 404 others). Verified by script."
+  - task: "Remix history (lineage parent_id/root_id/step + GET /generations/{id}/history)"
+    implemented: true
+    working: true
+    file: "backend/server.py (resolve_parent, remix_history)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "edit/upscale/remove-bg accept parent_id. Fresh upload -> hidden kind=source doc (step 0). History returns chain items oldest-first with mini_base64. Sources hidden from all lists. Verified source->edit1->edit2."
+  - task: "Free Kaggle GPU on demand for /api/video (Frasberg Motion Free)"
+    implemented: true
+    working: true
+    file: "backend/kaggle_gpu.py, backend/server.py (gpu_render_video, /gpu-admin/kaggle*), backend/frasberg_gpu.py (/worker/boot, /worker/offline, stop), backend/frasberg_gpu_worker/*"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Real E2E verified: POST /api/video (motion-free) auto-pushed a private Kaggle T4 notebook, boot phases surfaced in /api/jobs (phase=gpu-boot/gpu-render), real 4s 704x480 LTX clip returned, engine 'Frasberg Motion Free'. fp16 on T4 (94s render). Worker exits after 20 idle min."
+frontend:
+  - task: "Auto-publish toggle + Publish button on /create, publish/history buttons in gallery"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/pages/Generator.jsx, Gallery.jsx, context/AuthContext.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "testids: auto-publish-toggle (role=switch), result-publish-btn, gallery-publish-{id}, gallery-public-badge-{id}, gallery-history-{id}"
+  - task: "Remix history strip on /create (+ ?gen=<id> deep link)"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/components/RemixHistory.jsx, pages/Generator.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "testids: remix-history, remix-history-count, remix-history-item-{id}"
+  - task: "Video studio free-GPU phases + admin Kaggle panel on /status"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/pages/Studio.jsx, pages/EngineStatus.jsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "testids: video-phase, video-eta, kaggle-panel, kaggle-status, kaggle-launch-btn, kaggle-stop-btn, kaggle-open-link"
