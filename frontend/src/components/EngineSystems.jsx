@@ -60,11 +60,13 @@ export default function EngineSystems({ headers }) {
   const [sys, setSys] = useState(null);
   const [diag, setDiag] = useState(null);
   const [ident, setIdent] = useState(null);
+  const [creations, setCreations] = useState(null);
 
   const load = useCallback(() => {
     axios.get(`${API}/engines/systems`, { headers }).then(({ data }) => setSys(data)).catch(() => {});
     axios.get(`${API}/engines/diagnostics`, { headers }).then(({ data }) => setDiag(data)).catch(() => {});
     axios.get(`${API}/engines/identity`, { headers }).then(({ data }) => setIdent(data)).catch(() => {});
+    axios.get(`${API}/engines/creations`, { headers }).then(({ data }) => setCreations(data)).catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
 
@@ -97,6 +99,30 @@ export default function EngineSystems({ headers }) {
         <BlockEditor label="Governance · owner block" testid="engine-gov-owner" value={sys.governance.ownerBlock} onSave={(a) => save("governance", a)} />
         <BlockEditor label="Governance · global block (all owners)" testid="engine-gov-global" value={sys.governance.globalBlock} onSave={(a) => save("governance", a, "global")} />
       </div>
+      <p className="mt-2 text-[11px] text-neutral-500">Block creations for everyone with <code>create:image</code>, <code>create:video</code> or <code>create:music</code> in the global block.</p>
+      {creations && (
+        <div className="mt-5 rounded-xl border border-white/10 bg-white/[0.03] p-4" data-testid="engine-creations">
+          <div className="text-sm font-semibold text-white">Creations checked by the Engine Flow</div>
+          <div className="mt-2 grid grid-cols-3 gap-3">
+            {Object.entries(creations.kinds).map(([k, v]) => (
+              <div key={k} className="rounded-lg border border-white/10 bg-black/40 p-3">
+                <div className="text-[11px] text-neutral-500 capitalize">{k}</div>
+                <div className="text-lg font-semibold text-white tabular-nums" data-testid={`engine-creations-${k}`}>{v.checked}</div>
+                {v.blocked > 0 && <div className="text-[11px] text-amber-300" data-testid={`engine-creations-${k}-blocked`}>{v.blocked} blocked</div>}
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 space-y-1">
+            {creations.recent.slice(0, 8).map((r) => (
+              <div key={r.id} className="flex gap-2 text-[11px] text-neutral-400">
+                <span className={r.payload.allowed ? "text-emerald-300" : "text-amber-300"}>{r.payload.allowed ? "allowed" : "blocked"}</span>
+                <span>{r.payload.action}</span><span className="text-neutral-600">{r.owner_id}</span>
+                <span className="ml-auto text-neutral-600">{new Date(r.created_at).toLocaleTimeString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {diag && (
         <div className="mt-5 grid grid-cols-3 gap-3" data-testid="engine-diagnostics">
           {Object.entries(diag).map(([c, d]) => (

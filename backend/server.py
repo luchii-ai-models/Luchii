@@ -349,6 +349,22 @@ async def resolve_parent(parent_id: Optional[str], src_image: str, session_id: O
     return {"parent_id": src["id"], "root_id": src["id"], "step": 1}
 
 
+def no_flow() -> None:
+    return None
+
+
+def creation_owner(user: Optional[dict]) -> str:
+    return f"user:{user['id']}" if user else "guest"
+
+
+async def creation_check(kind: str, user: Optional[dict], prompt: str) -> dict:
+    """Every image/video/music creation goes through Unified Enforce + the Engine Flow; blocked -> 403."""
+    try:
+        return await engine_systems.check_creation(kind, creation_owner(user), prompt or kind)
+    except engine_systems.EnforceError as e:
+        raise HTTPException(status_code=403, detail=f"Blocked by Frasberg engine rules: {e}")
+
+
 async def save_generation(kind: str, prompt: str, image: str, session_id: Optional[str],
                           user: Optional[dict], style: Optional[str] = None, aspect: Optional[str] = None,
                           model: Optional[str] = None, publish: Optional[bool] = None,
@@ -475,7 +491,8 @@ async def me(user: dict = Depends(current_user)):
 
 
 @api.post("/generate")
-async def generate(body: GenerateIn, user: Optional[dict] = Depends(optional_user)):
+async def generate(body: GenerateIn, user: Optional[dict] = Depends(optional_user), flow_rec: Optional[dict] = Depends(no_flow)):
+    flow_rec = flow_rec or await creation_check("image", user, body.prompt)
     subject = clean_prompt(body.prompt)
     model = body.model if body.model in LUCHII_IMAGE_MODELS else auto_model(subject, body.style)
     draft = body.quality == "draft" and model in PHOTO_MODELS
@@ -500,14 +517,15 @@ async def generate(body: GenerateIn, user: Optional[dict] = Depends(optional_use
         img, engine = await image_with_fallback({"prompt": full, "style": body.style, "aspect_ratio": body.aspect_ratio},
                                                 local_fn, *args)
     doc = await save_generation("generate", body.prompt, img, body.session_id, user, body.style, body.aspect_ratio, model,
-                                publish=body.publish)
-    return {"id": doc["id"], "kind": "generate", "image_base64": img, "prompt": body.prompt, "style": body.style,
+                                publish=body.publish, extra={"engine_flow": flow_rec})
+    return {"id": doc["id"], "kind": "generate", "engine_flow": flow_rec, "image_base64": img, "prompt": body.prompt, "style": body.style,
             "model": model, "engine": engine, "quality": "draft" if draft else "full", "seed": seed,
             "aspect_ratio": body.aspect_ratio, "public": bool(doc.get("public"))}
 
 
 @api.post("/edit")
-async def edit(body: EditIn, user: Optional[dict] = Depends(optional_user)):
+async def edit(body: EditIn, user: Optional[dict] = Depends(optional_user), flow_rec: Optional[dict] = Depends(no_flow)):
+    flow_rec = flow_rec or await creation_check("image", user, body.prompt)
     raw = body.prompt.strip().rstrip(".")
     if is_edit_command(raw):
         # A command ("make the hair blue", "change the clothes") is mapped to the regions it names and edited
@@ -524,14 +542,16 @@ async def edit(body: EditIn, user: Optional[dict] = Depends(optional_user)):
                                             local_fn, *args)
     lineage = await resolve_parent(body.parent_id, body.image_base64, body.session_id, user)
     doc = await save_generation("edit", body.prompt, img, body.session_id, user, "Remix", model="Luchii Painter-X",
-                                publish=body.publish, lineage=lineage, extra={"instruction": instruction, "edit_mode": mode})
-    return {"id": doc["id"], "kind": "edit", "model": "Luchii Painter-X", "image_base64": img, "prompt": body.prompt,
+                                publish=body.publish, lineage=lineage,
+                                extra={"instruction": instruction, "edit_mode": mode, "engine_flow": flow_rec})
+    return {"id": doc["id"], "kind": "edit", "engine_flow": flow_rec, "model": "Luchii Painter-X", "image_base64": img, "prompt": body.prompt,
             "engine": engine, "style": body.style, "instruction": instruction, "edit_mode": mode,
             "public": bool(doc.get("public")), **lineage}
 
 
 @api.post("/remove-bg")
-async def remove_bg(body: CutoutIn, user: Optional[dict] = Depends(optional_user)):
+async def remove_bg(body: CutoutIn, user: Optional[dict] = Depends(optional_user), flow_rec: Optional[dict] = Depends(no_flow)):
+    flow_rec = flow_rec or await creation_check("image", user, "Background removed")
     if local_engines.image_busy():
         raise HTTPException(status_code=429, detail="Frasberg Creator is finishing another image. Yours is in the queue.",
                             headers={"Retry-After": "8"})
@@ -542,19 +562,20 @@ async def remove_bg(body: CutoutIn, user: Optional[dict] = Depends(optional_user
         raise HTTPException(status_code=424, detail=f"Luchii cutout engine error: {e.__class__.__name__}")
     lineage = await resolve_parent(body.parent_id, body.image_base64, body.session_id, user)
     doc = await save_generation("cutout", "Background removed", img, body.session_id, user, "Cutout", model="Luchii Prime",
-                                publish=body.publish, lineage=lineage)
-    return {"id": doc["id"], "kind": "cutout", "model": "Luchii Prime", "image_base64": img, "prompt": "Background removed",
+                                publish=body.publish, lineage=lineage, extra={"engine_flow": flow_rec})
+    return {"id": doc["id"], "kind": "cutout", "engine_flow": flow_rec, "model": "Luchii Prime", "image_base64": img, "prompt": "Background removed",
             "engine": "luchii-local", "public": bool(doc.get("public")), **lineage}
 
 
 @api.post("/upscale")
-async def upscale(body: UpscaleIn, user: Optional[dict] = Depends(optional_user)):
+async def upscale(body: UpscaleIn, user: Optional[dict] = Depends(optional_user), flow_rec: Optional[dict] = Depends(no_flow)):
+    flow_rec = flow_rec or await creation_check("image", user, body.prompt or "Upscaled")
     img, engine = await image_with_fallback({"prompt": UPSCALE_PRESET, "image_base64": strip_data_url(body.image_base64)},
                                             local_engines.upscale_image, body.image_base64)
     lineage = await resolve_parent(body.parent_id, body.image_base64, body.session_id, user)
     doc = await save_generation("upscale", body.prompt or "Upscaled", img, body.session_id, user, "Upscale 4K",
-                                publish=body.publish, lineage=lineage)
-    return {"id": doc["id"], "kind": "upscale", "model": "Luchii Prime", "image_base64": img, "prompt": body.prompt,
+                                publish=body.publish, lineage=lineage, extra={"engine_flow": flow_rec})
+    return {"id": doc["id"], "kind": "upscale", "engine_flow": flow_rec, "model": "Luchii Prime", "image_base64": img, "prompt": body.prompt,
             "engine": engine, "public": bool(doc.get("public")), **lineage}
 
 
@@ -562,11 +583,11 @@ async def upscale(body: UpscaleIn, user: Optional[dict] = Depends(optional_user)
 IMAGE_JOB_STALE_S = 20 * 60
 
 
-async def _run_image_job(jid: str, fn, body, user: Optional[dict]):
+async def _run_image_job(jid: str, fn, body, user: Optional[dict], flow_rec: dict):
     for attempt in range(150):
         try:
             await db.image_jobs.update_one({"id": jid}, {"$set": {"status": "running", "updated_at": now_iso()}})
-            res = await fn(body, user)
+            res = await fn(body, user, flow_rec)
             break
         except HTTPException as e:
             if e.status_code == 429 and attempt < 149:
@@ -584,12 +605,13 @@ async def _run_image_job(jid: str, fn, body, user: Optional[dict]):
 
 
 async def _start_image_job(kind: str, fn, body, user: Optional[dict]) -> dict:
+    flow_rec = await creation_check("image", user, getattr(body, "prompt", None) or kind)
     job = {"id": str(uuid.uuid4()), "kind": kind, "status": "queued", "result": None, "error": None,
            "model": getattr(body, "model", None), "user_id": user["id"] if user else None,
            "created_at": now_iso(), "updated_at": now_iso()}
     await db.image_jobs.insert_one(job.copy())
-    asyncio.create_task(_run_image_job(job["id"], fn, body, user))
-    return {"job_id": job["id"], "status": "queued", "kind": kind}
+    asyncio.create_task(_run_image_job(job["id"], fn, body, user, flow_rec))
+    return {"job_id": job["id"], "status": "queued", "kind": kind, "engine_flow": flow_rec}
 
 
 @api.post("/generate/jobs")
@@ -889,7 +911,7 @@ async def job_out(job: dict) -> dict:
            "engine": ENGINE_LABELS.get(job.get("render_engine") or "", job.get("render_engine")), "model": job.get("model"),
            "mode": "image-to-video" if job.get("has_image") else None,
            "luchii_model": job.get("luchii_model"), "progress": job.get("progress"),
-           "phase": job.get("phase"), "phase_detail": job.get("phase_detail"),
+           "phase": job.get("phase"), "phase_detail": job.get("phase_detail"), "engine_flow": job.get("engine_flow"),
            "url": f"/api/media/{job['id']}" if job["status"] == "completed" else None}
     if job["status"] == "queued":
         out["queue_position"] = await db.jobs.count_documents(
@@ -1081,13 +1103,14 @@ async def run_media(job: dict):
 
 
 async def create_media_job(kind: str, body: JobIn, user: Optional[dict], gateway: str = ""):
+    flow_rec = await creation_check(kind, user, body.prompt.strip())
     lo, hi = MEDIA_LIMITS[kind]
     job = {"id": str(uuid.uuid4()), "kind": kind, "engine": "local", "status": "queued", "prompt": body.prompt.strip(),
            "style": body.style, "duration": max(lo, min(hi, engine_rules.default_duration(kind, body.duration))), "error": None,
            "model": body.model if kind == "video" else None, "aspect_ratio": body.aspect_ratio or "16:9",
            "has_image": bool(body.image_base64 and kind == "video"),
            "luchii_model": luchii_media_model(kind, body.luchii_model, bool(body.image_base64 and kind == "video")),
-           "user_id": user["id"] if user else None, "created_at": now_iso()}
+           "user_id": user["id"] if user else None, "engine_flow": flow_rec, "created_at": now_iso()}
     await db.jobs.insert_one(job.copy())
     asyncio.create_task(run_media({**job, "gateway": gateway, "image_base64": body.image_base64 if kind == "video" else None}))
     return await job_out(job)
@@ -1593,6 +1616,19 @@ async def gpu_admin_aws_usage(request: Request, month: Optional[str] = None, _: 
     return {"configured": True, **await aws_gpu.usage(public_gateway(request), month)}
 
 
+@api.post("/gpu-admin/aws/quota/check")
+async def gpu_admin_aws_quota_check(request: Request, _: dict = Depends(admin_user)):
+    if not aws_gpu.enabled():
+        raise HTTPException(status_code=400, detail="AWS GPU is not configured")
+    await aws_gpu.check_quota(public_gateway(request))
+    return await aws_gpu.overview(public_gateway(request))
+
+
+@api.post("/gpu-admin/aws/quota/dismiss")
+async def gpu_admin_aws_quota_dismiss(request: Request, _: dict = Depends(admin_user)):
+    return await aws_gpu.dismiss_quota_alert(public_gateway(request))
+
+
 @api.post("/gpu-admin/aws/stop")
 async def gpu_admin_aws_stop(request: Request, _: dict = Depends(admin_user)):
     return await aws_gpu.stop(public_gateway(request))
@@ -1745,9 +1781,10 @@ async def _run_agent_task(task: dict, user: Optional[dict]):
     try:
         if task["type"] == "image":
             body = GenerateIn(prompt=task["prompt"], style=task.get("style") or "cinematic", model=task.get("model"))
+            flow_rec = await creation_check("image", user, task["prompt"])
             for attempt in range(60):
                 try:
-                    res = await generate(body, user)
+                    res = await generate(body, user, flow_rec)
                     break
                 except HTTPException as e:
                     if e.status_code != 429 or attempt == 59:
@@ -2002,6 +2039,13 @@ async def engines_diagnostics(component: Optional[str] = None, owner: str = Depe
             raise HTTPException(status_code=404, detail="Unknown component")
         return {"component": component, "events": await engine_systems.fetch_diagnostics(owner, component)}
     return await engine_systems.aggregate_diagnostics(owner)
+
+
+@api.get("/engines/creations")
+async def engines_creations(owner: str = Depends(engine_owner)):
+    if not owner.startswith("admin:"):
+        raise HTTPException(status_code=403, detail="Admins only")
+    return await engine_systems.creation_stats()
 
 
 @api.get("/engines/identity")
