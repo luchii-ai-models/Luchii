@@ -209,23 +209,70 @@ def render(model, *, prompt, negative_prompt=None, duration=5, aspect_ratio="16:
             img.save(buf, format="PNG")
             return buf.getvalue(), "image/png"
         if model == "frasberg-motion-free":
-            h, w = _size(aspect_ratio, 704, 480, 32) if aspect_ratio in ("16:9", "9:16") else (512, 512)
-            n = _frames(duration, 24, 8, 120)
-            common = dict(prompt=prompt, negative_prompt=neg, height=h, width=w, num_frames=n, num_inference_steps=30,
-                          decode_timestep=0.03, decode_noise_scale=0.025, generator=_gen(seed),
-                          callback_on_step_end=_cb(progress, 30))
-            key = "i2v" if image is not None else "t2v"
-            if pipes["active"] != key:
-                import torch
-                if torch.cuda.is_available():
-                    pipes[key].enable_model_cpu_offload()
-                pipes["active"] = key
-            extra = {"image": _fit(image, h, w)} if image is not None else {}
-            frames = pipes[key](**common, **extra).frames[0]
-            return _mp4(frames, 24), "video/mp4"
+            return _ltx_free(pipes, prompt, neg, duration, aspect_ratio, seed, image, progress), "video/mp4"
         if model == "frasberg-dev-test":
             return _dev_test(prompt, duration, image, progress), "video/mp4"
     raise ValueError(f"Unknown Frasberg engine {model}")
+
+
+FREE_SEGMENT_MAX = 97   # frames per LTX pass that fit a 16GB T4 (4s at 24fps)
+SEAM_TRIM = 8           # LTX softens the last frames of a pass; the next part starts before them
+SEAM_BLEND = 24         # frames over which the colour match at the seam fades out
+
+
+def _ltx_pass(pipes, key, h, w, n, prompt, neg, seed, image, progress, offset, span):
+    if pipes["active"] != key:
+        import torch
+        if torch.cuda.is_available():
+            pipes[key].enable_model_cpu_offload()
+        pipes["active"] = key
+    extra = {"image": _fit(image, h, w)} if image is not None else {}
+    return pipes[key](prompt=prompt, negative_prompt=neg, height=h, width=w, num_frames=n, num_inference_steps=30,
+                      decode_timestep=0.03, decode_noise_scale=0.025, generator=_gen(seed),
+                      callback_on_step_end=_cb(progress, 30, offset, span), **extra).frames[0]
+
+
+def _seam_match(head, tail_ref):
+    """Colour-match the start of the next part to the frame it continues from, fading back to its own look, so the
+    stitch is invisible even when image-to-video drifts the grade a little."""
+    import numpy as np
+    ref = np.asarray(tail_ref, dtype=np.float32)
+    first = np.asarray(head[0], dtype=np.float32)
+    mu_r, sd_r = ref.reshape(-1, 3).mean(0), ref.reshape(-1, 3).std(0) + 1e-3
+    mu_f, sd_f = first.reshape(-1, 3).mean(0), first.reshape(-1, 3).std(0) + 1e-3
+    out = []
+    for i, fr in enumerate(head):
+        a = np.asarray(fr, dtype=np.float32)
+        k = max(0.0, 1.0 - i / SEAM_BLEND)
+        if k > 0:
+            matched = (a - mu_f) / sd_f * sd_r + mu_r
+            a = a * (1 - k) + matched * k
+        out.append(np.clip(a, 0, 255).astype(np.uint8))
+    return out
+
+
+def _ltx_free(pipes, prompt, neg, duration, aspect, seed, image, progress):
+    """Frasberg Motion Free. Up to 4s is one LTX pass; 6-8s clips are two passes stitched seamlessly: part B is
+    image-to-video from a clean frame near the end of part A (same prompt), the duplicate frame is dropped and the
+    colour is matched across the seam."""
+    import numpy as np
+    from PIL import Image
+    h, w = _size(aspect, 704, 480, 32) if aspect in ("16:9", "9:16") else (512, 512)
+    total = int(duration * 24)
+    if total <= FREE_SEGMENT_MAX:
+        n = _frames(duration, 24, 8, FREE_SEGMENT_MAX)
+        frames = _ltx_pass(pipes, "i2v" if image is not None else "t2v", h, w, n, prompt, neg, seed, image, progress, 0, 1)
+        return _mp4(frames, 24)
+    # two parts of equal length; part A keeps SEAM_TRIM extra frames that are cut at the seam
+    seg = min(FREE_SEGMENT_MAX, ((total // 2 + SEAM_TRIM) // 8) * 8 + 1)
+    a = _ltx_pass(pipes, "i2v" if image is not None else "t2v", h, w, seg, prompt, neg, seed, image, progress, 0, 0.5)
+    cut = len(a) - SEAM_TRIM
+    seam = a[cut - 1]
+    seam_img = seam if isinstance(seam, Image.Image) else Image.fromarray(np.asarray(seam))
+    b = _ltx_pass(pipes, "i2v", h, w, seg, prompt, neg, None if seed is None else int(seed) + 1, seam_img,
+                  progress, 0.5, 0.5)
+    frames = list(a[:cut]) + [Image.fromarray(x) for x in _seam_match(b[1:], seam)]
+    return _mp4(frames, 24)
 
 
 def _ltx(pipes, prompt, neg, duration, aspect, seed, image, progress):

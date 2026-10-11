@@ -34,9 +34,10 @@ router = APIRouter(prefix="/api/gpu")
 MODELS = {
     "frasberg-motion-free": {
         "name": "Frasberg Motion Free", "kind": "video", "tier": "free", "modes": ["text-to-video", "image-to-video"],
-        "durations": [3, 4], "resolution": "480p · 24fps", "eta_seconds": 240, "min_vram_gb": 14,
+        "durations": [3, 4, 6, 8], "resolution": "480p · 24fps", "eta_seconds": 150, "min_vram_gb": 14,
+        "eta_by_duration": {"3": 120, "4": 150, "6": 270, "8": 330},
         "built_on": "LTX-Video 2B (Lightricks)",
-        "blurb": "Real AI motion on free GPUs (Kaggle / Colab T4). Zero cost, a little slower.",
+        "blurb": "Real AI motion on free GPUs (Kaggle / Colab T4). Zero cost; 6-8s clips are two renders stitched seamlessly.",
     },
     "frasberg-motion-fast": {
         "name": "Frasberg Motion Fast", "kind": "video", "tier": "fast", "modes": ["text-to-video", "image-to-video"],

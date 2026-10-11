@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { History, GitBranch, Globe } from "lucide-react";
+import { History, GitBranch } from "lucide-react";
 
 const label = (it) => {
   if (it.kind === "source") return "Original photo";
@@ -51,7 +51,6 @@ export default function RemixHistory({ data, currentId, onOpen, busy }) {
                   <span className={`absolute top-1 left-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${on ? "bg-[#00F0FF] text-black" : "bg-black/75 text-white"}`}>
                     {step === 0 ? "Start" : `Step ${step}`}
                   </span>
-                  {it.public && <Globe className="absolute top-1 right-1 w-3.5 h-3.5 text-[#00F0FF]" aria-label="Public" />}
                 </div>
                 <p className="mt-1 px-0.5 text-[11px] leading-tight text-neutral-300 line-clamp-2" title={label(it)}>{label(it)}</p>
               </button>

@@ -54,15 +54,8 @@ export function AuthProvider({ children }) {
 
   const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
 
-  // Auto-publish: send each new image straight to the public homepage gallery.
-  const setAutoPublish = async (on) => {
-    const res = await axios.put(`${API}/me/settings`, { auto_publish: on }, { headers: authHeader });
-    setUser((u) => (u ? { ...u, auto_publish: res.data.auto_publish } : u));
-    return res.data.auto_publish;
-  };
-
   return (
-    <AuthContext.Provider value={{ user, token, loading, register, login, logout, authHeader, setAutoPublish }}>
+    <AuthContext.Provider value={{ user, token, loading, register, login, logout, authHeader }}>
       {children}
     </AuthContext.Provider>
   );

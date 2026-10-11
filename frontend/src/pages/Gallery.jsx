@@ -3,7 +3,7 @@ import { LuchiiBadge, luchiiModelFor } from "../components/LuchiiBadge";
 import { downloadWithLuchii } from "../lib/luchiiMark";
 import { Link, useNavigate } from "react-router-dom";
 import axios from "axios";
-import { Sparkles, ArrowLeft, Download, ImageIcon, Loader2, Wand2, Share2, Trash2, AudioLines, Box, Search, Clapperboard, RotateCcw, ExternalLink, Globe, History } from "lucide-react";
+import { Sparkles, ArrowLeft, Download, ImageIcon, Loader2, Wand2, Share2, Trash2, AudioLines, Box, Search, Clapperboard, RotateCcw, ExternalLink, History } from "lucide-react";
 import { shareVideo, isPreviewEngine } from "./Studio";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
@@ -282,12 +282,6 @@ export default function Gallery() {
                 <img src={g.image_base64} alt={g.prompt} className="w-full aspect-square object-cover" />
                 {selecting && <SelectMark id={g.id} checked={selected.has(g.id)} onToggle={toggleSel} />}
                 <LuchiiBadge overlay model={imageModel(g)} className="!top-2 !bottom-auto" testId={`gallery-luchii-badge-${g.id}`} />
-                {g.public && (
-                  <span data-testid={`gallery-public-badge-${g.id}`} title="Shown in the public gallery"
-                    className="absolute top-2 right-2 z-10 inline-flex items-center gap-1 rounded-full bg-black/70 backdrop-blur px-2 py-0.5 text-[10px] font-semibold text-[#00F0FF]">
-                    <Globe className="w-3 h-3" /> Public
-                  </span>
-                )}
                 <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent md:opacity-0 md:group-hover:opacity-100 transition-opacity" />
                 <div className="absolute bottom-0 inset-x-0 p-3 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                   <p className="text-xs text-neutral-200 line-clamp-2">{g.prompt}</p>
@@ -300,18 +294,6 @@ export default function Gallery() {
                           <History className="w-4 h-4" />
                         </button>
                       )}
-                      <button onClick={async () => {
-                          try {
-                            const { data } = await axios.post(`${API}/generations/${g.id}/publish`, { public: !g.public }, { headers: authHeader });
-                            setItems((xs) => xs.map((x) => (x.id === g.id ? { ...x, public: data.public } : x)));
-                            toast.success(data.public ? "Published to the public gallery" : "Removed from the public gallery");
-                          } catch (_) { toast.error("Could not change this image"); }
-                        }}
-                        data-testid={`gallery-publish-${g.id}`} aria-pressed={!!g.public}
-                        className={g.public ? "text-[#00F0FF] hover:text-white" : "text-white/80 hover:text-white"}
-                        title={g.public ? "Remove from the public gallery" : "Publish to the public gallery"}>
-                        <Globe className="w-4 h-4" />
-                      </button>
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(`${window.location.origin}/s/${g.id}`);

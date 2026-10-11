@@ -181,7 +181,7 @@ def make_token(user_id: str, email: str) -> str:
 
 
 def public_user(u: dict) -> dict:
-    return {"id": u["id"], "name": u.get("name", ""), "email": u["email"], "auto_publish": bool(u.get("auto_publish"))}
+    return {"id": u["id"], "name": u.get("name", ""), "email": u["email"]}
 
 
 async def optional_user(request: Request) -> Optional[dict]:
@@ -316,11 +316,8 @@ async def speak_with_fallback(text: str, voice: Optional[str]) -> dict:
 
 
 def wants_publish(user: Optional[dict], publish: Optional[bool]) -> bool:
-    """Signed-in creators can send new images straight to the public gallery (per request, or their auto-publish
-    setting). Guests never publish: their images have no owner who could take them down again."""
-    if not user:
-        return False
-    return bool(user.get("auto_publish")) if publish is None else bool(publish)
+    """There is no public community gallery: every image stays private to its creator."""
+    return False
 
 
 async def resolve_parent(parent_id: Optional[str], src_image: str, session_id: Optional[str],
@@ -666,39 +663,6 @@ async def delete_generation(gen_id: str, user: dict = Depends(current_user)):
     return {"deleted": gen_id}
 
 
-class SettingsIn(BaseModel):
-    auto_publish: bool
-
-
-class PublishIn(BaseModel):
-    public: bool
-
-
-def user_settings(user: dict) -> dict:
-    return {"auto_publish": bool(user.get("auto_publish"))}
-
-
-@api.get("/me/settings")
-async def get_settings(user: dict = Depends(current_user)):
-    return user_settings(user)
-
-
-@api.put("/me/settings")
-async def put_settings(body: SettingsIn, user: dict = Depends(current_user)):
-    await db.users.update_one({"id": user["id"]}, {"$set": {"auto_publish": body.auto_publish}})
-    return {"auto_publish": body.auto_publish}
-
-
-@api.post("/generations/{gen_id}/publish")
-async def publish_generation(gen_id: str, body: PublishIn, user: dict = Depends(current_user)):
-    upd = {"$set": {"public": True, "published_at": now_iso()}} if body.public else \
-        {"$set": {"public": False}, "$unset": {"published_at": ""}}
-    res = await db.generations.update_one({"id": gen_id, "user_id": user["id"], "hidden": {"$ne": True}}, upd)
-    if not res.matched_count:
-        raise HTTPException(status_code=404, detail="Not found")
-    return {"id": gen_id, "public": body.public}
-
-
 HISTORY_FIELDS = {"_id": 0, "id": 1, "parent_id": 1, "root_id": 1, "step": 1, "kind": 1, "prompt": 1, "instruction": 1,
                   "model": 1, "style": 1, "created_at": 1, "public": 1, "mini_base64": 1, "thumb_base64": 1}
 
@@ -726,22 +690,6 @@ async def remix_history(gen_id: str):
         d["public"] = bool(d.get("public"))
         d.setdefault("step", 0 if d["id"] == root else None)
     return {"root_id": root, "current_id": gen_id, "items": docs}
-
-
-@api.get("/gallery/public")
-async def public_gallery(limit: int = 48):
-    cur = db.generations.find({"public": True, "image_base64": {"$ne": None}, "hidden": {"$ne": True}},
-                              {"_id": 0, "id": 1, "prompt": 1, "style": 1, "model": 1, "author": 1,
-                               "created_at": 1, "image_base64": 1, "thumb_base64": 1})
-    return [_listed(d) for d in await cur.sort("created_at", -1).limit(min(limit, 120)).to_list(None)]
-
-
-async def publish_recent_generations(hours: float) -> int:
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    res = await db.generations.update_many(
-        {"created_at": {"$gte": since}, "image_base64": {"$ne": None}, "public": {"$ne": True}, "hidden": {"$ne": True}},
-        {"$set": {"public": True, "published_at": now_iso()}})
-    return res.modified_count
 
 
 @api.get("/share/{gen_id}")
@@ -1543,11 +1491,6 @@ async def admin_user(user: dict = Depends(current_user)) -> dict:
     if user["email"].lower() not in ADMIN_EMAILS:
         raise HTTPException(status_code=403, detail="Admins only")
     return user
-
-
-@api.post("/admin/gallery/publish-recent")
-async def admin_publish_recent(hours: float = 2, _: dict = Depends(admin_user)):
-    return {"published": await publish_recent_generations(hours), "hours": hours}
 
 
 @api.get("/engines/status")

@@ -99,12 +99,16 @@ function Progress({ kind, job, eta }) {
   const phase = kind === "video" && !queued ? job.phase : null;
   const label = queued ? `In the queue: #${job.queue_position || 1}`
     : phase === "gpu-boot" ? `${job.phase_detail || "Starting a free Frasberg GPU"}…`
-      : phase === "gpu-render" ? `Rendering real motion...${pct}`
+      : phase === "gpu-render" && job.duration > 4
+        ? `Rendering part ${(job.progress || 0) < 0.5 ? "1" : "2"} of 2...${pct}`
+        : phase === "gpu-render" ? `Rendering real motion...${pct}`
         : kind === "video" ? `Rendering your clip...${pct}` : "Composing your track...";
   return (
     <div className="py-6" data-testid={queued ? `${kind}-queue-notice` : `${kind}-rendering`}>
       <LogoLoader label={label}
-        sublabel={queued ? "Another request is finishing first. Yours starts next." : PHASE_SUB[phase] || `Created by Luchii · ${eta}`} />
+        sublabel={queued ? "Another request is finishing first. Yours starts next."
+          : phase === "gpu-render" && job.duration > 4 ? "Two real AI renders, stitched seamlessly into one clip · Created by Luchii"
+            : PHASE_SUB[phase] || `Created by Luchii · ${eta}`} />
       {phase && <p className="sr-only" data-testid="video-phase">{phase}</p>}
     </div>
   );
@@ -153,7 +157,7 @@ export default function Studio({ kind }) {
   const durations = kind === "video" && gpuLive && current.durations?.length ? current.durations : cfg.durations;
   useEffect(() => { if (!durations.includes(duration)) setDuration(durations.includes(5) ? 5 : durations[0]); }, [durations, duration]);
   const etaText = kind === "video" && gpuLive
-    ? `${fmtEta(current.eta_seconds)}${current.status === "on-demand" ? " on a free GPU (plus 6–10 min if it has to wake up)" : ""}`
+    ? `${fmtEta(current.eta_by_duration?.[String(duration)] ?? current.eta_seconds)}${duration > 4 && current.id === "frasberg-motion-free" ? " (two renders stitched into one clip)" : ""}${current.status === "on-demand" ? " on a free GPU (plus 6–10 min if it has to wake up)" : ""}`
     : cfg.eta(duration);
 
   const pickImage = async (e) => {

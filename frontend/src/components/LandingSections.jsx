@@ -8,7 +8,6 @@ import {
 import { Button } from "./ui/button";
 import { toast } from "sonner";
 import { tools, showcase as fallbackShowcase, faqs } from "../mock";
-import PublicGallery from "./PublicGallery";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -37,7 +36,6 @@ function SectionHead({ eyebrow, title, sub, id }) {
 export default function LandingSections() {
   const navigate = useNavigate();
   const items = fallbackShowcase;
-  const [publicItems, setPublicItems] = useState([]);
 
   const openTool = (t) => {
     if (t.soon) {
@@ -54,12 +52,6 @@ export default function LandingSections() {
     const qs = params.toString();
     navigate(`/create${qs ? `?${qs}` : ""}`);
   };
-
-  useEffect(() => {
-    axios.get(`${API}/gallery/public`, { params: { limit: 24 } })
-      .then((res) => Array.isArray(res.data) && setPublicItems(res.data))
-      .catch(() => {});
-  }, []);
 
   return (
     <>
@@ -124,8 +116,6 @@ export default function LandingSections() {
           ))}
         </div>
       </section>
-
-      <PublicGallery items={publicItems} titleFor={titleFromPrompt} />
 
       {/* Tools grid */}
       <section id="tools" className="max-w-[1400px] mx-auto px-5 md:px-8 py-20 md:py-28 scroll-mt-16">
