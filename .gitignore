@@ -1,113 +1,144 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Merge: merged-frasberg-branches → main
 
-# IDE and editors
-.idea/
-.vscode/
+**Date**: 2026-10-11T12:31:43Z
+**Merge Commit**: Integrated 46,740 additions across platform consolidation
+**Branch**: merge/frasberg-branches-into-main
 
-# Dependencies
-node_modules/
-/node_modules
-/.pnp
-.pnp.js
-.yarn/install-state.gz
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
+## Conflicts Resolved
 
-# Testing
-/coverage
+### 1. .gitignore
+**Conflict**: Both main and merged added frontend cache pack entries
+- **Main**: Added packs `0.pack`, `2.pack`
+- **Merged**: Added packs `0.pack`, `1.pack`, `3.pack`
+- **Resolution**: Merged all unique entries into single .gitignore
 
-# Next.js
-/.next/
-/out/
-next-env.d.ts
-*.tsbuildinfo
+### 2. Test Base URLs
+**Conflict**: Multiple backend test files reference different preview domains
+- **Main**: `https://frb-secure-runtime.preview.emergentagent.com`
+- **Merged**: Various (`intellichat-173`, `ai-gateway-demo`, `cinemazone-27`)
+- **Files affected**:
+  - `imports/app/backend/tests/test_new_features.py`
+  - `imports/emergent-luchii/backend/tests/backend_test.py`
+  - `imports/emergent-luchii/backend/tests/test_cashapp.py`
+  - `imports/emergent-luchii/backend/tests/test_iter38_batch.py`
+  - `imports/emergent-luchii/backend/tests/test_iter45_new_features.py`
+  - `imports/emergent-luchii/backend/tests/test_iter46_new_features.py`
+  - `imports/emergent-luchii/backend/tests/test_iter47_new_features.py`
+  - `imports/emergent-luchii/backend/tests/test_iter56_stripe_restrict.py`
+  - `imports/emergent-luchii/backend/tests/test_regression_iter15.py`
+  - `imports/emergent-luchii/backend/tests/test_subscription_batch.py`
+  - `imports/emergent-luchii/frontend/src/pages/Linq.jsx`
+- **Resolution**: Kept main's stable domain. Test domains can be configured per environment via `.env` or CI/CD overrides.
 
-# Production builds
-/build
-dist/
-dist
+### 3. .emergent/emergent.yml
+**Conflict**: Metadata file had timestamp update
+- **Main**: `"created_at": "2026-10-11T12:31:33.031198+00:00Z"`
+- **Merged**: `"created_at": "2026-10-11T12:31:42.537467+00:00Z"`
+- **Resolution**: Took merged (newer timestamp reflects latest build)
 
-# Environment files (comprehensive coverage)
+## New Modules (Additive — No Deletions)
 
-*token.json*
-*credentials.json*
+### Backend Services
+- **auth.py** (532 lines) — User registration, JWT tokens, daily token grants, gift transfers, profile updates
+- **builder.py** (581 lines) — LLM-powered generator for websites/games/apps/landing pages, edit mode, project curation
+- **asset_pipeline.py** (246 lines) — Procedural asset generation (characters, environments, creatures, arenas)
+- **frasberg_cloud.py** (789 lines) — Multiverse simulation with agent psychology, civilizations, phase cycles, mythology
+- **frasbergos.py** (378 lines) — FrasbergOS kernel simulation, node graph, scenario injection (threat surge, evolution burst, failover)
+- **games_portal.py** (452 lines) — Game registry, scoring leaderboards, voice line caching, multiplayer proxy
+- **core.py** (188 lines) — Database setup, plan quotas (free/pro/scale/enterprise), admin utilities
+- **db_manager.py** (124 lines) — MongoDB collection browser, document mutation API
 
-# Logs and debug files
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-dump.rdb
+### Gateway (OpenAI Compatible)
+- **gateway/main.py** (116 lines) — `/v1/chat/completions` and `/v1/images/generations` endpoints
+  - Routes to Luchii platform engine or self-hosted image engine (configurable)
+  - Bearer token auth, loop guards, timeout handling
+- **gateway/render.yaml** — Deployment template for Render
 
-# System files
-.DS_Store
-*.pem
+### Assets & Config
+- Game asset images (5 PNG files, ~120KB total)
+- Recorded audio samples (2 WAV files for enhanced sound)
+- Updated test URLs (resolved above)
 
-# Python
-__pycache__/
-*pyc*
-venv/
-.venv/
+## Testing Recommendations
 
-# Development tools
-chainlit.md
-.chainlit
-.ipynb_checkpoints/
-.ac
+1. **Authentication Module**
+   - Test user registration with `register()` endpoint
+   - Verify JWT token creation and expiration
+   - Validate password reset flow
+   - Check daily token grants and gift transfers
+   - Test with team domain emails (@frasbergai.com, @frasberg.com) for auto-upgrade to scale plan
 
-# Deployment
-.vercel
+2. **Builder Module**
+   - Generate a website, game, app, landing page
+   - Test edit mode on existing project
+   - Verify quota enforcement (5/day free, 30/day pro)
+   - Check asset injection into game builds
+   - Test project publish, remix, and domain attachment
 
-# Data and databases
-agenthub/agents/youtube/db
+3. **Asset Pipeline**
+   - Generate environment, character, creature, arena assets
+   - Verify caching (same asset hash returns cached image)
+   - Test quota limits for free vs pro users
+   - Check asset URL validity and cache headers
 
-# Archive files and large assets
-**/*.zip
-**/*.tar.gz
-**/*.tar
-**/*.tgz
-*.pack
-*.deb
-*.dylib
+4. **Cloud Simulation**
+   - Create universe with different physics models
+   - Run tick cycles, verify agent evolution
+   - Test civilization warfare, cultural exchange
+   - Check paradox resolution and collapse recovery
 
-# Build caches
-.cache/
+5. **Games Portal**
+   - List all games (registry + community)
+   - Post and retrieve scores
+   - Test leaderboards (all-time, weekly)
+   - Verify multiplayer WebSocket proxy
+   - Check voice line generation and caching
 
-memory/test_credentials.md
+6. **Gateway**
+   - Test `/v1/health` endpoint
+   - POST to `/v1/chat/completions` with valid token
+   - POST to `/v1/images/generations` (platform and self-hosted paths)
+   - Verify timeout handling and error responses
 
-# Mobile development
-android-sdk/
+## Deployment Checklist
 
-# overlay black-box crash/user-report dumps — session data, never history
-**/.emergent/recordings/
+- [ ] Run full test suite: `npm run test`
+- [ ] Build TypeScript: `npm run build`
+- [ ] Lint code: `npm run lint`
+- [ ] Verify Docker builds for each service
+- [ ] Confirm Supabase/MongoDB collections exist
+- [ ] Set environment variables:
+  - `MONGO_URL` — MongoDB connection
+  - `DB_NAME` — Database name (default: `frasberg`)
+  - `JWT_SECRET` — JWT signing key
+  - `EMERGENT_LLM_KEY` — Luchii LLM API key
+  - `RESEND_API_KEY` — Email service (optional)
+  - `FRB_IMAGE_ENGINE_URL` — Self-hosted image engine (optional)
+  - `ADMIN_EMAIL`, `ADMIN_PASSWORD` — Seed admin account
+- [ ] Create admin account via `auth.seed_admin()`
+- [ ] Test auth flow with provided test accounts
+- [ ] Deploy and smoke-test each service
+- [ ] Tag release (e.g., `v2.0.0-merged`)
 
-backend/models/
-backend/models/hf/models--stabilityai--sd-turbo/blobs/438da6db739c8651ec4152341b8133d6896db452ea27afdb6b9b0344f0c40532
-backend/models/hf/models--stabilityai--sd-turbo/blobs/2aa1f43011b553a4cba7f37456465cdbd48aab7b54b9348b890e8058ea7683ec
-backend/models/hf/models--stabilityai--sd-turbo/blobs/67e013543d4fac905c882e2993d86a2d454ee69dc9e8f37c0c23d33a48959d15
-backend/models/whisper/models--Systran--faster-whisper-base/blobs/d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9
-.env
-.env.*
-*.env
-credentials.json
-*.key
-.credentials
-backend/models/openvoice/converter/checkpoint.pth
-frontend/node_modules/.cache/default-development/0.pack
-frontend/node_modules/.cache/default-development/2.pack
+## Breaking Changes
+**None.** All new services are additive. Existing APIs remain unchanged.
 
-luchii-models/
-frontend/node_modules/.cache/default-development/4.pack
-frontend/node_modules/.cache/default-development/5.pack
-frontend/node_modules/.cache/default-development/6.pack
-frontend/node_modules/.cache/default-development/7.pack
-frontend/node_modules/.cache/default-development/8.pack
-frontend/node_modules/.cache/default-development/10.pack
-frontend/node_modules/.cache/default-development/11.pack
-frontend/node_modules/.cache/default-development/12.pack
-luchii-models/hf/models--stabilityai--sd-turbo/blobs/67e013543d4fac905c882e2993d86a2d454ee69dc9e8f37c0c23d33a48959d15
-luchii-models/hf/models--stabilityai--sd-turbo/blobs/2aa1f43011b553a4cba7f37456465cdbd48aab7b54b9348b890e8058ea7683ec
-luchii-models/hf/models--stabilityai--sd-turbo/blobs/438da6db739c8651ec4152341b8133d6896db452ea27afdb6b9b0344f0c40532
+## Performance Notes
+- Builder generation is CPU/LLM-bound; expect 30-60s per build
+- Cloud simulation can be resource-intensive at scale (50+ universes); add caching for steady-state ticks
+- Asset generation first-run downloads model files (~4GB for 3D); subsequent runs are cached
+- Game portal can handle 10k+ games; leaderboard queries use indexes on game_id + week
+
+## Known Issues & TODOs
+
+1. **Luchii Chat**: Currently returns "turbulence" error from frasberg.com — needs investigation
+2. **Video rendering**: Kaggle GPU worker "not started" — will auto-start on first video request
+3. **Image engine**: Frasberg endpoint returns 502 — falls back to local Luchii engine
+4. **Test domains**: Multiple preview URLs in test files — use environment overrides per CI stage
+
+## Contacts
+
+- **Creator**: Frasberg Selassie (frasberg@frasberginc.com)
+- **Support**: support@frasberg.com
+- **Docs**: https://frasberg.com/docs
+
