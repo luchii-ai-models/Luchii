@@ -122,7 +122,10 @@ def _age_s(iso: str) -> float:
     return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds()
 
 
-async def launch(gateway: str, secret: str, reason: str, models: str = "frasberg-motion-free",
+FREE_MODELS = "frasberg-motion-free,frasberg-image-xl"
+
+
+async def launch(gateway: str, secret: str, reason: str, models: str = FREE_MODELS,
                  force: bool = False) -> dict:
     """Push + run the worker notebook unless a session is already queued/running or was just launched."""
     if not enabled():

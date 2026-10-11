@@ -63,6 +63,12 @@ MODELS = {
         "built_on": "FLUX.1-schnell (Black Forest Labs, Apache-2.0)",
         "blurb": "Sharp 4-step images with excellent text rendering.",
     },
+    "frasberg-image-xl": {
+        "name": "Frasberg Image XL", "kind": "image", "tier": "quality", "modes": ["text-to-image"],
+        "durations": [], "resolution": "1MP (1024² · 1344×768)", "eta_seconds": 30, "min_vram_gb": 10,
+        "built_on": "Juggernaut XL v9 (SDXL, RunDiffusion)",
+        "blurb": "High-precision photoreal and art images that follow long prompts closely. Runs on a free T4.",
+    },
     # Hidden protocol self-test engine (never shown in product UI, never used as a fallback).
     "frasberg-dev-test": {
         "name": "Frasberg Dev Test", "kind": "video", "tier": "dev", "modes": ["text-to-video", "image-to-video"],

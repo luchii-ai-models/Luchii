@@ -9,10 +9,13 @@ import sys
 
 from diffusers import DiffusionPipeline
 
-from engines import REPOS
+from engines import REPO_VARIANT, REPOS, XL_VAE
 
 for model in sys.argv[1:] or list(REPOS):
     for repo in REPOS.get(model, ()):
         print(f"[{model}] downloading {repo} ...", flush=True)
-        DiffusionPipeline.download(repo)
+        DiffusionPipeline.download(repo, variant=REPO_VARIANT.get(model))
+    if model == "frasberg-image-xl":
+        from huggingface_hub import snapshot_download
+        snapshot_download(XL_VAE, allow_patterns=["config.json", "diffusion_pytorch_model.safetensors"])
 print("done")
