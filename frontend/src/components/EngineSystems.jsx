@@ -23,14 +23,14 @@ function BlockEditor({ label, testid, value, onSave }) {
   );
 }
 
-function FlowRunner({ headers, domains }) {
+function FlowRunner({ headers, domains, onDone }) {
   const [domain, setDomain] = useState("structure");
   const [input, setInput] = useState("Frasberg flow run");
   const [res, setRes] = useState(null);
   const [busy, setBusy] = useState(false);
   const run = async () => {
     setBusy(true);
-    try { setRes((await axios.post(`${API}/engines/flow`, { domain, input }, { headers })).data); }
+    try { setRes((await axios.post(`${API}/engines/flow`, { domain, input }, { headers })).data); onDone(); }
     catch (e) { toast.error(e?.response?.data?.detail || "Flow failed"); } finally { setBusy(false); }
   };
   return (
@@ -91,7 +91,7 @@ export default function EngineSystems({ headers }) {
           </div>
         ))}
       </div>
-      <div className="mt-5"><FlowRunner headers={headers} domains={sys.flow_domains} /></div>
+      <div className="mt-5"><FlowRunner headers={headers} domains={sys.flow_domains} onDone={load} /></div>
       <div className="mt-5 grid md:grid-cols-3 gap-3">
         <BlockEditor label="Policy · blocked actions (yours)" testid="engine-policy" value={sys.policy.blockedActions} onSave={(a) => save("policy", a)} />
         <BlockEditor label="Governance · owner block" testid="engine-gov-owner" value={sys.governance.ownerBlock} onSave={(a) => save("governance", a)} />
