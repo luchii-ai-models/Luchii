@@ -17,7 +17,6 @@ The instance has no inbound ports (security group without ingress) and only call
 One instance per gateway host (tag FrasbergGatewayHost), so preview and production never share/steal a worker.
 """
 import asyncio
-import base64
 import hashlib
 import logging
 import os
@@ -406,6 +405,34 @@ async def resume(gateway: str, secret: str) -> dict:
     return await ensure(gateway, secret, reason="admin start")
 
 
+QUOTA_CHECK_EVERY_S = 300
+
+
+async def check_quota(gateway: str) -> dict:
+    """Refresh the G/VT quota; stamp quota_approved_at the first time it reaches what the instance needs."""
+    st = await _state(gateway)
+    need = VCPUS.get(instance_type(), 4)
+    q = await asyncio.to_thread(_quota_sync)
+    if q is None:
+        return st
+    fields = {"quota": q, "quota_checked_at": _now()}
+    if q < need:
+        fields["quota_request"] = await asyncio.to_thread(_quota_request_sync)
+        fields["quota_approved_at"] = None
+    elif not st.get("quota_approved_at"):
+        fields["quota_approved_at"] = _now()
+        fields["quota_alert_dismissed"] = False
+        log.info("AWS GPU quota approved: %s vCPU (needs %s)", q, need)
+    await _save(gateway, **fields)
+    st.update(fields)
+    return st
+
+
+async def dismiss_quota_alert(gateway: str) -> dict:
+    await _save(gateway, quota_alert_dismissed=True)
+    return {"dismissed": True}
+
+
 async def overview(gateway: str) -> dict:
     if not enabled():
         return {"configured": False}
@@ -414,17 +441,15 @@ async def overview(gateway: str) -> dict:
     wid = st.get("worker_id") or (cur or {}).get("worker_id")
     boot = await db.gpu_boot.find_one({"worker_id": wid}, {"_id": 0}) if wid else None
     if st.get("quota") is None or (st.get("quota") or 0) < VCPUS.get(instance_type(), 4):
-        q = await asyncio.to_thread(_quota_sync)
-        if q is not None:
-            req = await asyncio.to_thread(_quota_request_sync)
-            await _save(gateway, quota=q, quota_request=req)
-            st.update(quota=q, quota_request=req)
+        st = await check_quota(gateway)
     idle = await idle_info(gateway, cur) if cur and cur["state"] == "running" else None
     return {"configured": True, "mode": mode(), "idle_min": idle_min_(), "idle_choices": list(IDLE_CHOICES),
             "idle": idle, "hourly_usd": HOURLY_USD.get(instance_type()), "region": region(), "instance_type": instance_type(),
             "models": models(), "name": name_for(gateway), "gateway": gateway, "instance": cur, "boot": boot,
             "worker_id": wid, "quota": st.get("quota"), "quota_needed": VCPUS.get(instance_type(), 4),
-            "quota_request": st.get("quota_request"), "error": st.get("error"), "paused": bool(st.get("paused")),
+            "quota_request": st.get("quota_request"), "quota_approved_at": st.get("quota_approved_at"),
+            "quota_alert": bool(st.get("quota_approved_at")) and not st.get("quota_alert_dismissed") and mode() != "always_on",
+            "error": st.get("error"), "paused": bool(st.get("paused")),
             "last_action": st.get("last_action"), "last_action_at": st.get("last_action_at")}
 
 
@@ -574,7 +599,15 @@ async def reconcile_loop(gateway: str, secret: str):
     on_demand (cost saver): stop the box once it has been idle for idle_min minutes."""
     await asyncio.sleep(20)
     last_ensure = 0.0
+    last_quota = 0.0
     while True:
+        try:
+            st = await _state(gateway) if enabled() else {}
+            if enabled() and not st.get("quota_approved_at") and time.monotonic() - last_quota >= QUOTA_CHECK_EVERY_S:
+                last_quota = time.monotonic()
+                await check_quota(gateway)
+        except Exception:  # noqa: BLE001
+            log.exception("AWS quota check error")
         try:
             if enabled() and mode() == "always_on":
                 if time.monotonic() - last_ensure >= RECONCILE_EVERY_S and not (await _state(gateway)).get("paused"):
