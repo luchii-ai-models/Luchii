@@ -214,7 +214,6 @@ class TestEnforcement:
         assert r.status_code == 200, r.text[:200]
 
     def test_music_key_default_duration(self):
-        import time
         r = _post(
             f"{API}/chat/agents/tasks",
             json={"type": "music", "prompt": "TEST tiny loop"},
