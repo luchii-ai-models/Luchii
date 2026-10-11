@@ -164,3 +164,17 @@ Hardware reality of this pod: **2 CPU cores, no AVX2/bf16 hardware, ~6GB effecti
     - "Fully clothed" is no longer added when the user described clothing.
   - Painter-X routing: a command (make/change/give/add...) goes to InstructPix2Pix via normalize_instruction. Multi-part commands are applied step by step, and hair/clothes/hat/shoe edits are kept inside a SegFormer region mask (mattmdjaga/segformer_b2_clothes in PHOTO_MODELS_DIR). A description goes to photo_remix, and art-style remixes drop the photo hint and use strength 0.68. The /edit response includes instruction and edit_mode, and the UI shows a toast with the instruction it applied. The remix ETA is now 200s.
   - Verified: "give a blue hair and change clothes" on an EXIF-rotated photo gives an upright image with blue hair and a new shirt, with the face and background kept (about 4 min). A long fox prompt now renders the fox (131s).
+- 2026-10-11: Speed, faces and safety.
+  - Speed:
+    - The photo engine now decodes with TAESD instead of the full VAE (saves about 20s) and runs its Linear layers in bf16. The pod is Neoverse-V2 ARM, 2 CPUs and 8GB. Convolutions and attention stay fp32, because bf16 is very slow for them here.
+    - Detailed-prompt guidance is off. The draft keeps full size with 3 steps.
+    - At boot the photo engine, region parser, Face Fix and safety filter are kept warm (backend RSS about 5.5GB).
+    - Frasberg image calls are skipped for 10 min after a failure.
+    - Timings: text-to-image about 43s, quick draft about 30s.
+  - Painter-X fast_edit:
+    - Region edits (hair, clothes, face, hat, background) are a single masked img2img pass on the photo engine, about 50s.
+    - Other whole-image edits run guided at 512px, about 50s.
+    - Art styles (oil, watercolor, sketch, charcoal, comic/anime, pop art, pixel, mosaic/stained glass, ukiyo-e, vintage, b&w, neon, marble) use OpenCV filters in luchii_styles.py, 1–4s. The opencv-contrib-python-headless package was added.
+    - Descriptive remixes also go through fast_edit. IP2P is no longer used.
+  - luchii_face.py (Face Fix): YuNet detection, FFHQ alignment and GFPGAN 1.4 ONNX, blended at 0.85. It runs on every photo render and edit (not on art styles), about 3.5s. Weights are in /root/luchii-models/face.
+  - Safety filter: Falconsai/nsfw_image_detection checks each render (threshold 0.6). If flagged, it does one guided retry with SAFE_PROMPT and the negative prompt; if still flagged it raises UnsafeImage, returned as 422 "The Luchii safety filter blocked this result…".

@@ -274,16 +274,26 @@ async def gpu_image(prompt: str, aspect: Optional[str]) -> Optional[str]:
     return None
 
 
+FRASBERG_IMAGE_RETRY_S = 600
+_frasberg_image_down_until = 0.0
+
+
 async def image_with_fallback(frasberg_payload: dict, local_fn, *args) -> tuple:
-    try:
-        return await frasberg_image(frasberg_payload), "frasberg"
-    except HTTPException as e:
-        logger.warning("Frasberg image failed (%s); using Luchii in-house image engine", e.detail)
+    global _frasberg_image_down_until
+    # When Frasberg's image API is down, every request used to wait for it to fail first. Skip it for 10 min.
+    if time.time() >= _frasberg_image_down_until:
+        try:
+            return await frasberg_image(frasberg_payload), "frasberg"
+        except HTTPException as e:
+            _frasberg_image_down_until = time.time() + FRASBERG_IMAGE_RETRY_S
+            logger.warning("Frasberg image failed (%s); using Luchii in-house image engine", e.detail)
     if local_engines.image_busy():
         raise HTTPException(status_code=429, detail="Frasberg Creator is finishing another image. Yours is in the queue.",
                             headers={"Retry-After": "8"})
     try:
         return await asyncio.to_thread(local_fn, *args), "luchii-local"
+    except local_engines.UnsafeImage:
+        raise HTTPException(status_code=422, detail="The Luchii safety filter blocked this result. Please try a different prompt.")
     except Exception as e:  # noqa: BLE001
         logger.exception("Local image engine failed")
         raise HTTPException(status_code=424, detail=f"Luchii image engine error: {e.__class__.__name__}")
@@ -451,16 +461,16 @@ async def generate(body: GenerateIn, user: Optional[dict] = Depends(optional_use
 async def edit(body: EditIn, user: Optional[dict] = Depends(optional_user)):
     raw = body.prompt.strip().rstrip(".")
     if is_edit_command(raw):
-        # A command ("make the hair blue", "change the clothes") goes to the instruction-following engine,
-        # which edits only what was asked and keeps the rest of the photo.
+        # A command ("make the hair blue", "change the clothes") is mapped to the regions it names and edited
+        # in one fast masked pass on the warm photo engine (~30-60s); the rest of the photo is kept.
         instruction = normalize_instruction(raw)
         if body.style in ("anime", "3d", "digital-art"):
             instruction = f"{instruction}, {EDIT_STYLE[body.style]}"
-        local_fn, args, mode = local_engines.instruct_edit, (instruction, body.image_base64), "instruct"
+        local_fn, args, mode = local_engines.fast_edit, (instruction, body.image_base64), "instruct"
     else:
         # A description ("a woman in a red dress on a beach") re-renders the photo toward that description.
         instruction = f"{raw}, {EDIT_STYLE[body.style]}" if EDIT_STYLE.get(body.style or "") else raw
-        local_fn, args, mode = local_engines.photo_remix, (instruction, body.image_base64), "describe"
+        local_fn, args, mode = local_engines.fast_edit, (instruction, body.image_base64), "describe"
     img, engine = await image_with_fallback({"prompt": instruction, "image_base64": strip_data_url(body.image_base64)},
                                             local_fn, *args)
     doc = await save_generation("edit", body.prompt, img, body.session_id, user, "Remix", model="Luchii Painter-X")

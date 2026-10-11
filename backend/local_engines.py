@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import Optional
@@ -46,10 +47,10 @@ PHOTO_VAE = "stabilityai/sd-vae-ft-mse"
 PHOTO_LCM = "latent-consistency/lcm-lora-sdv1-5"
 PHOTO_STEPS = 4
 PHOTO_DRAFT_STEPS = 3
-PHOTO_NEGATIVE = ("nsfw, nude, deformed face, distorted, disfigured, blurry, cartoon, painting, lowres, "
+PHOTO_NEGATIVE = ("nsfw, nude, naked, topless, deformed face, distorted, disfigured, blurry, cartoon, painting, lowres, "
                   "bad anatomy, extra fingers, watermark, text")
 DETAILED_TOKENS = 30   # prompts this long describe several things; turn guidance on so none of them get dropped
-DETAIL_GUIDANCE = 1.6  # LCM works with 1-2; >1 also makes the negative prompt (nsfw, deformed...) effective
+DETAIL_GUIDANCE = 1.0  # >1 doubles render time on this CPU; prompt chunking + subject emphasis carry accuracy instead
 PHOTO_ASPECTS = {"1:1": (512, 512), "16:9": (704, 384), "9:16": (384, 704), "4:3": (576, 448), "3:4": (512, 640)}
 ASPECTS = {"1:1": (512, 512), "16:9": (640, 384), "9:16": (384, 640), "4:3": (576, 448), "3:4": (448, 576)}
 
@@ -190,6 +191,20 @@ def warm_up():
         logger.info("Luchii voice engine ready; image/3D/music/clone load on first use")
     except Exception:  # noqa: BLE001
         logger.exception("Luchii in-house engine warm-up failed")
+    # Images and remixes are the main use, so the photo engine (~3GB) and the small region parser are kept warm.
+    # _claim() still frees the photo engine before 3D/music load, so the one-heavy-model rule holds.
+    try:
+        with _heavy_lock:
+            _claim("photo")
+            _photo_pipe()
+        _parse_pipe()
+        import luchii_face
+        luchii_face.warm()
+        from PIL import Image
+        is_nsfw(Image.new("RGB", (64, 64)))
+        logger.info("Luchii photo engine, region parser, Face Fix and safety filter warm")
+    except Exception:  # noqa: BLE001
+        logger.exception("Luchii photo engine warm-up failed")
 
 
 def prefetch_scratch_models():
@@ -219,15 +234,24 @@ HD_SCALE = 4  # every 512px render is super-resolved (Luchii Prime compact, ~7s)
 SR_BLEND = 0.8  # keep 20% of the Lanczos image so skin and fabric keep natural texture
 
 
-def _hd(img, longest: Optional[int] = None, kind: str = "compact") -> str:
-    """Luchii Prime finishing pass: real-ESRGAN super-resolution, blended with Lanczos for natural texture."""
+def _hd(img, longest: Optional[int] = None, kind: str = "compact", faces: bool = False) -> str:
+    """Luchii Prime finishing pass: real-ESRGAN super-resolution, blended with Lanczos for natural texture.
+    faces=True also runs Luchii Face Fix (sharp, natural eyes) on the finished image."""
     from PIL import Image
     import luchii_sr
     target = longest or max(img.size) * HD_SCALE
     try:
+        t0 = time.time()
         sr = luchii_sr.enhance(img, target, kind)
         soft = img.convert("RGB").resize(sr.size, Image.LANCZOS)
-        return _to_jpeg_url(Image.blend(soft, sr, SR_BLEND))
+        out = Image.blend(soft, sr, SR_BLEND)
+        logger.info("Luchii Prime finish %.1fs -> %dx%d", time.time() - t0, *out.size)
+        if faces:
+            import luchii_face
+            t0 = time.time()
+            out = luchii_face.restore_faces(out)
+            logger.info("Luchii Face Fix %.1fs", time.time() - t0)
+        return _to_jpeg_url(out)
     except Exception:  # noqa: BLE001
         logger.exception("Luchii Prime finishing pass failed; returning the base render")
         return _to_data_url(img)
@@ -355,12 +379,16 @@ def _ip2p_pipe():
 
 # ---------- Luchii region masks: keep an edit inside the part the user named ----------
 PARSE_MODEL = "mattmdjaga/segformer_b2_clothes"
-REGION_LABELS = {"hair": [2], "clothes": [4, 5, 6, 7, 8, 17], "hat": [1], "face": [11], "shoes": [9, 10], "bag": [16]}
+REGION_LABELS = {"hair": [2], "clothes": [4, 5, 6, 7, 8, 17], "hat": [1, 2], "face": [3, 11], "shoes": [9, 10], "bag": [16],
+                 "background": [0]}
 REGION_WORDS = [
+    ("background", re.compile(r"\b(background|backdrop|behind (?:her|him|them))\b", re.I)),
+    ("face", re.compile(r"\b(sunglasses|glasses|spectacles|makeup|make-up|lipstick|eyeshadow|beard|mustache|moustache|freckles|"
+                        r"smile|smiling|eyes?|face paint|face mask)\b", re.I)),
+    ("hat", re.compile(r"\b(crown|tiara|flower crown|halo|headband|hat|cap|beanie|helmet)\b", re.I)),
     ("hair", re.compile(r"\b(hair|hairstyle|haircut|ponytail|braids?|curls)\b", re.I)),
     ("clothes", re.compile(r"\b(clothes|clothing|outfit|shirt|t-shirt|dress(?:ed)?|jacket|sweater|hoodie|coat|suit|blazer|"
                            r"top|blouse|jeans|pants|skirt|wear(?:ing)?|uniform|costume|armou?r|kimono)\b", re.I)),
-    ("hat", re.compile(r"\b(hat|cap|beanie)\b(?!.*\badd\b)", re.I)),
     ("shoes", re.compile(r"\b(shoes|sneakers|boots|heels)\b", re.I)),
 ]
 _parser = None
@@ -382,24 +410,29 @@ def _parse_pipe():
 
 
 def region_for(step: str) -> Optional[str]:
-    if re.match(r"\s*add\b", step, re.I):  # "add sunglasses" adds something new, no region to keep it inside
-        return None
+    if re.search(r"\b(it|everything|the (?:image|photo|picture|scene|whole))\b", step, re.I) and not re.search(r"background", step, re.I):
+        return None  # whole-picture change ("make it rainy", "turn it into an oil painting")
     for name, rx in REGION_WORDS:
         if rx.search(step):
             return name
     return None
 
 
-def _region_mask(img, region: str):
-    """Soft mask of the named region (hair, clothes...) or None when that region is not in the photo."""
-    import numpy as np
+def _segment(img):
+    """Per-pixel labels (hair, face, clothes, background...) from the Luchii region parser."""
     import torch
-    from PIL import Image, ImageFilter
     with _parse_lock:
         proc, model = _parse_pipe()
         with torch.no_grad():
             logits = model(**proc(images=img, return_tensors="pt")).logits
-        seg = torch.nn.functional.interpolate(logits, size=img.size[::-1], mode="bilinear", align_corners=False).argmax(1)[0].numpy()
+        return torch.nn.functional.interpolate(logits, size=img.size[::-1], mode="bilinear", align_corners=False).argmax(1)[0].numpy()
+
+
+def _region_mask(img, region: str, seg=None):
+    """Soft mask of the named region (hair, clothes...) or None when that region is not in the photo."""
+    import numpy as np
+    from PIL import Image, ImageFilter
+    seg = _segment(img) if seg is None else seg
     mask = np.isin(seg, REGION_LABELS[region])
     if mask.mean() < 0.004:
         return None
@@ -439,14 +472,136 @@ def instruct_edit(instruction: str, image_b64: str, longest: int = 512,
         return _hd(img)
 
 
+REGION_STRENGTH = {"hair": 0.72, "clothes": 0.8, "hat": 0.75, "face": 0.55, "shoes": 0.8, "bag": 0.8, "background": 0.85}
+GLOBAL_STRENGTH = 0.6
+ART_STRENGTH = 0.7
+
+
+def describe_edit(step: str) -> str:
+    """Turn an edit command into the words the picture should contain ("make the hair blue" -> "blue hair")."""
+    s = step.strip().rstrip(".!")
+    rules = [
+        (r"make the hair (.+)", lambda m: f"{m[1]} hair"),
+        (r"(?:change|turn|switch) the (?:clothes|clothing|outfit|dress) (?:to|into|for) (.+)", lambda m: f"wearing {m[1]}"),
+        (r"dress (?:them|her|him|it) (?:in|up in|up as) (.+)", lambda m: f"wearing {m[1]}"),
+        (r"(?:put|place) (.+?) on (?:them|her|him|it)", lambda m: f"wearing {m[1]}"),
+        (r"(?:replace|change|swap) the background (?:with|to|for|into) (.+)", lambda m: f"{m[1]} in the background"),
+        (r"add (.+)", lambda m: f"with {m[1]}"),
+        (r"remove (?:the )?(.+)", lambda m: f"without {m[1]}, clean"),
+        (r"(?:make|turn) (?:it|this|everything|the (?:image|photo|picture|scene))\s+(?:into |look like |like |a |an )?(.+)", lambda m: m[1]),
+        (r"turn (?:.+?) into (.+)", lambda m: m[1]),
+        (r"make (?:the )?(.+?) (\w+)$", lambda m: f"{m[2]} {m[1]}"),
+    ]
+    for pat, fn in rules:
+        m = re.fullmatch(pat, s, re.I)
+        if m:
+            return fn(m)
+    return s
+
+
+def split_steps(instruction: str) -> list:
+    parts = re.split(r"\s*(?:,\s*and\s+|\s+and then\s+|\s+and\s+(?=(?:make|turn|change|add|remove|replace|dress|put|give|swap)\b)|;\s*)",
+                     instruction)
+    return [p.strip(" ,") for p in parts if p.strip(" ,")][:3] or [instruction]
+
+
+def fast_edit(instruction: str, image_b64: str, longest: int = 576) -> str:
+    """Painter-X edit in ~30-60s.
+    - Region edits (hair, clothes, face, background...): one masked img2img pass on the warm photo engine
+      (RV6 + LCM, 4 steps); new pixels are kept only inside the named regions, so face, skin and the rest stay put.
+    - Art styles (oil, watercolor, sketch, comic, pixel, mosaic, vintage...): instant Luchii art filters that keep
+      the person and layout exactly (the photo engine cannot paint and would change the face).
+    - Other whole-picture changes (weather, time of day, materials): a light-guidance pass with the safety prompt."""
+    import math
+    import numpy as np
+    import luchii_styles
+    from PIL import Image, ImageChops
+    from diffusers import StableDiffusionImg2ImgPipeline
+    plan = [(region_for(st), describe_edit(st)) for st in split_steps(instruction)]
+    style = next((luchii_styles.detect_style(d) for r, d in plan if r is None and luchii_styles.detect_style(d)), None)
+    plan = [(r, d) for r, d in plan if not (r is None and luchii_styles.detect_style(d))]
+    if not plan:  # pure art style: instant, on the full-resolution upload
+        big = _open_image(image_b64)
+        big.thumbnail((1600, 1600), Image.LANCZOS)
+        t0 = time.time()
+        if is_nsfw(big):
+            raise UnsafeImage()
+        with _image_lock:
+            out = luchii_styles.stylize(big, style)
+        logger.info("Painter-X art style %s in %.1fs", style, time.time() - t0)
+        return _to_jpeg_url(out, 92)
+
+    t_start = time.time()
+    src = _load_image(image_b64, longest)
+    words = ", ".join(d for _, d in plan)
+    art = bool(REMIX_ART.search(words))
+    regional = all(r for r, _ in plan)
+    strength = ART_STRENGTH if art else max(REGION_STRENGTH.get(r, GLOBAL_STRENGTH) if r else GLOBAL_STRENGTH for r, _ in plan)
+    mask, seg = None, None
+    try:
+        seg = _segment(src)
+    except Exception:  # noqa: BLE001
+        logger.exception("Region parser failed; editing the whole image")
+    person = seg is not None and np.isin(seg, [4, 5, 6, 7, 11]).mean() > 0.02
+    if regional and seg is not None:
+        for r, _ in plan:
+            m = _region_mask(src, r, seg)
+            if m is not None:
+                mask = m if mask is None else ImageChops.lighter(mask, m)
+    if regional and mask is None:  # named region not found (e.g. no person): gentle whole-image edit
+        strength = GLOBAL_STRENGTH
+    whole = mask is None
+    # Whole-picture edits of a person get light guidance so the negative prompt (nsfw, nude...) is enforced;
+    # they run at 512px to stay inside a minute. Masked edits need no guidance (only the region changes).
+    guided = whole and (person or art)
+    work = src
+    if guided and max(src.size) > 512:
+        sc = 512 / max(src.size)
+        work = src.resize((max(64, int(src.width * sc) // 64 * 64), max(64, int(src.height * sc) // 64 * 64)), Image.LANCZOS)
+    keep = ", the same person, fully clothed" if person and whole else ""
+    with _heavy_lock, _image_lock:
+        _claim("photo")
+        pipe = StableDiffusionImg2ImgPipeline(**_photo_pipe().components)
+        pipe.set_progress_bar_config(disable=True)
+        full = f"{words}{keep}, {ART_HINT if art else REMIX_HINT}"
+        args = _prompt_args(pipe, full, (ART_NEGATIVE if art else PHOTO_NEGATIVE) if guided else None)
+        t0 = time.time()
+        out = pipe(**args, image=work, strength=strength, num_inference_steps=math.ceil(PHOTO_STEPS / strength),
+                   guidance_scale=EDIT_GUIDANCE if guided else 1.0).images[0]
+        logger.info("Painter-X %s pass %.1fs (%dx%d, strength %.2f, steps %s)", "masked" if mask is not None else "whole",
+                    time.time() - t0, work.size[0], work.size[1], strength, plan)
+        def merge(o):
+            if mask is None:
+                return o
+            return Image.composite(o.resize(src.size, Image.LANCZOS) if o.size != src.size else o, src, mask)
+        result = merge(out)
+        if is_nsfw(result):  # one guided retry with the safety prompt, then block
+            out = pipe(**_prompt_args(pipe, full + SAFE_PROMPT, ART_NEGATIVE if art else PHOTO_NEGATIVE), image=work,
+                       strength=strength, num_inference_steps=math.ceil(PHOTO_STEPS / strength),
+                       guidance_scale=EDIT_GUIDANCE).images[0]
+            result = merge(out)
+            if is_nsfw(result):
+                raise UnsafeImage()
+    out = result
+    logger.info("Painter-X before finish %.1fs", time.time() - t_start)
+    url = _hd(out, longest=2048, faces=not art)
+    if style:  # e.g. "make the hair blue and turn it into an oil painting"
+        img = Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).convert("RGB")
+        img.thumbnail((1600, 1600), Image.LANCZOS)
+        url = _to_jpeg_url(luchii_styles.stylize(img, style), 92)
+    return url
+
+
 REMIX_STRENGTH = 0.5
 REMIX_HINT = "RAW photo, ultra realistic, sharp focus, detailed face, natural skin texture, high detail"
-ART_HINT = "highly detailed, masterpiece, rich texture"
+ART_HINT = "artwork, visible brush strokes and texture, highly detailed, masterpiece"
+ART_NEGATIVE = "nsfw, nude, naked, topless, photo, photograph, photorealistic, deformed, blurry, lowres, watermark, text"
+EDIT_GUIDANCE = 1.7
 REMIX_ART = re.compile(r"\b(anime|manga|cartoon|comic|illustration|painting|painted|watercolou?r|sketch|drawing|pixel art|"
                        r"pop art|stained glass|claymation|clay|3d|render|van gogh|oil|lego|origami|mosaic|ukiyo-e)\b", re.I)
 
 
-def photo_remix(prompt: str, image_b64: str, strength: float = REMIX_STRENGTH, longest: int = 640) -> str:
+def photo_remix(prompt: str, image_b64: str, strength: float = REMIX_STRENGTH, longest: int = 576) -> str:
     """Painter-X remix: photoreal img2img on the Nova-Muse engine (RV6 + LCM) keeps the layout and faces sharp.
     Art-style remixes (oil painting, anime, sketch...) skip the photo hint, which would pull them back to a photo,
     and get a stronger change so the new look actually shows."""
@@ -484,6 +639,65 @@ def upscale_image(image_b64: str) -> str:
     return _to_jpeg_url(out, 90)
 
 
+PHOTO_TINY_VAE = "madebyollin/taesd"
+
+# ---------- Luchii safety filter ----------
+NSFW_MODEL = "Falconsai/nsfw_image_detection"
+NSFW_THRESHOLD = 0.6
+SAFE_PROMPT = ", fully clothed, wearing a shirt, modest, safe for work"
+_nsfw = None
+_nsfw_lock = threading.Lock()
+
+
+class UnsafeImage(Exception):
+    pass
+
+
+def is_nsfw(img) -> bool:
+    """~0.3s ViT check on every finished render; a flagged image is re-rendered with the safety prompt or blocked."""
+    global _nsfw
+    try:
+        import torch
+        with _nsfw_lock:
+            if _nsfw is None:
+                from huggingface_hub import snapshot_download
+                from transformers import AutoImageProcessor, AutoModelForImageClassification
+                p = snapshot_download(NSFW_MODEL, cache_dir=str(PHOTO_MODELS_DIR),
+                                      allow_patterns=["config.json", "preprocessor_config.json", "model.safetensors"])
+                _nsfw = (AutoImageProcessor.from_pretrained(p), AutoModelForImageClassification.from_pretrained(p).eval())
+            proc, model = _nsfw
+            with torch.no_grad():
+                prob = model(**proc(images=img.convert("RGB"), return_tensors="pt")).logits.softmax(-1)[0]
+        score = float(prob[[i for i, n in model.config.id2label.items() if n.lower() == "nsfw"][0]])
+        if score >= NSFW_THRESHOLD:
+            logger.warning("Luchii safety filter flagged a render (nsfw %.2f)", score)
+        return score >= NSFW_THRESHOLD
+    except Exception:  # noqa: BLE001
+        logger.exception("Safety filter failed")
+        return False
+
+
+def _bf16_linears(module) -> int:
+    import torch
+
+    class _BF16Linear(torch.nn.Module):
+        def __init__(self, lin):
+            super().__init__()
+            self.lin = lin.to(torch.bfloat16)
+
+        def forward(self, x):
+            return self.lin(x.to(torch.bfloat16)).to(x.dtype)
+
+    n = 0
+    for name, child in module.named_children():
+        if isinstance(child, torch.nn.Linear):
+            setattr(module, name, _BF16Linear(child))
+            n += 1
+        else:
+            n += _bf16_linears(child)
+    return n
+
+
 def _photo_pipe():
     global _photo
     if _photo is None:
@@ -502,6 +716,15 @@ def _photo_pipe():
         pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
         pipe.load_lora_weights(snapshot_download(PHOTO_LCM, cache_dir=cache))
         pipe.fuse_lora()
+        pipe.unload_lora_weights()
+        # Speed: the full VAE decode alone took ~20s per image on this CPU; TAESD takes ~1s and the
+        # Luchii Prime finishing pass restores the fine detail. Linear layers run in bf16 (3-5x faster
+        # matmuls on this Neoverse-V2 CPU); convolutions and attention stay fp32, where bf16 is slow here.
+        from diffusers import AutoencoderTiny
+        pipe.vae = AutoencoderTiny.from_pretrained(snapshot_download(PHOTO_TINY_VAE, cache_dir=cache, allow_patterns=[
+            "config.json", "diffusion_pytorch_model.safetensors"]), torch_dtype=torch.float32)
+        del vae
+        _bf16_linears(pipe.unet)
         pipe.unet = pipe.unet.to(memory_format=torch.channels_last)
         pipe.set_progress_bar_config(disable=True)
         _photo = pipe
@@ -510,12 +733,11 @@ def _photo_pipe():
 
 
 def generate_photo(prompt: str, aspect: Optional[str] = "1:1", draft: bool = False, seed: Optional[int] = None) -> str:
-    """Photoreal render (Luchii Nova-Muse). Full: 4 steps, ~2 min on this 2-core CPU. Draft: 3/4 size and
-    3 steps, under a minute. The same seed keeps the draft and full render close in composition."""
+    """Photoreal render (Luchii Nova-Muse). Full: 4 steps, ~40s on this 2-core CPU. Quick draft: 3 steps, ~30s.
+    The same seed keeps the draft and full render close in composition."""
     import torch
     w, h = PHOTO_ASPECTS.get(aspect or "1:1", PHOTO_ASPECTS["1:1"])
-    if draft:
-        w, h = (max(256, int(d * 0.75) // 64 * 64) for d in (w, h))
+    # Draft keeps the full size (3/4 size distorted wide shots) and saves time with one step less.
     with _heavy_lock, _image_lock:
         _claim("photo")
         pipe = _photo_pipe()
@@ -524,7 +746,12 @@ def generate_photo(prompt: str, aspect: Optional[str] = "1:1", draft: bool = Fal
         img = pipe(**_prompt_args(pipe, prompt, PHOTO_NEGATIVE if detailed else None),
                    num_inference_steps=PHOTO_DRAFT_STEPS if draft else PHOTO_STEPS,
                    guidance_scale=DETAIL_GUIDANCE if detailed else 1.0, width=w, height=h, generator=gen).images[0]
-        return _hd(img)
+        if is_nsfw(img):  # re-render once with guidance, so the negative prompt (nude, topless...) really applies
+            img = pipe(**_prompt_args(pipe, prompt + SAFE_PROMPT, PHOTO_NEGATIVE), num_inference_steps=PHOTO_STEPS,
+                       guidance_scale=EDIT_GUIDANCE, width=w, height=h, generator=gen).images[0]
+            if is_nsfw(img):
+                raise UnsafeImage()
+        return _hd(img, faces=True)
 
 
 _cutout = None

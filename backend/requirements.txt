@@ -166,3 +166,4 @@ PyMatting==1.1.16
 scikit-image==0.26.0
 ImageIO==2.38.1
 tifffile==2026.3.3
+opencv-contrib-python-headless==5.0.0.93

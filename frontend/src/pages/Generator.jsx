@@ -283,7 +283,7 @@ export default function Generator() {
     setMode("text");
   };
 
-  const eta = { generate: 120, remix: 200, upscale: 160, cutout: 15 }[busy] || 60;
+  const eta = { generate: 45, remix: 50, upscale: 160, cutout: 15 }[busy] || 60;
   const action = mode === "image" ? (tool === "upscale" ? "Upscale to 4K" : tool === "remove-bg" ? "Remove background" : "Remix") : "Generate";
   const placeholder = remix
     ? tool === "upscale" ? "Ready to upscale your photo to 4K. Press the arrow."
