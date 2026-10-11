@@ -1,32 +1,18 @@
 {
-  "summary": "Iteration 21 - End-to-end verification of (1) auto-publish toggle, (2) remix history, (3) Kaggle GPU engines/admin, (4) worker auth. Backend: 11/12 pytest in test_iter21_features.py pass; one minor: /api/share/{id} omits the `public` key when the doc has no public flag set (projection {'public':1} drops missing fields in Mongo). Frontend: /create shows auto-publish-toggle (role=switch), toggles with toast 'Auto-publish on: new images go straight to the public gallery', persists after reload, hidden when logged out. /create?gen=<edit2> shows result-image + remix-history strip with testid 'remix-history-count' reading '3 versions' and 3 remix-history-item entries; current one has aria-current=step; clicking step-1 reveals compare-btn; result-publish-btn reads 'Public' with aria-pressed=true for the published seed edit. Mobile 390px /create still shows toggle + full history strip. /gallery: 9 gallery-publish-{id} testids, 4 gallery-history-{id}, 1 gallery-public-badge-{id}. /video: 3s/4s chips present, video-eta text 'Takes about 4 min on a free GPU (plus 6-10 min if it has to wake up) to render.' /status as admin: kaggle-panel, kaggle-status ('Kaggle session: complete · GPU worker stopped - No jobs for 20 min'), kaggle-launch-btn, kaggle-stop-btn, kaggle-open-link all present. Per instructions NO real-video job was launched (quota) and Start/Stop in /status were NOT pressed. Backend engine check: frasberg-motion-free has on_demand=true, status='on-demand' (worker idle). Admin /gpu-admin/kaggle returns configured=true, username='frasberg', boot present; /gpu-admin/overview includes boot. Worker /boot and /offline both reject requests without X-Frasberg-Worker-Secret with 401.",
-  "backend_issues": {
-    "critical": [],
-    "minor": [
-      {"endpoint": "GET /api/share/{gen_id}", "issue": "Response is missing `public` key when the generation document has no `public` field set. The projection `{\"public\":1}` with motor only returns the key if it exists in the doc. Spec says /share must also return parent_id/root_id/step/public. Fix: default `doc.setdefault('public', False)` before returning (same pattern already used in remix_history)."}
-    ]
-  },
+  "summary": "Regression pass for Frasberg Streets multi-file pro build + games portal. Backend: 8/8 pytest passed (registry lists streets w/ 'F carjack' controls, /play returns HTML referencing ./assets/ chunks, real hashed JS chunk served with JS content-type, path-traversal '..%2F' and '..evil.js' rejected (400/404), non-existent asset -> 404, score POST/GET round-trip + weekly period 200, regression /api/games/dungeon3d/play still 200, QA-BOT scores cleaned from mongo game_scores). Frontend: /games library renders all 5 games incl. Frasberg Streets; /games/play/streets shows data-testid='game-player-title'='Frasberg Streets', 'LOCAL ENGINE' badge visible, data-testid='game-frame' iframe loads game — inside iframe: #canvas exists, #hud-money & #hud-hp present (HP 100, $500), traffic + minimap render, no loading overlay stuck, no page/JS errors. Only expected noise: 401 on /api/auth/me and a 404 (accepted /api/save save-slot per request). Solo multiplayer mode as expected (no WS server running).",
+  "backend_issues": {"critical": [], "minor": []},
   "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
-  "test_report_links": [
-    "/app/backend/tests/test_iter21_features.py",
-    "/app/test_reports/pytest/iter21.xml"
-  ],
-  "action_items": [
-    "Fix /api/share/{gen_id} to always include `public` (default False) when the field is absent in the document."
-  ],
+  "test_report_links": ["/app/backend/tests/test_streets_game.py", "/app/test_reports/pytest/streets_results.xml"],
+  "action_items": [],
   "critical_code_review_comments": [
-    "server.py L747-754 share(): Mongo projection drops missing fields; the response contract advertises `public` but it will be absent for docs created before auto-publish feature. Add `doc.setdefault('public', False)` similar to remix_history L726.",
-    "server.py L326-344 resolve_parent(): correctly inserts a hidden step-0 'source' doc for first-time edits and increments step for parented edits; verified via test_two_edits_produce_chain (step 1 then step 2 with same root_id).",
-    "server.py L318-323 wants_publish(): guests never publish, user default follows auto_publish, per-request `publish` body overrides. Explicit `publish: false` while auto_publish is on correctly produces a private generation (verified).",
-    "frasberg_gpu.py L227-239 /v1/engines: when on_demand model has 0 online workers but is in ON_DEMAND, returns status='on-demand' which is what the UI depends on - verified.",
-    "RemixHistory UI properly emits data-testid remix-history-count and remix-history-item-{id} with aria-current='step' only on the current gen; compare-btn appears when a non-current step is selected."
+    "games_portal.py line 213: path-traversal check is good (rejects '/' and '..'). Consider also rejecting backslashes and null bytes for defense-in-depth, though FastAPI/Starlette normalize these.",
+    "test_streets_asset_serves_js_chunk: FileResponse relies on mimetypes; content-type came back as application/javascript — OK."
   ],
-  "updated_files": ["/app/backend/tests/test_iter21_features.py"],
-  "success_rate": {"backend": "92% (11/12 pytest)", "frontend": "100% (/create toggle+history, /gallery, /video, /status admin panel, mobile)"},
-  "test_credentials": "test@luchii.ai / Test1234!  and  admin.tester@luchiiapp.com / AdminTest123!",
-  "seed_data_creation": "Two draft generations (one auto-published then unpublished, one private via publish:false) plus a 2-step edit chain under test@luchii.ai (prompts prefixed TEST_). No real-video job was submitted (quota preserved).",
+  "updated_files": ["/app/backend/tests/test_streets_game.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "not required (public games portal)",
+  "seed_data_creation": "Test inserts QA-BOT score row then cleans it up in test_zzz_cleanup_qa_bot (delete_many name=='QA-BOT'). No residual data.",
   "retest_needed": false,
-  "should_main_agent_self_test": true,
-  "context_for_next_testing_agent": "Backend tests live in /app/backend/tests/test_iter21_features.py. Run with `pytest backend/tests/test_iter21_features.py -n 0`. ~6 min total because each image job is a real CPU render (~45s). The sole failing assertion `TestRemixHistory::test_share_includes_lineage` is a backend bug: /api/share response omits `public` when the doc has no public field (projection quirk). The seeded chain 76b024f6->f6b1f035->2b8f856c is still intact under test@luchii.ai. Do NOT invoke real video or kaggle launch/stop (user's free GPU quota).",
-  "rca of the issue": "/api/share path returns the Mongo document straight after projection. In Motor, including a field in the projection does NOT force the field to be present on the response - fields that don't exist on the document are simply omitted. Older generations never had `public` set (only published ones get `public: True`). Spec expects `public: false` default. Fix: in share(), after retrieval, do `doc.setdefault('public', False)` and `doc.setdefault('step', 0)` for safety, mirroring the pattern already used in remix_history (L726)."
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Frasberg Streets pro build is stable. /api/games/{gid}/assets/{fname} route serves hashed chunks with traversal protection. Game runs in solo mode inside platform iframe; 401 on /api/auth/me and 404 on /api/save are accepted noise. Backend test file at /app/backend/tests/test_streets_game.py can be reused as a regression suite for future game-portal changes."
 }

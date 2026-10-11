@@ -1,24 +1,41 @@
 {
-  "summary": "Full-stack validation of the new Frasberg Motion video presets, Gallery Videos tab, VideoShare /v/:id page, and GET /api/videos endpoints. Backend: 8/8 pytest tests pass in /app/backend/tests/test_videos_api.py covering auth (401 without token), listing (newest-first, correct shape, both seed videos present with id/prompt/style/duration/engine/model/mode/aspect_ratio/url=/api/media/{id}/created_at), mode mapping (image-to-video for 9:16 Motion Pro and text-to-video for 16:9 Lite), legacy engine label (luchii-local -> 'Frasberg Lite (CPU)'), public GET /api/videos/{id} for both seeds, 404 on unknown id, and /api/media/{id} returning video bytes. Frontend /video: Trending row shows all 8 presets (surprise, pov, glowup, satisfying, pet, dance, food, outfit); tapping POV filled the prompt (162 chars) and highlighted 9:16; six Surprise-me taps produced 5 distinct prompts (never duplicates with current prompt); Quick preset row also visible. Attaching a start image hid the Trending and Quick rows and showed the Photo motion row with all 8 motion presets (zoom-in, orbit, hair-wind, come-alive, dolly-out, parallax, slowmo, rain-glow); tapping zoom-in filled the motion description; removing the image restored Trending and Quick and hid Photo motion. Public /v/eff23281... loaded video-share-page + player with meta 'Photo-to-video · 5s · 9:16 · by Motion Tester' and the badge 'Made with Frasberg Motion Pro · Powered by Frasberg'; replay/copy/download/cta buttons all present; download href points to /api/media/{id} with the download attribute set to 'frasberg-motion-eff23281.mp4'; cta href = /video. Public /v/cfde8c3d... showed 'Made with Frasberg Lite (CPU)' and meta 'Text-to-video · 5s · 16:9'. Unknown id -> video-share-error. Gallery /gallery after login (motion.tester) rendered gallery-tab-videos; Videos tab listed both seed cards with player, replay, share, download, open buttons; 'Photo \u2192 video' and 'Text \u2192 video' badges present; engine labels 'Frasberg Motion Pro' and 'Frasberg Lite (CPU)' shown; download href=/api/media/{id} with download attr, open href=/v/{id}; share button triggered the share handler (clipboard blocked in headless -> fell back to toast.message with the URL, which is the documented fallback behaviour); images/takes/models tabs still clickable and render as expected.",
-  "backend_issues": {"critical": [], "minor": []},
-  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "summary": "Iteration 10 — Sovereign Voice Engine, Memory Vault, Chat redesign, Attach menu, Voice Picker, and Dashboard Quickstart URLs. Backend: 8/8 pytest pass (engine ready, 8 voices with Orion p273 + Lyra p335, guest 401 on speak, authed WAV audio_base64 with 'frasberg-sovereign', immutable creator lore 'Frasberg Selassie / MR. CLAYTON-M. / BERNARD-EX. / FRASBERG INC', addresses user by name 'Frasberg Admin', memory vault deposit+recall across new sessions returns 'Zeus' correctly). Frontend: chat header shows 'Luchii' (no 'Luchii Chat'), engine-status-badge 'Sovereign Engine Online', tone/voice/voice-picker/model/attach/live-voice controls present, model dropdown contains only Luchii-200M/1B/7B/70B (no Image/Video Creator), all 4 attach menu items work, Image Creator sets composer-mode-chip, voice-picker-panel opens with 8 voice-option rows, voice-preview-p335 triggers /api/voice/speak 200, voice-select-p335 toasts 'Luchii now speaks as Lyra', mobile 390px collapses to chat-header-menu-btn + chat-settings-btn with 0 horizontal overflow, dashboard quickstart cURL/Python/JS tabs all contain https://frasberg.com/api/v1/chat and NO 'emergentagent'.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/chat memory extraction", "issue": "System prompt in _extract_memory (server.py L187) instructs 'Extract at most ONE stable personal fact'. When user says 'Remember: my favorite mountain is Kilimanjaro AND my dog is Zeus' in a single message, only one fact is stored. Multi-fact deposits are silently dropped. Consider allowing extraction of up to 3-5 facts per message when the user uses the imperative 'Remember...'."},
+      {"endpoint": "_extract_memory embedding", "issue": "Occasionally the embedding is missing from the freshly inserted user_memories doc (observed 1/3 times) even though memory_vault.status is 'ready'. Non-blocking because _memory_context lazily backfills embeddings on next query, but worth logging why memory_vault.embed() returned None."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Chat page header", "issue": "No data-testid=\"chat-header-title\" attribute on the 'Luchii' header text. Visual value is correct ('Luchii', not 'Luchii Chat') but testid missing hinders regression testing.", "selector": "header > .title (no testid)", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "chat-model-select (native <select>)", "issues": ["React hydration warning in console: 'In HTML, <span> cannot be a child of <option>'. Renders correctly but produces client-side warning; the <option> labels probably contain an inner span (icon/badge). Should be plain text inside <option>."]}
+    ]
+  },
   "test_report_links": [
-    "/app/backend/tests/test_videos_api.py",
-    "/app/test_reports/pytest/videos_api.xml"
+    "/app/backend/tests/test_sovereign_voice_memory.py",
+    "/app/test_reports/pytest/iter10_results.xml"
   ],
-  "action_items": [],
+  "action_items": [
+    "Consider relaxing _extract_memory prompt to allow multiple facts when user explicitly says 'Remember...'",
+    "Add data-testid=\"chat-header-title\" to the chat page header for testability",
+    "Fix <option><span>...</span></option> hydration warning in chat-model-select"
+  ],
   "critical_code_review_comments": [
-    "shareVideo() in Studio.jsx silently falls back to toast.message(url) when both navigator.share and navigator.clipboard are unavailable; this shows the raw URL instead of a 'Share link copied!' confirmation. Consider showing a toast like 'Copy this link: ...' or an action button to copy via a textarea fallback for better UX.",
-    "video_card() uses j.get('has_image') to infer image-to-video mode; the GPU gateway may complete a job without the has_image flag persisted if the fallback path strips it. Consider storing an explicit 'mode' on the job doc to avoid ambiguity.",
-    "VideoShare.jsx uses axios directly; a 404 payload also includes a {detail} string. Current catch sets a generic 'This video doesn\u2019t exist or was removed.' which is fine, but any transient 5xx also shows the same message. Consider distinguishing network vs 404.",
-    "Studio.jsx: the 'Surprise me' handler filters by exact prompt string equality (pool.filter((i) => i.prompt !== prompt)); if the user edits the prompt manually the duplicate guard no longer helps. Minor."
+    "server.py:637 voice_speak falls back to OpenAI TTS ('audio/mp3', engine 'bridge') when sovereign is not ready. If backend is restarted the first ~40s of speak calls will return non-sovereign mp3 audio. Consider surfacing 503 'engine warming' instead so client can retry rather than getting a different engine.",
+    "server.py:213 _memory_context does N+1 embed calls when embeddings are missing (one embed per doc). If many missing, this blocks the chat SSE start. Consider batch-embedding.",
+    "memory_vault.py:44 embed() catches all exceptions and returns None silently. Add logger.warning with the fact snippet so failures are debuggable."
   ],
-  "updated_files": ["/app/backend/tests/test_videos_api.py (new)"],
-  "success_rate": {"backend": "100% (8/8)", "frontend": "100% (all preset, share, gallery checks pass)"},
-  "test_credentials": "motion.tester@luchiiapp.com / Motion123! (owns 2 seed videos used in tests)",
-  "seed_data_creation": "None created; used the pre-seeded videos eff23281 (9:16 Motion Pro image-to-video) and cfde8c3d (16:9 Lite text-to-video).",
+  "updated_files": ["/app/backend/tests/test_sovereign_voice_memory.py"],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% of testable UI claims"},
+  "test_credentials": "admin@frasberg.com / LuchiiAdmin2026! (login worked via auth-toggle-mode -> auth-email-input -> auth-password-input -> auth-submit-btn; note /auth defaults to signup mode, must toggle first)",
+  "seed_data_creation": "Created 2 memory-vault docs under admin user (Kilimanjaro + Zeus). Left in db.user_memories, capped at 50 by rolling-delete logic.",
   "retest_needed": false,
-  "should_main_agent_self_test": false,
-  "context_for_next_testing_agent": "Regression suite for the new video features is /app/backend/tests/test_videos_api.py (8 tests, ~1.7s). It depends on the two seed videos owned by motion.tester@luchiiapp.com; if those are deleted, recreate them before running. Clipboard writes are blocked in the Playwright headless env, so share buttons fall through to toast.message(url) rather than 'Share link copied!'; verify the handler runs (toast content equals the share URL) rather than reading navigator.clipboard.",
-  "rca of the issue": "N/A - no issues found."
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 8 pytest cases in test_sovereign_voice_memory.py are reusable. Auto-fixture _wait_engine_ready waits up to 90s for STT/TTS/memory to be 'ready' before running voice+memory tests (needed after backend restarts). Frontend /auth defaults to signup — must click data-testid='auth-toggle-mode' before login. Chat page all key data-testids confirmed working: engine-status-badge, chat-tone-select, chat-voice-toggle, voice-picker-btn (+ voice-picker-panel with voice-option-<id>, voice-preview-<id>, voice-select-<id>), chat-model-select, chat-attach-btn (+attach-upload-btn/attach-image-creator-btn/attach-video-creator-btn/attach-screenshot-btn), composer-mode-chip, chat-live-voice-btn. Mobile 390px: chat-header-menu-btn, chat-settings-btn, no horizontal overflow. Dashboard quickstart URL is 'https://frasberg.com/api/v1/chat' in all 3 tabs (cURL/Python/JavaScript) and 'emergentagent' string is nowhere on the page.",
+  "rca of the issue": "N/A — no critical bugs. Minor: multi-fact memory extraction limited by design of the extractor's system prompt (fix: relax prompt to allow up to N facts on explicit 'Remember' intents)."
 }

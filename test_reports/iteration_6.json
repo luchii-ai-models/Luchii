@@ -1,37 +1,38 @@
 {
-  "summary": "Iteration 6 targeted test of 3 features: (1) backend 429 image queue, (2) /create queue notice + auto-retry, (3) /login + /signup routes, (4) /sts transcript+takes flow. All 4 features pass end-to-end. Backend suite: 35/35 pass with -n 0 (added test_queue.py for concurrent /generate 429 behavior; relaxed test_generate_graceful_error to accept 429 since lock contention is now a legitimate response). Full regression + new tests ran in 229s. Frontend: /login shows AuthModal with auth-email-input/auth-password-input/auth-submit-btn; closing modal (Escape) navigates to /; login with test@luchii.ai / Test1234! on /login?next=/create persists token to localStorage.luchii_token, closes modal, and lands on /create (clean URL, no ?next=); /login while authed redirects to /; /signup shows register mode with auth-name-input + 'Create your account' heading. /sts: uploaded a WAV produced by /api/tts ('hello world from luchii'), Convert transcribed it correctly ('Hello world from luchii'), sts-take-0 appeared with download attribute 'luchii-sts-nova.wav', edited transcript + selected onyx + Re-speak produced a new take at index 0 (previous nova shifted to index 1), remove button correctly dropped take count by 1. /create queue: opened two independent browser contexts, fired generate in A, then B ~1.5s later; B's canvas showed data-testid='image-queue-notice' with label 'Your image is in the queue...' and sublabel 'Luchii is finishing another image. Yours starts next.'; browser console showed 429 responses with Retry-After header; postQueued auto-retried; both A and B eventually rendered data-testid='result-image' (A ~45s, B ~90s on CPU). Backend verified Retry-After: '8' and detail string match exactly.",
-  "backend_issues": {
-    "critical": [],
-    "minor": [
-      {"endpoint": "/api/generate", "issue": "test_generate_graceful_error could return 429 if another image gen is in flight on the shared preview; relaxed assertion to accept 200/424/429. Not a product bug."}
-    ]
-  },
-  "frontend_issues": {
-    "ui_bugs": [],
-    "integration_issues": [],
-    "design_issues": []
+  "summary": "Iteration 6 — full-stack verification of Luchii by Frasberg round: (1) global font-size bump, (2) agent personas on POST /api/chat, (3) /luchii-code coding agents grid + launch links, (4) footer Docs column exact labels/order, (5) API snippet frasberg.ai -> frasberg.com, (6) AI World Court full system on mobile (submit -> streamed ruling, Constitution I-VII, Public Docket with filings & download). All targeted flows pass. Backend regression 31/31 + 4/4 new agent persona tests.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "verified_features": [
+    "FONT SIZE: html font-size = 17px on desktop (1920x800) and 18px on mobile (390x844), verified on both / and /chat via getComputedStyle.",
+    "AGENT PERSONAS (backend): POST /api/chat with agent='architect' returns planning-oriented reply (requirements/data models/API/architecture keywords), agent='debugger' returns root-cause/traceback/fix-oriented reply; replies materially differ. Guest chat with no agent still streams normally.",
+    "LUCHII CODE: /luchii-code shows [data-testid=coding-agents-grid] with 4 agent cards (architect, builder, reviewer, debugger). Launch links href = /chat?model=<tier>&agent=<slug> for all 4. Clicking launch-architect opens /chat?model=luchii-70b&agent=architect and ChatDemo header renders 'Luchii architect' label (confirmed via DOM query).",
+    "FOOTER: Docs column contains EXACTLY [API, AI Models, Luchii Chat, Luchii Code, Luchii Coding Agents, Benchmarks, Safety, The AI World Court, 'AI Court Constitution and laws.', Brand Kit] in this exact order. Anchors verified: 'Luchii Coding Agents' -> /luchii-code#agents, 'AI Court Constitution and laws.' -> /court#constitution.",
+    "API SNIPPET: Homepage code block shows 'POST https://api.frasberg.com/v1/chat'; no occurrences of api.frasberg.ai anywhere on the page.",
+    "AI WORLD COURT (mobile 390x844): [data-testid=court-input] + [data-testid=court-submit] both present; submitting 'Should we ship Friday with two open bugs?' yielded a streamed [data-testid=court-ruling] (VERDICT + REASONING, ~157 chars) within ~10s. [data-testid=court-constitution] present with all 7 Articles (I-Sovereignty, II-Safety, III-Governance, IV-Isolation, V-Auditability, VI-Transparency, VII-Alignment). [data-testid=court-docket] present with 2 filings (FRB-09088849, FRB-C96EF974) each with filing-toggle-*; clicking the toggle opens the ruling and reveals a [data-testid=filing-download-<id>] button.",
+    "REGRESSION: guest chat streams (test_chat_guest_allowed), normal chat without agent still streams (test_agent_none_streams), admin /chat sessions sidebar and voice toggle still visible on desktop (verified iteration 5)."
+  ],
+  "backend_test_results": {
+    "test_agent_personas.py": "4/4 passed in 83s (test_agent_none_streams, test_agent_architect_plans, test_agent_debugger_traces, test_agent_architect_vs_debugger_differ)",
+    "test_auth_and_chat.py": "31/31 passed in ~40s (auth, chat, image, voice, keys/usage, court, gateway, paypal, static)"
   },
   "test_report_links": [
-    "/app/backend/tests/backend_test.py",
-    "/app/backend/tests/test_queue.py",
-    "/app/test_reports/pytest/pytest_results.xml"
+    "/app/backend/tests/test_agent_personas.py",
+    "/app/backend/tests/test_auth_and_chat.py",
+    "/app/test_reports/pytest/agent_personas.xml",
+    "/app/test_reports/pytest/auth_and_chat.xml"
   ],
   "action_items": [],
   "critical_code_review_comments": [
-    "server.py image_with_fallback correctly checks local_engines.image_busy() AFTER Frasberg fails and returns 429 with Retry-After:8 before trying to acquire the lock. Clean implementation.",
-    "Generator.jsx postQueued busy-loops on 429 using Retry-After header value; good UX. The toast only fires once (markQueued only toasts on first transition) — nice touch.",
-    "Login.jsx redirect-on-already-authed uses useEffect with navigate(next, {replace:true}); works correctly for both /login (next defaults to /) and /login?next=/create.",
-    "SpeechToSpeech.jsx takes list is capped at 10 (slice(0,10)) — reasonable; keys are Date.now() which could collide if two takes land in the same millisecond but very unlikely in UI."
+    "ChatDemo.jsx has grown to ~450+ lines and now also owns agent-header rendering + auto-speak + attachments + scroll button — consider extracting agent-header and input-bar into subcomponents.",
+    "AGENT_PERSONAS dict on server.py could benefit from a Pydantic Literal type on ChatRequest.agent so invalid values are rejected/normalized rather than silently no-oped (currently unknown agent value falls back to base persona — acceptable but silent).",
+    "Footer Docs column contains a raw '#benchmarks' and '#safety' hash anchor which will not scroll if the section isn't present on the current route (e.g., clicked from /chat or /court). Consider making them '/#benchmarks' / '/#safety'.",
+    "Chat header agent label capitalization is lowercase ('Luchii architect'). Product likely wants title case ('Luchii Architect') for consistency with the LuchiiCode agent card names."
   ],
-  "updated_files": [
-    "/app/backend/tests/backend_test.py",
-    "/app/backend/tests/test_queue.py"
-  ],
-  "success_rate": {"backend": "100% (35/35)", "frontend": "100% of exercised flows (/login, /signup, /sts full loop, /create concurrent queue)"},
-  "test_credentials": "test@luchii.ai / Test1234! (admin, works). /app/memory/test_credentials.md already correct.",
-  "seed_data_creation": "/api/generate rows under session_id='test-queue' (2) and 'test-fallback'/'test-edit' from regression suite; a few STS takes in-memory UI only.",
+  "updated_files": ["/app/backend/tests/test_agent_personas.py (new)"],
+  "success_rate": {"backend": "100% (35/35)", "frontend": "100% (all requested checks)"},
+  "test_credentials": "admin@frasberg.com / LuchiiAdmin2026! (verified working)",
+  "seed_data_creation": "None (used existing docket filings; test users created via /api/auth/register with TEST prefix are ephemeral)",
   "retest_needed": false,
   "should_main_agent_self_test": false,
-  "context_for_next_testing_agent": "All 3 new features from iteration 6 verified. Run backend tests with -n 0 to avoid preview-proxy 502s when two CPU image generations serialize (iteration 5 note). The 429 queue path is now covered by backend/tests/test_queue.py::test_concurrent_generate_returns_429_with_retry_after. Frontend data-testids now present on Generator.jsx (prompt-input, generate-btn, upscale-btn, result-image, image-queue-notice, upscale-queue-notice) — iteration 5's MEDIUM-priority gap is resolved. Login.jsx exposes auth-email-input/auth-password-input/auth-submit-btn/auth-name-input via AuthModal.",
-  "rca of the issue": "No regressions found. The one test adjustment (test_generate_graceful_error now also accepts 429) is because the newly-added queue behavior changes the contract: when the local image lock is held, /generate correctly returns 429 instead of blocking — this is desired product behavior, so the test was updated to document it."
+  "context_for_next_testing_agent": "New backend test file at /app/backend/tests/test_agent_personas.py covers agent persona routing (architect/debugger/none) via SSE stream inspection. Full regression: pytest /app/backend/tests/ -v. Chat header label capitalization is currently lowercase 'Luchii architect' — flagged as minor code-review note, not a bug. Court docket uses filing-toggle-<id> pattern (not filing-open-<id>); download button appears only after toggle expands the filing."
 }
