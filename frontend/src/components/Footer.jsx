@@ -30,9 +30,7 @@ export default function Footer() {
                   <li key={l}>
                     {l === "Luchii Code" ? (
                       <Link to="/about-luchii" data-testid="footer-about-luchii-link" className="text-sm text-neutral-500 hover:text-white transition-colors">{l}</Link>
-                    ) : l === "Engines" ? (
-                      <Link to="/engines" data-testid="footer-engines-link" className="text-sm text-neutral-500 hover:text-white transition-colors">{l}</Link>
-                    ) : (
+                                        ) : (
                       <a href="#" className="text-sm text-neutral-500 hover:text-white transition-colors">{l}</a>
                     )}
                   </li>

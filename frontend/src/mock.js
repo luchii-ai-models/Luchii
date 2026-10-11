@@ -122,7 +122,7 @@ export const footerCols = [
   { title: "Product", links: ["Audio", "3D", "Spaces", "Image", "Video", "API"] },
   { title: "Tools", links: ["Image Generator", "Upscaler", "Background Remover", "Photo Editor", "Text to Speech"] },
   { title: "Company", links: ["Luchii Code", "About", "Careers", "Blog", "Originals", "Contact"] },
-  { title: "Resources", links: ["Engines", "Help center", "Enterprise", "Community", "Status"] },
+  { title: "Resources", links: ["Help center", "Enterprise", "Community", "Status"] },
 ];
 
 export const showcase = [

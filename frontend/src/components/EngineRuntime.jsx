@@ -24,18 +24,19 @@ function CoverageBar({ value }) {
   );
 }
 
-function RunPanel({ engine, onClose }) {
+function RunPanel({ engine, onClose, headers }) {
   const [detail, setDetail] = useState(null);
   const [input, setInput] = useState("Hello from Frasberg Creator");
   const [state, setState] = useState("{}");
   const [res, setRes] = useState(null);
   const [busy, setBusy] = useState(false);
   const [showModel, setShowModel] = useState(false);
+  const [continuity, setContinuity] = useState("");
 
   useEffect(() => {
     setRes(null); setState("{}"); setDetail(null);
-    axios.get(`${API}/engines/runtime/${engine.id}`).then(({ data }) => setDetail(data)).catch(() => {});
-  }, [engine.id]);
+    axios.get(`${API}/engines/runtime/${engine.id}`, { headers }).then(({ data }) => setDetail(data)).catch(() => {});
+  }, [engine.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const run = async () => {
     let parsed;
@@ -43,7 +44,7 @@ function RunPanel({ engine, onClose }) {
     if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) { toast.error("State must be a JSON object"); return; }
     setBusy(true);
     try {
-      const { data } = await axios.post(`${API}/engines/${engine.id}/execute`, { input, state: parsed });
+      const { data } = await axios.post(`${API}/engines/${engine.id}/execute`, { input, state: parsed, continuity: continuity.trim() || null }, { headers });
       setRes(data);
     } catch (e) { toast.error(e?.response?.data?.detail || "Engine run failed"); } finally { setBusy(false); }
   };
@@ -92,6 +93,11 @@ function RunPanel({ engine, onClose }) {
         </div>
       </div>
       <label className="block mt-3">
+        <span className="text-xs text-neutral-400">Continuity id (optional, WorldGraph keeps state between runs)</span>
+        <input data-testid="engine-run-continuity" value={continuity} onChange={(e) => setContinuity(e.target.value)} maxLength={256} placeholder="e.g. my-world"
+          className="mt-1 w-full h-10 rounded-lg border border-white/10 bg-black/50 px-3 text-sm text-white outline-none focus:border-[#00F0FF]/60" />
+      </label>
+      <label className="block mt-3">
         <span className="text-xs text-neutral-400">State (JSON the engine reads)</span>
         <textarea data-testid="engine-run-state" value={state} onChange={(e) => setState(e.target.value)} rows={5} spellCheck={false}
           className="mt-1 w-full rounded-lg border border-white/10 bg-black/50 p-3 font-mono text-xs text-neutral-200 outline-none focus:border-[#00F0FF]/60" />
@@ -119,6 +125,7 @@ function RunPanel({ engine, onClose }) {
             </div>
           </div>
           <p className="mt-3 text-sm text-neutral-200" data-testid="engine-run-output">{res.output}</p>
+          <p className="mt-1 text-[11px] text-neutral-500" data-testid="engine-run-request-id">Enforced · request {res.requestId}{res.continuity ? ` · continuity ${res.continuity}` : ""}</p>
           {res.unresolved?.length > 0 && (
             <p className="mt-1 text-xs text-amber-300 break-words" data-testid="engine-run-unresolved">
               Missing in state: {res.unresolved.slice(0, 4).join(", ")}{res.unresolved.length > 4 ? ` +${res.unresolved.length - 4} more` : ""}
@@ -137,7 +144,7 @@ function RunPanel({ engine, onClose }) {
   );
 }
 
-export default function EngineRuntime({ compact = false }) {
+export default function EngineRuntime({ compact = false, headers }) {
   const [data, setData] = useState(null);
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(null);
@@ -145,7 +152,7 @@ export default function EngineRuntime({ compact = false }) {
   const [chainRes, setChainRes] = useState(null);
   const [chainBusy, setChainBusy] = useState(false);
 
-  useEffect(() => { axios.get(`${API}/engines/runtime`).then(({ data: d }) => setData(d)).catch(() => setData({ engines: [], count: 0 })); }, []);
+  useEffect(() => { axios.get(`${API}/engines/runtime`, { headers }).then(({ data: d }) => setData(d)).catch(() => setData({ engines: [], count: 0 })); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const list = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -156,7 +163,7 @@ export default function EngineRuntime({ compact = false }) {
   const runChain = async () => {
     setChainBusy(true);
     try {
-      const { data: d } = await axios.post(`${API}/engines/chain`, { engines: chain, input: "Frasberg chain run", state: {} });
+      const { data: d } = await axios.post(`${API}/engines/chain`, { engines: chain, input: "Frasberg chain run", state: {} }, { headers });
       setChainRes(d);
     } catch (e) { toast.error(e?.response?.data?.detail || "Chain run failed"); } finally { setChainBusy(false); }
   };
@@ -167,7 +174,7 @@ export default function EngineRuntime({ compact = false }) {
         <div>
           <h2 className="font-display font-bold text-2xl flex items-center gap-2"><Boxes className="w-5 h-5 text-[#00F0FF]" /> Engine Runtime</h2>
           <p className="text-sm text-neutral-400 mt-1" data-testid="engine-runtime-count">
-            {data ? `${data.count} Frasberg engines from packages/*-engine, running live in the backend. Pick one and run it.` : "Loading engines…"}
+            {data ? `${data.count} runtime engines + ${data.systems?.length || 0} system engines (${data.total || data.count} total), running live in the backend. Every run is enforced and logged.` : "Loading engines…"}
           </p>
         </div>
         <div className="relative w-full md:w-72">
@@ -177,7 +184,7 @@ export default function EngineRuntime({ compact = false }) {
         </div>
       </div>
 
-      {open && <div className="mt-5"><RunPanel engine={open} onClose={() => setOpen(null)} /></div>}
+      {open && <div className="mt-5"><RunPanel engine={open} headers={headers} onClose={() => setOpen(null)} /></div>}
 
       {chain.length > 0 && (
         <div className="mt-5 rounded-xl border border-white/10 bg-white/[0.03] p-4" data-testid="engine-chain">
