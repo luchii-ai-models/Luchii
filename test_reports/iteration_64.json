@@ -1,0 +1,25 @@
+{
+  "summary": "Tested timed per-user creation blocks (24h / 7d / permanent / keep). Backend: 9/9 pytest cases pass covering: duration '24h' sets expires_at ~now+24h, '7d' ~now+7d (±5 min tolerance), null -> permanent (expires_at null), 'keep' preserves expires_at while mutating kinds, invalid duration '48h' -> 422, kinds [] unblocks and clears expires_at (user removed from GET list), 403 enforcement on /api/video returns detail 'Blocked by Frasberg engine rules: Action blocked by policy until YYYY-MM-DD HH:MM UTC (create:video)' with correct date prefix, and auto-lift verified by writing a past ISO timestamp directly into Mongo (db=test_database, collection=engine_policy, owner=user:<id>) — next GET /engines/user-blocks drops the user and the doc's blockedActions has no create:* and creation_block_until is null (no creation request was issued post-lift as required). Frontend /status admin: user-blocks-duration select has 3 options (Permanent/24h/7d) with correct values; saving with 24h creates row with user-block-{email}-expires text starting with 'Lifts in 24h · <localized date>'; toggling a kind on the row (user-block-{email}-kind-{kind}) preserves the date portion of the expiry (uses duration='keep'); saving with Permanent shows 'Permanent'; Unblock removes the row entirely. Final state restored: blockme@luchii.ai blocked for image/video/music with 7d expiry.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_user_blocks_iter64.py",
+    "/app/test_reports/pytest/user_blocks_iter64.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "engine_systems.enforce_policy correctly injects the expiry into the reason only for create:* actions; unified_enforce then appends (create:<kind>) so the final 403 detail matches the spec exactly.",
+    "load_policy performs lazy auto-lift on every read (expired create:* actions are pulled and creation_block_until nulled). This correctly piggy-backs on user_blocks() and check_creation flows — no separate cron needed.",
+    "set_user_block's 'keep' branch reads cur['creation_block_until'] after load_policy, so if the expiry just lapsed between page load and save the keep would resolve to None (effectively permanent-unblock) — acceptable behavior but could be documented.",
+    "UserBlocks.jsx 'lifts()' helper rounds to the nearest hour/day; the preserved-expiry assertion must compare the ISO date portion after '·' rather than the 'Lifts in Xh' prefix (which can shift as time passes).",
+    "UserBlockIn.duration uses Literal['24h','7d','keep'] so Pydantic returns 422 on unknown values; schema is tight."
+  ],
+  "updated_files": ["/app/backend/tests/test_user_blocks_iter64.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin.tester@luchiiapp.com / AdminTest123!; blockme@luchii.ai / Block1234!",
+  "seed_data_creation": "Ensured blockme@luchii.ai exists via /api/auth/register (idempotent). Final state: blockme blocked for image/video/music with duration=7d (expires_at ~ now+7d).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_user_blocks_iter64.py complements iter63 and focuses on the duration/expiry semantics. It uses motor to inject a past expires_at into engine_policy for the auto-lift test and never POSTs to a non-blocked creation kind. Run with: python -m pytest backend/tests/test_user_blocks_iter64.py -o addopts='' -v. The 'keep' preservation check compares the ISO date suffix after '·' in the lifts() output since the 'Lifts in Xh' prefix can shift with clock drift during the test.",
+  "rca of the issue": "N/A — feature works as designed."
+}
