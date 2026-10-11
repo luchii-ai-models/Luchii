@@ -83,7 +83,7 @@ def auto_model(prompt: str, style: Optional[str]) -> str:
     return STYLE_MODEL.get(style or "", "Luchii Nova-Muse")
 
 
-PHOTO_MODELS = {"Luchii Nova-Muse"}  # rendered by the photoreal engine (local_engines.generate_photo)
+PHOTO_MODELS = {"Luchii Nova-Muse", "Luchii Dreamline", "Luchii Vision"}  # rendered by the photoreal engine (local_engines.generate_photo)
 PERSON_WORDS = re.compile(r"\b(portrait|woman|women|man|men|girl|boy|person|people|model|face|selfie|lady|guy)s?\b", re.I)
 UPSCALE_PRESET = "Enhance and upscale this image to crisp 4K detail, preserving the original composition and colors"
 
@@ -387,7 +387,7 @@ async def edit(body: EditIn, user: Optional[dict] = Depends(optional_user)):
     if EDIT_STYLE.get(body.style or ""):
         instruction = f"{instruction}, {EDIT_STYLE[body.style]}"
     img, engine = await image_with_fallback({"prompt": instruction, "image_base64": strip_data_url(body.image_base64)},
-                                            local_engines.instruct_edit, instruction, body.image_base64)
+                                            local_engines.photo_remix, instruction, body.image_base64)
     doc = await save_generation("edit", body.prompt, img, body.session_id, user, "Remix", model="Luchii Painter-X")
     return {"id": doc["id"], "kind": "edit", "model": "Luchii Painter-X", "image_base64": img, "prompt": body.prompt,
             "engine": engine, "style": body.style}
@@ -509,6 +509,40 @@ async def showcase(limit: int = 8):
     cur = db.generations.find({"kind": "generate", "featured": True, "image_base64": {"$ne": None}},
                               {"_id": 0, "id": 1, "prompt": 1, "style": 1, "image_base64": 1})
     return await cur.sort("created_at", -1).limit(min(limit, 24)).to_list(None)
+
+
+class BulkDeleteIn(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=200)
+
+
+@api.post("/generations/bulk-delete")
+async def bulk_delete_generations(body: BulkDeleteIn, user: dict = Depends(current_user)):
+    res = await db.generations.delete_many({"id": {"$in": body.ids}, "user_id": user["id"]})
+    return {"deleted": res.deleted_count}
+
+
+@api.delete("/generations/{gen_id}")
+async def delete_generation(gen_id: str, user: dict = Depends(current_user)):
+    res = await db.generations.delete_one({"id": gen_id, "user_id": user["id"]})
+    if not res.deleted_count:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"deleted": gen_id}
+
+
+@api.get("/gallery/public")
+async def public_gallery(limit: int = 48):
+    cur = db.generations.find({"public": True, "image_base64": {"$ne": None}},
+                              {"_id": 0, "id": 1, "prompt": 1, "style": 1, "model": 1, "author": 1,
+                               "created_at": 1, "image_base64": 1, "thumb_base64": 1})
+    return [_listed(d) for d in await cur.sort("created_at", -1).limit(min(limit, 120)).to_list(None)]
+
+
+async def publish_recent_generations(hours: float) -> int:
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    res = await db.generations.update_many(
+        {"created_at": {"$gte": since}, "image_base64": {"$ne": None}, "public": {"$ne": True}},
+        {"$set": {"public": True, "published_at": now_iso()}})
+    return res.modified_count
 
 
 @api.get("/share/{gen_id}")
@@ -1257,6 +1291,11 @@ async def admin_user(user: dict = Depends(current_user)) -> dict:
     if user["email"].lower() not in ADMIN_EMAILS:
         raise HTTPException(status_code=403, detail="Admins only")
     return user
+
+
+@api.post("/admin/gallery/publish-recent")
+async def admin_publish_recent(hours: float = 2, _: dict = Depends(admin_user)):
+    return {"published": await publish_recent_generations(hours), "hours": hours}
 
 
 @api.get("/engines/status")

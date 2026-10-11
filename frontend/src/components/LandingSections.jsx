@@ -8,6 +8,7 @@ import {
 import { Button } from "./ui/button";
 import { toast } from "sonner";
 import { tools, showcase as fallbackShowcase, faqs } from "../mock";
+import PublicGallery from "./PublicGallery";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -35,7 +36,8 @@ function SectionHead({ eyebrow, title, sub, id }) {
 
 export default function LandingSections() {
   const navigate = useNavigate();
-  const [items, setItems] = useState(fallbackShowcase);
+  const items = fallbackShowcase;
+  const [publicItems, setPublicItems] = useState([]);
 
   const openTool = (t) => {
     if (t.soon) {
@@ -54,23 +56,9 @@ export default function LandingSections() {
   };
 
   useEffect(() => {
-    const load = async () => {
-      try {
-        const res = await axios.get(`${API}/showcase`, { params: { limit: 8 } });
-        if (Array.isArray(res.data) && res.data.length >= 4) {
-          setItems(
-            res.data.map((g) => ({
-              title: titleFromPrompt(g.prompt),
-              style: g.style || "AI Art",
-              img: g.image_base64,
-              prompt: g.prompt,
-              styleId: g.style,
-            }))
-          );
-        }
-      } catch (e) { /* keep curated fallback */ }
-    };
-    load();
+    axios.get(`${API}/gallery/public`, { params: { limit: 24 } })
+      .then((res) => Array.isArray(res.data) && setPublicItems(res.data))
+      .catch(() => {});
   }, []);
 
   return (
@@ -136,6 +124,8 @@ export default function LandingSections() {
           ))}
         </div>
       </section>
+
+      <PublicGallery items={publicItems} titleFor={titleFromPrompt} />
 
       {/* Tools grid */}
       <section id="tools" className="max-w-[1400px] mx-auto px-5 md:px-8 py-20 md:py-28 scroll-mt-16">

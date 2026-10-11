@@ -315,6 +315,24 @@ def instruct_edit(instruction: str, image_b64: str, longest: int = 512) -> str:
         return _hd(img)
 
 
+REMIX_STRENGTH = 0.5
+REMIX_HINT = "RAW photo, ultra realistic, sharp focus, detailed face, natural skin texture, high detail"
+
+
+def photo_remix(prompt: str, image_b64: str, strength: float = REMIX_STRENGTH, longest: int = 640) -> str:
+    """Painter-X remix: photoreal img2img on the Nova-Muse engine (RV6 + LCM) keeps the layout and faces sharp."""
+    import math
+    from diffusers import StableDiffusionImg2ImgPipeline
+    src = _load_image(image_b64, longest)
+    with _heavy_lock, _image_lock:
+        _claim("photo")
+        pipe = StableDiffusionImg2ImgPipeline(**_photo_pipe().components)
+        pipe.set_progress_bar_config(disable=True)
+        img = pipe(prompt=f"{prompt}, {REMIX_HINT}", negative_prompt=PHOTO_NEGATIVE, image=src, strength=strength,
+                   num_inference_steps=math.ceil(PHOTO_STEPS / strength), guidance_scale=1.0).images[0]
+        return _hd(img)
+
+
 UPSCALE_BASE = 640     # Prime (RRDB x4) input size: 640 -> 2560 in ~2.5 min on this 2-core CPU
 UPSCALE_LONGEST = 3840  # true 4K UHD long edge
 

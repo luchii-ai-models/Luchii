@@ -6,6 +6,7 @@ import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import { Button } from "../components/ui/button";
 import { modelFamilies } from "../mock";
+import ModelSamples from "../components/ModelSamples";
 
 const FILTERS = ["All", "Text to Image", "Image to Image", "Upscale", "Video", "Audio", "3D"];
 
@@ -81,12 +82,8 @@ export default function Models() {
                 className="group rounded-2xl overflow-hidden border border-white/10 bg-[#1E2327] hover:border-[#00F0FF]/40 transition-colors flex flex-col"
               >
                 <div className="relative h-48 overflow-hidden">
-                  <img
-                    src={m.img}
-                    alt={`${m.name} sample output`}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
+                  <ModelSamples m={m} />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent pointer-events-none" />
                   <span className="absolute top-3 left-3 text-[10px] uppercase tracking-wide font-semibold text-black bg-[#00F0FF] rounded-full px-2.5 py-0.5">
                     {m.tag}
                   </span>

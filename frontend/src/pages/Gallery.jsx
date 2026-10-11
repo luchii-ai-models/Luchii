@@ -3,10 +3,11 @@ import { LuchiiBadge, luchiiModelFor } from "../components/LuchiiBadge";
 import { downloadWithLuchii } from "../lib/luchiiMark";
 import { Link, useNavigate } from "react-router-dom";
 import axios from "axios";
-import { Sparkles, ArrowLeft, Download, ImageIcon, Loader2, Wand2, Share2, AudioLines, Box, Search, Clapperboard, RotateCcw, ExternalLink } from "lucide-react";
+import { Sparkles, ArrowLeft, Download, ImageIcon, Loader2, Wand2, Share2, Trash2, AudioLines, Box, Search, Clapperboard, RotateCcw, ExternalLink } from "lucide-react";
 import { shareVideo, isPreviewEngine } from "./Studio";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
+import { SelectBar, SelectMark } from "../components/GallerySelect";
 import { useAuth } from "../context/AuthContext";
 import { brand } from "../mock";
 import { toast } from "sonner";
@@ -176,6 +177,21 @@ export default function Gallery() {
   const [models, setModels] = useState([]);
   const [videos, setVideos] = useState([]);
   const imgFilter = useModelFilter(items, imageModel);
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const [deleting, setDeleting] = useState(false);
+  const toggleSel = (id) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const bulkDelete = async () => {
+    if (!window.confirm(`Delete ${selected.size} image(s) from your gallery?`)) return;
+    setDeleting(true);
+    try {
+      const { data } = await axios.post(`${API}/generations/bulk-delete`, { ids: [...selected] }, { headers: authHeader });
+      setItems((xs) => xs.filter((x) => !selected.has(x.id)));
+      toast.success(`${data.deleted} image(s) deleted`);
+      setSelected(new Set()); setSelecting(false);
+    } catch (_) { toast.error("Could not delete the selected images"); }
+    setDeleting(false);
+  };
 
   useEffect(() => {
     if (loading) return;
@@ -252,14 +268,19 @@ export default function Gallery() {
           </div>
         ) : (
           <>
-          <ModelFilter options={imgFilter.options} value={imgFilter.model} onChange={imgFilter.setModel} />
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <ModelFilter options={imgFilter.options} value={imgFilter.model} onChange={imgFilter.setModel} />
+            <div className="mb-6"><SelectBar selecting={selecting} setSelecting={setSelecting} selected={selected} setSelected={setSelected}
+              allIds={imgFilter.shown.map((g) => g.id)} onDelete={bulkDelete} busy={deleting} /></div>
+          </div>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4" data-testid="gallery-images">
             {imgFilter.shown.map((g) => (
               <div key={g.id} className="group relative rounded-xl overflow-hidden border border-white/10 bg-[#1E2327]">
                 <img src={g.image_base64} alt={g.prompt} className="w-full aspect-square object-cover" />
+                {selecting && <SelectMark id={g.id} checked={selected.has(g.id)} onToggle={toggleSel} />}
                 <LuchiiBadge overlay model={imageModel(g)} className="!top-2 !bottom-auto" testId={`gallery-luchii-badge-${g.id}`} />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                <div className="absolute bottom-0 inset-x-0 p-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent md:opacity-0 md:group-hover:opacity-100 transition-opacity" />
+                <div className="absolute bottom-0 inset-x-0 p-3 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                   <p className="text-xs text-neutral-200 line-clamp-2">{g.prompt}</p>
                   <div className="flex items-center justify-between mt-2">
                     <span className="text-[10px] uppercase tracking-wide text-[#00F0FF]">{g.style}</span>
@@ -281,6 +302,17 @@ export default function Gallery() {
                         }}
                         data-testid={`gallery-download-${g.id}`} className="text-white/80 hover:text-white" title="Download">
                         <Download className="w-4 h-4" />
+                      </button>
+                      <button onClick={async () => {
+                          if (!window.confirm("Delete this image from your gallery?")) return;
+                          try {
+                            await axios.delete(`${API}/generations/${g.id}`, { headers: authHeader });
+                            setItems((xs) => xs.filter((x) => x.id !== g.id));
+                            toast.success("Image deleted");
+                          } catch (_) { toast.error("Could not delete this image"); }
+                        }}
+                        data-testid={`gallery-delete-${g.id}`} className="text-white/80 hover:text-red-400" title="Delete">
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
                   </div>
