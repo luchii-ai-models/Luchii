@@ -31,6 +31,7 @@ import kaggle_gpu
 import aws_gpu
 import engine_rules
 import engine_runtime
+import engine_systems
 
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
@@ -41,6 +42,7 @@ media_fs = AsyncIOMotorGridFSBucket(db, bucket_name="media")
 frasberg_gpu.init(db)
 kaggle_gpu.init(db)
 aws_gpu.init(db)
+engine_systems.init(db)
 if kaggle_gpu.enabled():
     frasberg_gpu.ON_DEMAND.add("frasberg-motion-free")
 if aws_gpu.enabled():
@@ -1847,8 +1849,23 @@ class EngineExecIn(BaseModel):
     state: dict = Field(default_factory=dict)
 
 
+    continuity: Optional[str] = Field(default=None, max_length=256)
+
+
 class EngineChainIn(EngineExecIn):
     engines: list[str] = Field(min_length=1, max_length=12)
+
+
+class EngineFlowIn(BaseModel):
+    domain: str
+    input: str = Field(default="", max_length=2000)
+    awareness: Optional[dict] = None
+    state: dict = Field(default_factory=dict)
+
+
+class EngineBlockIn(BaseModel):
+    actions: list[str] = Field(default_factory=list, max_length=200)
+    scope: str = Field(default="owner", pattern="^(owner|global)$")
 
 
 def _state_ok(state: dict):
@@ -1856,44 +1873,156 @@ def _state_ok(state: dict):
         raise HTTPException(status_code=413, detail="state is too large (64 KB max)")
 
 
+async def engine_owner(request: Request, user: Optional[dict] = Depends(optional_user)) -> str:
+    """Engines are internal: admins (JWT) or platform frb_live keys only."""
+    key = request.headers.get("X-Frasberg-Key", "")
+    if user and user["email"].lower() in ADMIN_EMAILS:
+        return f"admin:{user['email'].lower()}"
+    if key and key in FRASBERG_KEYS:
+        return f"platform:{key[9:17]}"
+    if user:
+        raise HTTPException(status_code=403, detail="Admins only")
+    raise HTTPException(status_code=401, detail="Sign in as an admin or send a valid X-Frasberg-Key")
+
+
+async def _enforce(engine: str, owner: str, cid: Optional[str], action: Optional[str] = None) -> dict:
+    try:
+        return await engine_systems.unified_enforce(engine, owner, {"continuity": cid, "action": action})
+    except engine_systems.EnforceError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+async def _with_continuity(owner: str, cid: Optional[str], state: dict) -> dict:
+    if not cid:
+        return state
+    saved = (await engine_systems.load_continuity(owner, cid))["state"]
+    return {**saved, **state}
+
+
+def _run_state(model: dict) -> dict:
+    return {k: v for k, v in model.items() if isinstance(v, dict)}
+
+
 @api.get("/engines/runtime")
-async def engines_runtime():
+async def engines_runtime(_: str = Depends(engine_owner)):
     return {"count": len(engine_runtime.REGISTRY), "source": "packages/*-engine (TypeScript), run by the Frasberg Engine Runtime",
-            "engines": engine_runtime.catalogue()}
+            "engines": engine_runtime.catalogue(), "systems": engine_systems.SYSTEMS,
+            "total": len(engine_runtime.REGISTRY) + len(engine_systems.SYSTEMS)}
 
 
 @api.get("/engines/runtime/{engine_id}")
-async def engines_runtime_one(engine_id: str):
+async def engines_runtime_one(engine_id: str, _: str = Depends(engine_owner)):
     if engine_id not in engine_runtime.REGISTRY:
         raise HTTPException(status_code=404, detail="Unknown engine")
     return engine_runtime.describe(engine_id, full=True)
 
 
 @api.post("/engines/chain")
-async def engines_chain(body: EngineChainIn):
+async def engines_chain(body: EngineChainIn, owner: str = Depends(engine_owner)):
     unknown = [e for e in body.engines if e not in engine_runtime.REGISTRY]
     if unknown:
         raise HTTPException(status_code=404, detail=f"Unknown engine: {', '.join(unknown)}")
     _state_ok(body.state)
+    for e in body.engines:
+        enf = await _enforce(e, owner, body.continuity)
     try:
-        return engine_runtime.chain(body.engines, body.input, body.state)
+        res = engine_runtime.chain(body.engines, body.input, await _with_continuity(owner, body.continuity, body.state))
     except engine_runtime.EngineError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    if body.continuity:
+        st = {}
+        for s in res["steps"]:
+            st.update(_run_state(s["model"]))
+        await engine_systems.update_continuity(owner, body.continuity, st, "chain")
+    return {**res, "requestId": enf["requestId"], "continuity": body.continuity}
+
+
+@api.post("/engines/flow")
+async def engines_flow(body: EngineFlowIn, owner: str = Depends(engine_owner)):
+    _state_ok(body.state)
+    if body.domain not in engine_systems.FLOW_DOMAINS:
+        raise HTTPException(status_code=404, detail=f"Unknown domain. Use one of: {', '.join(engine_systems.FLOW_DOMAINS)}")
+    enf = await _enforce("engine-flow", owner, None, f"flow:{body.domain}")
+    try:
+        res = engine_systems.flow(body.domain, body.awareness or engine_systems.sample_awareness(), body.input, body.state)
+    except (engine_runtime.EngineError, engine_systems.EnforceError) as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {**res, "requestId": enf["requestId"]}
 
 
 @api.post("/engines/{engine_id}/execute")
-async def engines_execute(engine_id: str, body: EngineExecIn):
+async def engines_execute(engine_id: str, body: EngineExecIn, owner: str = Depends(engine_owner)):
     if engine_id not in engine_runtime.REGISTRY:
         raise HTTPException(status_code=404, detail="Unknown engine")
     _state_ok(body.state)
+    enf = await _enforce(engine_id, owner, body.continuity)
     try:
-        return engine_runtime.execute(engine_id, body.input, body.state)
+        res = engine_runtime.execute(engine_id, body.input, await _with_continuity(owner, body.continuity, body.state))
     except engine_runtime.EngineError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    if body.continuity:
+        await engine_systems.update_continuity(owner, body.continuity, _run_state(res["model"]), engine_id)
+    return {**res, "requestId": enf["requestId"], "continuity": body.continuity}
+
+
+@api.get("/engines/systems")
+async def engines_systems_list(owner: str = Depends(engine_owner)):
+    return {"owner": owner, "systems": engine_systems.SYSTEMS, "flow_domains": engine_systems.FLOW_DOMAINS,
+            "governance": await engine_systems.load_governance(owner), "policy": await engine_systems.load_policy(owner)}
+
+
+@api.get("/engines/governance")
+async def engines_governance(owner: str = Depends(engine_owner)):
+    return await engine_systems.load_governance(owner)
+
+
+@api.put("/engines/governance")
+async def engines_governance_set(body: EngineBlockIn, owner: str = Depends(engine_owner)):
+    if body.scope == "global" and not owner.startswith("admin:"):
+        raise HTTPException(status_code=403, detail="Only admins can set global governance")
+    target = "*" if body.scope == "global" else owner
+    await engine_systems.save_governance(target, body.actions, owner)
+    return await engine_systems.load_governance(owner)
+
+
+@api.get("/engines/policy")
+async def engines_policy(owner: str = Depends(engine_owner)):
+    return await engine_systems.load_policy(owner)
+
+
+@api.put("/engines/policy")
+async def engines_policy_set(body: EngineBlockIn, owner: str = Depends(engine_owner)):
+    return await engine_systems.save_policy(owner, body.actions, owner)
+
+
+@api.get("/engines/diagnostics")
+async def engines_diagnostics(component: Optional[str] = None, owner: str = Depends(engine_owner)):
+    if component:
+        if component not in engine_systems.DIAG_COMPONENTS:
+            raise HTTPException(status_code=404, detail="Unknown component")
+        return {"component": component, "events": await engine_systems.fetch_diagnostics(owner, component)}
+    return await engine_systems.aggregate_diagnostics(owner)
+
+
+@api.get("/engines/identity")
+async def engines_identity(owner: str = Depends(engine_owner)):
+    return await engine_systems.load_identity(owner)
+
+
+@api.get("/engines/continuity/{cid}")
+async def engines_continuity(cid: str, owner: str = Depends(engine_owner)):
+    return await engine_systems.load_continuity(owner, cid)
+
+
+@api.delete("/engines/continuity/{cid}")
+async def engines_continuity_delete(cid: str, owner: str = Depends(engine_owner)):
+    if not await engine_systems.delete_continuity(owner, cid):
+        raise HTTPException(status_code=404, detail="Continuity not found")
+    return {"deleted": cid}
 
 
 @api.get("/engines/rules")
-async def engines_rules():
+async def engines_rules(_: str = Depends(engine_owner)):
     return {"summary": engine_rules.summary(), "engines": engine_rules.RULES,
             "default_duration": engine_rules.DEFAULT_DURATION}
 

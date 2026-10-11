@@ -34,9 +34,6 @@ const LoginGate = () => (
     <p className="mt-3 text-neutral-400 text-sm md:text-base">The Frasberg Creator and Luchii Chat developer docs are available to signed-in creators.</p>
     <Link to="/login?next=/developers" data-testid="api-docs-login-btn"
       className="inline-flex mt-7 rounded-full bg-[#00F0FF] text-black font-semibold px-6 py-3 hover:bg-[#00d4de] transition-colors">Log in</Link>
-    <p className="mt-6 text-sm text-neutral-400">
-      The <Link to="/engines" data-testid="api-docs-gate-engines-link" className="text-[#00F0FF] hover:underline">Frasberg Engine Runtime</Link> is open to everyone, no sign-in needed.
-    </p>
   </main>
 );
 
@@ -98,14 +95,6 @@ export default function ApiDocs() {
 
         <ChatDocs />
 
-        <Link to="/engines" data-testid="api-docs-engines-link"
-          className="mt-10 flex items-center justify-between gap-3 rounded-xl border border-[#00F0FF]/25 bg-[#00F0FF]/5 p-4 hover:bg-[#00F0FF]/10 transition-colors">
-          <span>
-            <span className="block font-semibold text-white">Frasberg Engine Runtime</span>
-            <span className="block text-sm text-neutral-400">44 runtime engines with live /api/engines/&#123;id&#125;/execute endpoints, plus the engine rules.</span>
-          </span>
-          <span className="text-[#00F0FF] text-sm font-semibold shrink-0">Open →</span>
-        </Link>
 
         <p className="mt-10 text-xs text-neutral-600 flex items-center gap-2">
           <img src="/luchii-logo.png" alt="Luchii logo" className="w-6 h-6 rounded-full object-contain shrink-0" />

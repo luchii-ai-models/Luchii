@@ -7,6 +7,8 @@ import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import { useAuth } from "../context/AuthContext";
 import EngineRuntime from "../components/EngineRuntime";
+import EngineSystems from "../components/EngineSystems";
+import EngineRules from "../components/EngineRules";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -421,7 +423,9 @@ export default function EngineStatus() {
           {data?.engines.map((e) => <EngineCard key={e.id} e={e} />)}
         </div>
         <GpuPanel authHeader={authHeader} />
-        <EngineRuntime compact />
+        <EngineRuntime compact headers={authHeader} />
+        <EngineSystems headers={authHeader} />
+        <EngineRules headers={authHeader} />
       </main>
       <Footer />
     </div>

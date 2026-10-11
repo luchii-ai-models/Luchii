@@ -6,9 +6,9 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const NAME = { image: "Image", video: "Video", music: "Music", voice: "Voice", stt: "Speech to Text", audio: "Audio", "game-logic": "Game Logic" };
 const ORDER = ["image", "video", "music", "voice", "stt", "audio", "game-logic"];
 
-export default function EngineRules() {
+export default function EngineRules({ headers }) {
   const [data, setData] = useState(null);
-  useEffect(() => { axios.get(`${API}/engines/rules`).then(({ data: d }) => setData(d)).catch(() => {}); }, []);
+  useEffect(() => { axios.get(`${API}/engines/rules`, { headers }).then(({ data: d }) => setData(d)).catch(() => {}); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   if (!data) return null;
   const engines = ORDER.map((k) => data.engines[k]).filter(Boolean);
   return (
