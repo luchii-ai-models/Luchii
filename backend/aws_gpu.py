@@ -4,12 +4,14 @@ With AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY set, the app runs the same Frasbe
 on a dedicated NVIDIA A10G (g5.xlarge, 24GB) in the owner's AWS account. Priority order for video is
 AWS GPU -> free Kaggle T4 -> Frasberg Lite (CPU).
 
-AWS_GPU_MODE:
+Mode (admin switch on /status, stored in db.aws_gpu_settings; AWS_GPU_MODE env is only the default):
   always_on  - a background reconciler keeps exactly one instance running 24/7 (restarts it if stopped, relaunches
-               it if terminated). The worker never idles out (systemd Restart=always).
-  on_demand  - a video request starts the instance; the worker exits after AWS_GPU_MAX_IDLE_S without jobs and the
-               box powers itself off (stop, not terminate), so it only bills while in use.
+               it if terminated).
+  on_demand  - "Cost saver": a video request starts the instance; the backend stops it (stop, not terminate - disk
+               and downloaded weights are kept) after `idle_min` minutes without GPU jobs, so it only bills while in use.
   off        - disabled.
+The worker itself is mode-agnostic (systemd Restart=always, never idles out); the backend decides when the box runs,
+so switching modes takes effect immediately without touching the instance.
 
 The instance has no inbound ports (security group without ingress) and only calls out to the gateway over HTTPS.
 One instance per gateway host (tag FrasbergGatewayHost), so preview and production never share/steal a worker.
@@ -34,16 +36,43 @@ _lock = asyncio.Lock()
 _cache: dict = {}
 STATUS_CACHE_S = 20
 BOOT_WINDOW_S = 35 * 60      # a fresh launch/start counts as "booting" this long while no worker is online
-RECONCILE_EVERY_S = 300
+RECONCILE_EVERY_S = 300     # always_on: make sure the box is running
+IDLE_CHECK_EVERY_S = 60     # on_demand: look for an idle box to stop
+IDLE_CHOICES = (10, 20, 30, 60, 120)
 QUOTA_CODE = "L-DB2E81BA"    # Running On-Demand G and VT instances (vCPUs)
 VCPUS = {"g5.xlarge": 4, "g5.2xlarge": 8, "g6.xlarge": 4, "g6e.xlarge": 4, "g5.4xlarge": 16}
 AMI_NAME = "Deep Learning OSS Nvidia Driver AMI GPU PyTorch * (Ubuntu 24.04) *"
 SG_NAME = "frasberg-gpu-worker"
+HOURLY_USD = {"g5.xlarge": 1.006, "g5.2xlarge": 1.212, "g6.xlarge": 0.805, "g6e.xlarge": 1.861, "g5.4xlarge": 1.624}
+
+
+_settings: dict = {}
 
 
 def init(database):
     global db
     db = database
+
+
+async def load_settings():
+    doc = await db.aws_gpu_settings.find_one({"id": "aws"}, {"_id": 0}) or {}
+    _settings.clear()
+    _settings.update(doc)
+
+
+async def set_settings(mode_: Optional[str] = None, idle_min: Optional[int] = None, by: str = "") -> dict:
+    upd = {"updated_at": _now(), "updated_by": by}
+    if mode_ is not None:
+        if mode_ not in ("always_on", "on_demand"):
+            raise ValueError("mode must be always_on or on_demand")
+        upd["mode"] = mode_
+    if idle_min is not None:
+        if idle_min not in IDLE_CHOICES:
+            raise ValueError(f"idle_min must be one of {IDLE_CHOICES}")
+        upd["idle_min"] = idle_min
+    await db.aws_gpu_settings.update_one({"id": "aws"}, {"$set": upd}, upsert=True)
+    await load_settings()
+    return {"mode": mode(), "idle_min": idle_min_()}
 
 
 def _env(k: str, d: str = "") -> str:
@@ -55,8 +84,15 @@ def enabled() -> bool:
 
 
 def mode() -> str:
-    m = _env("AWS_GPU_MODE", "on_demand").lower()
-    return m if m in ("always_on", "on_demand", "off") else "on_demand"
+    if _env("AWS_GPU_MODE").lower() == "off":
+        return "off"
+    m = _settings.get("mode") or _env("AWS_GPU_MODE", "on_demand").lower()
+    return m if m in ("always_on", "on_demand") else "on_demand"
+
+
+def idle_min_() -> int:
+    v = _settings.get("idle_min") or int(_env("AWS_GPU_MAX_IDLE_S", "1200")) // 60
+    return int(v)
 
 
 def region() -> str:
@@ -70,10 +106,6 @@ def instance_type() -> str:
 def models() -> list:
     raw = _env("AWS_GPU_MODELS", "frasberg-motion-fast,frasberg-motion-free")
     return [m for m in raw.split(",") if m in frasberg_gpu.MODELS] or ["frasberg-motion-free"]
-
-
-def max_idle_s() -> int:
-    return 0 if mode() == "always_on" else int(_env("AWS_GPU_MAX_IDLE_S", "1200"))
 
 
 def host_of(gateway: str) -> str:
@@ -102,8 +134,6 @@ def _age_s(iso: Optional[str]) -> float:
 
 # ---------- user-data ----------
 def user_data(gateway: str, secret: str, worker_id: str) -> str:
-    restart = "always" if mode() == "always_on" else "no"
-    after_exit = "" if mode() == "always_on" else "ExecStopPost=/usr/bin/systemctl poweroff\n"
     mods = ",".join(models())
     return f"""#!/bin/bash
 set -uo pipefail
@@ -134,7 +164,7 @@ FRASBERG_WORKER_SECRET=$SECRET
 FRASBERG_WORKER_MODELS={mods}
 FRASBERG_WORKER_ID=$WID
 FRASBERG_IDLE_UNLOAD_S=0
-FRASBERG_WORKER_MAX_IDLE_S={max_idle_s()}
+FRASBERG_WORKER_MAX_IDLE_S=0
 FRASBERG_PRELOAD=1
 HF_HOME=/opt/frasberg/hf
 HF_HUB_ENABLE_HF_TRANSFER=1
@@ -153,9 +183,9 @@ Wants=network-online.target
 WorkingDirectory=/opt/frasberg
 EnvironmentFile=/etc/frasberg-worker.env
 ExecStart=$PY /opt/frasberg/worker.py
-Restart={restart}
+Restart=always
 RestartSec=10
-{after_exit}[Install]
+[Install]
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
@@ -388,22 +418,68 @@ async def overview(gateway: str) -> dict:
             req = await asyncio.to_thread(_quota_request_sync)
             await _save(gateway, quota=q, quota_request=req)
             st.update(quota=q, quota_request=req)
-    return {"configured": True, "mode": mode(), "region": region(), "instance_type": instance_type(),
+    idle = await idle_info(gateway, cur) if cur and cur["state"] == "running" else None
+    return {"configured": True, "mode": mode(), "idle_min": idle_min_(), "idle_choices": list(IDLE_CHOICES),
+            "idle": idle, "hourly_usd": HOURLY_USD.get(instance_type()), "region": region(), "instance_type": instance_type(),
             "models": models(), "name": name_for(gateway), "gateway": gateway, "instance": cur, "boot": boot,
             "worker_id": wid, "quota": st.get("quota"), "quota_needed": VCPUS.get(instance_type(), 4),
             "quota_request": st.get("quota_request"), "error": st.get("error"), "paused": bool(st.get("paused")),
             "last_action": st.get("last_action"), "last_action_at": st.get("last_action_at")}
 
 
+async def last_activity(gateway: str, cur: Optional[dict]) -> Optional[str]:
+    """Most recent sign of GPU use: a GPU job created/finished, or the box being started/launched."""
+    if await db.gpu_jobs.count_documents({"status": {"$in": ["queued", "running"]}, "model": {"$in": models()}}):
+        return _now()
+    times = []
+    for f in ("created_at", "finished_at"):
+        j = await db.gpu_jobs.find_one({"model": {"$in": models()}, f: {"$ne": None}}, {"_id": 0, f: 1}, sort=[(f, -1)])
+        if j and j.get(f):
+            times.append(j[f])
+    st = await _state(gateway)
+    for t in (st.get("last_action_at"), (cur or {}).get("launched")):
+        if t:
+            times.append(t)
+    return max(times, key=lambda t: datetime.fromisoformat(t)) if times else None
+
+
+async def idle_info(gateway: str, cur: Optional[dict]) -> dict:
+    last = await last_activity(gateway, cur)
+    idle_s = int(_age_s(last)) if last else 0
+    left = max(0, idle_min_() * 60 - idle_s)
+    return {"last_activity": last, "idle_s": idle_s, "stops_in_s": left if mode() == "on_demand" else None}
+
+
+async def _idle_stop(gateway: str):
+    cur = await instance(gateway, fresh=True)
+    if not cur or cur["state"] != "running":
+        return
+    if await booting(gateway):  # still installing / downloading weights: never cut a cold start short
+        return
+    info = await idle_info(gateway, cur)
+    if info["idle_s"] >= idle_min_() * 60:
+        await asyncio.to_thread(_stop_sync, cur["instance_id"])
+        await _save(gateway, last_action="idle-stop", last_action_at=_now())
+        _cache.pop(name_for(gateway), None)
+        log.info("AWS GPU %s stopped after %s idle min (cost saver)", cur["instance_id"], idle_min_())
+
+
 async def reconcile_loop(gateway: str, secret: str):
-    """always_on: keep one GPU box running. Admin Stop pauses it until Start is pressed."""
+    """always_on: keep one GPU box running (admin Stop pauses it until Start).
+    on_demand (cost saver): stop the box once it has been idle for idle_min minutes."""
     await asyncio.sleep(20)
+    last_ensure = 0.0
     while True:
         try:
-            if enabled() and mode() == "always_on" and not (await _state(gateway)).get("paused"):
-                res = await ensure(gateway, secret, reason="always-on")
-                if res.get("action") not in (None, "none"):
-                    log.info("AWS always-on reconcile: %s", res)
+            if enabled() and mode() == "always_on":
+                if time.monotonic() - last_ensure >= RECONCILE_EVERY_S and not (await _state(gateway)).get("paused"):
+                    last_ensure = time.monotonic()
+                    res = await ensure(gateway, secret, reason="always-on")
+                    if res.get("action") not in (None, "none"):
+                        log.info("AWS always-on reconcile: %s", res)
+            elif enabled() and mode() == "on_demand":
+                last_ensure = 0.0
+                await _idle_stop(gateway)
         except Exception:  # noqa: BLE001
             log.exception("AWS reconcile error")
-        await asyncio.sleep(RECONCILE_EVERY_S)
+        await asyncio.sleep(IDLE_CHECK_EVERY_S)

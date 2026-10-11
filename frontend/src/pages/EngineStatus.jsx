@@ -122,6 +122,17 @@ function AwsPanel({ authHeader, onChange }) {
     } catch (e) { toast.error(e?.response?.data?.detail || "AWS request failed"); } finally { setAct(null); }
   };
 
+  const save = async (patch) => {
+    setAct(patch.mode ? `mode-${patch.mode}` : `idle-${patch.idle_min}`);
+    try {
+      const { data } = await axios.put(`${API}/gpu-admin/aws/settings`, patch, { headers: authHeader });
+      if (patch.mode === "always_on") toast.success(data.start?.ok === false ? `Always on. ${data.start.reason}` : "Always on: the AWS GPU stays running 24/7.");
+      else if (patch.mode === "on_demand") toast.success(`Cost saver on: the AWS GPU starts for videos and stops after ${data.idle_min} idle minutes.`);
+      else toast.success(`The AWS GPU now stops after ${data.idle_min} idle minutes.`);
+      load(); onChange?.();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not change the AWS GPU mode"); } finally { setAct(null); }
+  };
+
   if (!a) return null;
   if (!a.configured) {
     return (
@@ -131,12 +142,13 @@ function AwsPanel({ authHeader, onChange }) {
     );
   }
   const st = a.instance?.state || "none";
+  const hourly = a.hourly_usd;
   const quotaLow = a.quota != null && a.quota < a.quota_needed;
   return (
     <div className="mt-5 rounded-2xl border border-emerald-400/25 bg-emerald-400/5 p-5" data-testid="aws-panel">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 font-semibold text-white"><Server className="w-4 h-4 text-emerald-300" /> AWS GPU · {a.mode === "always_on" ? "always on" : "on demand"}</div>
+          <div className="flex items-center gap-2 font-semibold text-white"><Server className="w-4 h-4 text-emerald-300" /> AWS GPU · {a.mode === "always_on" ? "always on" : "cost saver"}</div>
           <p className="text-xs text-neutral-400 mt-1">
             {a.instance_type} (NVIDIA A10G 24GB) · {a.region} · serves {a.models.join(", ")} · first choice for every video, Kaggle is the backup
           </p>
@@ -153,17 +165,57 @@ function AwsPanel({ authHeader, onChange }) {
             </p>
           )}
           {a.error && !quotaLow && <p className="text-xs text-rose-300 mt-1 break-words" data-testid="aws-error">{a.error}</p>}
+          {a.mode === "on_demand" && st === "running" && a.idle && (
+            <p className="text-xs text-neutral-400 mt-1" data-testid="aws-idle">
+              Idle {Math.floor(a.idle.idle_s / 60)} min · stops automatically in about {Math.ceil((a.idle.stops_in_s || 0) / 60)} min unless a video comes in
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap gap-2 shrink-0">
           <Button data-testid="aws-start-btn" onClick={() => call("start", "start", "AWS GPU is starting. First boot takes about 15–25 minutes, later starts about 3–5.")} disabled={!!act}
             className="rounded-full bg-emerald-400 text-black hover:bg-emerald-300 font-semibold">
             {act === "start" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Rocket className="w-4 h-4 mr-2" />} Start
           </Button>
-          <Button data-testid="aws-stop-btn" onClick={() => call("stop", "stop", "AWS GPU is stopping. It stays off until you press Start.")} disabled={!!act} variant="outline"
+          <Button data-testid="aws-stop-btn" onClick={() => call("stop", "stop", a.mode === "always_on" ? "AWS GPU is stopping. It stays off until you press Start." : "AWS GPU is stopping. The next video starts it again.")} disabled={!!act} variant="outline"
             className="rounded-full border-white/15 bg-transparent text-white hover:bg-white/10">
             {act === "stop" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Square className="w-4 h-4 mr-2" />} Stop
           </Button>
         </div>
+      </div>
+
+      <div className="mt-4 pt-4 border-t border-white/10" data-testid="aws-mode">
+        <div className="text-xs uppercase tracking-wider text-neutral-500 mb-2">Billing mode</div>
+        <div className="grid sm:grid-cols-2 gap-2">
+          {[
+            { id: "always_on", title: "Always on", desc: `Instant clips, no cold start · about $${hourly ? Math.round(hourly * 730) : 730}/month` },
+            { id: "on_demand", title: "Cost saver", desc: `Starts on the first video (about 3–5 min) and stops after ${a.idle_min} idle min · about $${hourly ? hourly.toFixed(2) : "1.01"}/hour only while on` },
+          ].map((m) => {
+            const on = a.mode === m.id;
+            return (
+              <button key={m.id} type="button" data-testid={`aws-mode-${m.id}`} aria-pressed={on} disabled={!!act || on}
+                onClick={() => save({ mode: m.id })}
+                className={`text-left rounded-xl border p-3 transition ${on ? "border-emerald-400/60 bg-emerald-400/10" : "border-white/10 bg-white/[0.02] hover:border-white/25"} disabled:cursor-default`}>
+                <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                  {act === `mode-${m.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <span className={`w-2.5 h-2.5 rounded-full ${on ? "bg-emerald-400" : "border border-white/30"}`} />}
+                  {m.title}{on && <span className="text-[10px] font-medium text-emerald-300 uppercase tracking-wider">Active</span>}
+                </div>
+                <div className="text-xs text-neutral-400 mt-1">{m.desc}</div>
+              </button>
+            );
+          })}
+        </div>
+        {a.mode === "on_demand" && (
+          <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="aws-idle-choices">
+            <span className="text-xs text-neutral-400 mr-1">Stop after</span>
+            {a.idle_choices.map((n) => (
+              <button key={n} type="button" data-testid={`aws-idle-${n}`} disabled={!!act || a.idle_min === n} onClick={() => save({ idle_min: n })}
+                className={`h-7 px-3 rounded-full text-xs border ${a.idle_min === n ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-200" : "border-white/15 text-neutral-300 hover:bg-white/10"}`}>
+                {n < 60 ? `${n} min` : `${n / 60} h`}
+              </button>
+            ))}
+            <span className="text-xs text-neutral-500">idle</span>
+          </div>
+        )}
       </div>
     </div>
   );

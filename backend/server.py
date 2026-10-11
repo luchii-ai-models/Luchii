@@ -1560,6 +1560,26 @@ async def gpu_admin_aws_start(request: Request, _: dict = Depends(admin_user)):
     return await aws_gpu.resume(gateway, os.environ["FRASBERG_WORKER_SECRET"])
 
 
+class AwsSettingsIn(BaseModel):
+    mode: Optional[str] = None       # always_on | on_demand (cost saver)
+    idle_min: Optional[int] = None   # on_demand: stop after this many idle minutes
+
+
+@api.put("/gpu-admin/aws/settings")
+async def gpu_admin_aws_settings(body: AwsSettingsIn, request: Request, admin: dict = Depends(admin_user)):
+    if not aws_gpu.enabled():
+        raise HTTPException(status_code=400, detail="AWS GPU is not configured")
+    try:
+        res = await aws_gpu.set_settings(body.mode, body.idle_min, by=admin["email"])
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    gateway = public_gateway(request)
+    if body.mode == "always_on" and gateway:
+        # Always on means "keep it running": clear an earlier admin pause and start it right away.
+        res["start"] = await aws_gpu.resume(gateway, os.environ["FRASBERG_WORKER_SECRET"])
+    return res
+
+
 @api.post("/gpu-admin/aws/stop")
 async def gpu_admin_aws_stop(request: Request, _: dict = Depends(admin_user)):
     return await aws_gpu.stop(public_gateway(request))
@@ -1852,8 +1872,9 @@ async def startup():
     await _resume_interrupted_jobs()
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, local_engines.warm_up)
+    await aws_gpu.load_settings()
     base = os.environ.get("FRASBERG_PUBLIC_URL", "").rstrip("/")
-    if aws_gpu.enabled() and aws_gpu.mode() == "always_on" and base:
+    if aws_gpu.enabled() and base:
         asyncio.create_task(aws_gpu.reconcile_loop(f"{base}/api/gpu", os.environ["FRASBERG_WORKER_SECRET"]))
 
 
