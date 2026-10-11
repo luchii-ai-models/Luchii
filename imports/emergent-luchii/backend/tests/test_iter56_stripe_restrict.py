@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path("/app/backend/.env"))
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://frb-secure-runtime.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://ai-gateway-demo.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]

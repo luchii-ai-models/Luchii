@@ -3,7 +3,7 @@ import os
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://frb-secure-runtime.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://ai-gateway-demo.preview.emergentagent.com").rstrip("/")
 # Load from frontend .env if not present
 if "REACT_APP_BACKEND_URL" not in os.environ:
     try:
