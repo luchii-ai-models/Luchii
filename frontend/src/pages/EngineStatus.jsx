@@ -9,6 +9,7 @@ import { useAuth } from "../context/AuthContext";
 import EngineRuntime from "../components/EngineRuntime";
 import EngineSystems from "../components/EngineSystems";
 import EngineRules from "../components/EngineRules";
+import QuotaBanner from "../components/QuotaBanner";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -225,7 +226,12 @@ function AwsPanel({ authHeader, onChange }) {
           {quotaLow && (
             <p className="text-xs text-amber-300 mt-1" data-testid="aws-quota">
               GPU quota is {a.quota} vCPU, needs {a.quota_needed}.
-              {a.quota_request ? ` Increase request: ${a.quota_request.status}${a.quota_request.case_id ? ` (support case ${a.quota_request.case_id})` : ""}. The server starts by itself once AWS approves it.` : " Request an increase in AWS Service Quotas."}
+              {a.quota_request ? ` Increase request: ${a.quota_request.status}${a.quota_request.case_id ? ` (support case ${a.quota_request.case_id})` : ""}. Checked every 5 min; a banner appears here once AWS approves it.` : " Request an increase in AWS Service Quotas."}
+              <button type="button" data-testid="aws-quota-check" disabled={!!act} onClick={async () => {
+                setAct("quota");
+                try { const { data } = await axios.post(`${API}/gpu-admin/aws/quota/check`, null, { headers: authHeader }); setA(data); toast.message(`GPU quota: ${data.quota} vCPU`); }
+                catch (e) { toast.error(e?.response?.data?.detail || "Quota check failed"); } finally { setAct(null); }
+              }} className="ml-2 underline text-amber-200 hover:text-white">Check now</button>
             </p>
           )}
           {a.error && !quotaLow && <p className="text-xs text-rose-300 mt-1 break-words" data-testid="aws-error">{a.error}</p>}
@@ -401,6 +407,7 @@ export default function EngineStatus() {
     <div className="min-h-screen bg-[#05060A] text-white">
       <Navbar />
       <main className="max-w-5xl mx-auto px-5 md:px-8 pt-28 pb-24" data-testid="engine-status-page">
+        <QuotaBanner headers={authHeader} />
         <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-neutral-300 mb-5">
           <Activity className="w-3.5 h-3.5 text-[#00F0FF]" /> Live engine status
         </div>

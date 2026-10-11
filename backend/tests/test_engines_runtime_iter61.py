@@ -10,7 +10,6 @@ Covers:
 """
 import os
 import uuid
-import time
 import requests
 import pytest
 

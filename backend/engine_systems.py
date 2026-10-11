@@ -203,3 +203,31 @@ def flow(domain: str, awareness: dict, input_text: str, state: Optional[dict] = 
             "awareness_valid": is_engine_awareness(awareness),
             "stages": [{"engine": s["engine"], "name": s["name"], "coverage": s["coverage"]} for s in res["steps"]],
             "coverage": res["coverage"], "duration_ms": round((time.perf_counter() - t0) * 1000, 2)}
+
+
+# ---------- creations (image / video / music jobs) ----------
+CREATION_KINDS = ("image", "video", "music")
+
+
+async def check_creation(kind: str, owner: str, prompt: str) -> dict:
+    """Unified-enforce `create:<kind>` for the owner, then run the Engine Flow over the creation. Raises EnforceError."""
+    enf = await unified_enforce(f"create-{kind}", owner, {"action": f"create:{kind}"})
+    res = flow("structure", sample_awareness(), prompt[:2000], {"creation": {"kind": kind, "prompt": prompt[:500]}})
+    rec = {"requestId": enf["requestId"], "action": enf["action"], "flow_id": res.get("structureId"),
+           "score": (res.get("evolution") or {}).get("evolutionScore"), "coverage": res["coverage"],
+           "stages": len(res["stages"]), "duration_ms": res["duration_ms"], "checked_at": _now()}
+    await log_diagnostics(owner, "engine", {"engine": "engine-flow", "action": f"flow:create:{kind}", "allowed": True,
+                                            "requestId": enf["requestId"], "creation": kind, "flow_id": rec["flow_id"],
+                                            "score": rec["score"]})
+    return rec
+
+
+async def creation_stats(limit: int = 15) -> dict:
+    match = {"component": "engine", "payload.action": {"$in": [f"create:{k}" for k in CREATION_KINDS]}}
+    out = {"kinds": {}}
+    for k in CREATION_KINDS:
+        q = {"component": "engine", "payload.action": f"create:{k}"}
+        out["kinds"][k] = {"checked": await db.engine_diagnostics.count_documents(q),
+                           "blocked": await db.engine_diagnostics.count_documents({**q, "payload.allowed": False})}
+    out["recent"] = await db.engine_diagnostics.find(match, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return out
