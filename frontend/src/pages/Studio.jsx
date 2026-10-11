@@ -10,6 +10,7 @@ import { VideoModelPicker } from "../components/VideoModelPicker";
 import Footer from "../components/Footer";
 import LogoLoader from "../components/LogoLoader";
 import { PresetRow } from "../components/PresetRow";
+import { freshFromList } from "../lib/promptKit";
 import { VIDEO_PRESETS, MUSIC_PRESETS, TIKTOK_VIDEO_PRESETS, SURPRISE_VIDEO_IDEAS, PHOTO_MOTION_PRESETS } from "../presets";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
@@ -238,7 +239,7 @@ export default function Studio({ kind }) {
             <PresetRow presets={TIKTOK} testid="video-tiktok" label="Trending" hint="TikTok-style · vertical 9:16"
               onPick={(p) => {
                 const pick = p.surprise
-                  ? (() => { const pool = SURPRISE_VIDEO_IDEAS.filter((i) => i.prompt !== prompt); return pool[Math.floor(Math.random() * pool.length)]; })()
+                  ? freshFromList("video", SURPRISE_VIDEO_IDEAS, SURPRISE_VIDEO_IDEAS.find((i) => i.prompt === prompt))
                   : p;
                 setPrompt(pick.prompt);
                 if (pick.style) setStyle(pick.style);

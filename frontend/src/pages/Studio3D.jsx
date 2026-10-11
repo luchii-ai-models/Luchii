@@ -9,12 +9,12 @@ import Footer from "../components/Footer";
 import LogoLoader from "../components/LogoLoader";
 import { PresetRow } from "../components/PresetRow";
 import { MODEL3D_PRESETS } from "../presets";
+import { surprise3D } from "../lib/promptKit";
 import { useAuth } from "../context/AuthContext";
 import { toast } from "sonner";
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND}/api`;
-const IDEAS = ["a wooden treasure chest", "a cute cartoon robot", "a red sports car", "a potted cactus", "a medieval sword", "a cozy armchair"];
 
 function sessionId() {
   let sid = localStorage.getItem("luchii_session");
@@ -180,7 +180,7 @@ export default function Studio3D() {
               <Input data-testid="model-prompt-input" value={prompt} onChange={(e) => setPrompt(e.target.value)} maxLength={300}
                 onKeyDown={(e) => e.key === "Enter" && create()} placeholder="a wooden treasure chest"
                 className="h-12 bg-black/40 border-white/10 focus-visible:ring-[#00F0FF] text-base" />
-              <Button data-testid="model-surprise-btn" variant="outline" onClick={() => setPrompt(IDEAS[Math.floor(Math.random() * IDEAS.length)])}
+              <Button data-testid="model-surprise-btn" variant="outline" onClick={() => setPrompt(surprise3D())}
                 className="h-12 rounded-full border-white/15 bg-white/5 text-white hover:bg-white/10">
                 <Dice5 className="w-4 h-4 mr-2" /> Surprise me
               </Button>

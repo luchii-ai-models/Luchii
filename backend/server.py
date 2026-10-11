@@ -83,6 +83,67 @@ def auto_model(prompt: str, style: Optional[str]) -> str:
     return STYLE_MODEL.get(style or "", "Luchii Nova-Muse")
 
 
+# ---------- prompt understanding: make results match what the user described ----------
+FILLER = re.compile(r"^\s*(?:please\s+)?(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:i want\s+|i need\s+|i'd like\s+)?"
+                    r"(?:(?:create|generate|make|draw|render|design|produce|give me|show me)\s+(?:me\s+)?)?"
+                    r"(?:an?\s+)?(?:(?:image|picture|pic|photo|photograph|drawing|render)\s+(?:of|showing|with)\s+)", re.I)
+CLOTHING_WORDS = re.compile(r"\b(wearing|wears|dressed|dress|gown|shirt|t-shirt|blouse|suit|tuxedo|jacket|coat|hoodie|sweater|"
+                            r"jeans|pants|trousers|skirt|shorts|uniform|armou?r|kimono|saree|sari|outfit|clothes|clothing|"
+                            r"bikini|swimsuit|robe|cloak|cape|vest|overalls|scarf|leather|denim)\b", re.I)
+
+
+def clean_prompt(p: str) -> str:
+    """Drop chat filler ("can you create an image of...") so the 77-token model budget is spent on the subject."""
+    p = re.sub(r"\s+", " ", (p or "").strip())
+    out = FILLER.sub("", p, count=1).strip(" .,")
+    out = re.sub(r"[\s,.]*\bplease\b[\s.!]*$", "", out, flags=re.I).strip(" .,")
+    return out or p
+
+
+LEAD_SPLIT = re.compile(r",|\.|;|\b(?:wearing|sitting|standing|lying|holding|walking|running|flying|swimming|on|in|inside|beside|"
+                        r"near|next to|under|over|with|at|by|against|surrounded|while|who|that)\b", re.I)
+
+
+def emphasize_subject(p: str) -> str:
+    """Long descriptions bury the main subject, and the model then paints only the scene. Lead with the subject
+    once more (e.g. "a small red fox, a small red fox wearing a scarf on a rock by a lake...")."""
+    if len(p.split()) < 14:
+        return p
+    lead = LEAD_SPLIT.split(p, maxsplit=1)[0].strip()
+    return f"{lead}, {p}" if 1 <= len(lead.split()) <= 6 else p
+
+
+EDIT_VERBS = re.compile(r"\b(make|turn|change|give|add|remove|replace|swap|dye|colou?r|recolou?r|convert|transform|put|"
+                        r"erase|delete|switch|paint|dress)\b", re.I)
+WHO = r"(?:her|him|them|his|their|it|the (?:person|girl|boy|man|woman|guy|lady|model|subject))"
+
+
+NEW_OUTFITS = ["a black leather jacket", "a white linen shirt", "a red knit sweater", "a denim jacket", "a beige trench coat",
+               "a green hoodie", "a navy blazer", "a yellow summer dress", "a striped t-shirt", "a grey wool coat"]
+
+
+def normalize_instruction(text: str) -> str:
+    """Rewrite casual edit requests into the clear commands Painter-X follows best.
+    e.g. "give a blue hair and change clothes" -> "make the hair blue and change the clothes to a denim jacket"."""
+    t = re.sub(r"\s+", " ", (text or "").strip().rstrip(".!"))
+    t = re.sub(r"^(?:please\s+)?(?:(?:can|could|would) you\s+)?(?:please\s+)?", "", t, flags=re.I)
+    # "give (her) (a) blue hair" / "give her blonde hair" -> "make the hair blue"
+    t = re.sub(rf"\bgive\s+(?:{WHO}\s+)?(?:an?\s+)?([a-z]+(?:[- ][a-z]+)?)\s+hair\b", r"make the hair \1", t, flags=re.I)
+    # "(make|turn|dye|colo(u)r) (her) hair X" -> "make the hair X"
+    t = re.sub(rf"\b(?:make|turn|dye|colou?r)\s+(?:{WHO}\s+)?hair\s+(?:to\s+|into\s+)?", "make the hair ", t, flags=re.I)
+    # "give her sunglasses" -> "add sunglasses"
+    t = re.sub(rf"\bgive\s+(?:{WHO}\s+)?(?:an?\s+)?", "add ", t, flags=re.I)
+    # "change (her) clothes" with no target -> pick a clear new outfit
+    t = re.sub(rf"\bchange\s+(?:{WHO}\s+|the\s+)?(clothes|clothing|outfit|dress)\b(?!\s+(?:to|into|for|with|in)\b)",
+               lambda m: f"change the {m.group(1)} to {random.choice(NEW_OUTFITS)}", t, flags=re.I)
+    t = re.sub(rf"\bchange\s+(?:{WHO}\s+)?(clothes|clothing|outfit)\s+(?:to|into|for)\s+", r"dress them in ", t, flags=re.I)
+    return t.strip() or text
+
+
+def is_edit_command(text: str) -> bool:
+    return bool(EDIT_VERBS.search(text or ""))
+
+
 PHOTO_MODELS = {"Luchii Nova-Muse", "Luchii Dreamline", "Luchii Vision"}  # rendered by the photoreal engine (local_engines.generate_photo)
 PERSON_WORDS = re.compile(r"\b(portrait|woman|women|man|men|girl|boy|person|people|model|face|selfie|lady|guy)s?\b", re.I)
 UPSCALE_PRESET = "Enhance and upscale this image to crisp 4K detail, preserving the original composition and colors"
@@ -357,19 +418,24 @@ async def me(user: dict = Depends(current_user)):
 
 @api.post("/generate")
 async def generate(body: GenerateIn, user: Optional[dict] = Depends(optional_user)):
-    model = body.model if body.model in LUCHII_IMAGE_MODELS else auto_model(body.prompt, body.style)
+    subject = clean_prompt(body.prompt)
+    model = body.model if body.model in LUCHII_IMAGE_MODELS else auto_model(subject, body.style)
     draft = body.quality == "draft" and model in PHOTO_MODELS
     seed = body.seed if body.seed is not None else random.randint(0, 2**31 - 1)
     # The photo hint ("RAW photo") fights 3D/illustration styles, so the style hint wins there.
     model_hint = "" if model in PHOTO_MODELS and body.style in ("3d", "digital-art", "anime") else LUCHII_IMAGE_MODELS.get(model or "")
     hint = ", ".join(h for h in (model_hint, STYLE_HINTS.get(body.style or "", "")) if h)
-    full = f"{body.prompt}. {hint}. Aspect ratio {body.aspect_ratio}." if hint else body.prompt
+    full = f"{subject}. {hint}. Aspect ratio {body.aspect_ratio}." if hint else subject
     img, engine = await gpu_image(full, body.aspect_ratio), "frasberg-image"
     if not img:
-        local_prompt = f"{body.prompt}, {hint}" if hint else body.prompt
+        focus = emphasize_subject(subject)
+        local_prompt = f"{focus}, {hint}" if hint else focus
         if model in PHOTO_MODELS:
-            if PERSON_WORDS.search(body.prompt):  # cfg 1.0 ignores negative prompts, so steer people toward clothing
-                local_prompt = f"{body.prompt}, fully clothed, wearing a stylish outfit, {hint}"
+            # cfg 1.0 ignores negative prompts, so steer people toward clothing, but never override clothes the user described.
+            if PERSON_WORDS.search(subject) and not CLOTHING_WORDS.search(subject):
+                local_prompt = f"{focus}, fully clothed, wearing a stylish outfit, {hint}"
+            elif PERSON_WORDS.search(subject):
+                local_prompt = f"{focus}, fully clothed, {hint}"
             local_fn, args = local_engines.generate_photo, (local_prompt, body.aspect_ratio, draft, seed)
         else:
             local_fn, args = local_engines.generate_image, (local_prompt, body.aspect_ratio)
@@ -383,14 +449,23 @@ async def generate(body: GenerateIn, user: Optional[dict] = Depends(optional_use
 
 @api.post("/edit")
 async def edit(body: EditIn, user: Optional[dict] = Depends(optional_user)):
-    instruction = body.prompt.strip().rstrip(".")
-    if EDIT_STYLE.get(body.style or ""):
-        instruction = f"{instruction}, {EDIT_STYLE[body.style]}"
+    raw = body.prompt.strip().rstrip(".")
+    if is_edit_command(raw):
+        # A command ("make the hair blue", "change the clothes") goes to the instruction-following engine,
+        # which edits only what was asked and keeps the rest of the photo.
+        instruction = normalize_instruction(raw)
+        if body.style in ("anime", "3d", "digital-art"):
+            instruction = f"{instruction}, {EDIT_STYLE[body.style]}"
+        local_fn, args, mode = local_engines.instruct_edit, (instruction, body.image_base64), "instruct"
+    else:
+        # A description ("a woman in a red dress on a beach") re-renders the photo toward that description.
+        instruction = f"{raw}, {EDIT_STYLE[body.style]}" if EDIT_STYLE.get(body.style or "") else raw
+        local_fn, args, mode = local_engines.photo_remix, (instruction, body.image_base64), "describe"
     img, engine = await image_with_fallback({"prompt": instruction, "image_base64": strip_data_url(body.image_base64)},
-                                            local_engines.photo_remix, instruction, body.image_base64)
+                                            local_fn, *args)
     doc = await save_generation("edit", body.prompt, img, body.session_id, user, "Remix", model="Luchii Painter-X")
     return {"id": doc["id"], "kind": "edit", "model": "Luchii Painter-X", "image_base64": img, "prompt": body.prompt,
-            "engine": engine, "style": body.style}
+            "engine": engine, "style": body.style, "instruction": instruction, "edit_mode": mode}
 
 
 @api.post("/remove-bg")

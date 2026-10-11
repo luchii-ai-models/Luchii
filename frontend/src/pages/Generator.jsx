@@ -197,6 +197,10 @@ export default function Generator() {
     setResultModel(model);
     setResultKind(res.data.kind || null);
     setHistory((h) => [{ id: res.data.id, url, prompt: label, model, kind: res.data.kind }, ...h].slice(0, 8));
+    const done = res.data.instruction;
+    if (res.data.kind === "edit" && done && done.toLowerCase() !== (res.data.prompt || "").toLowerCase().replace(/[.!]+$/, "")) {
+      toast.success("Painter-X edited exactly this", { description: done, id: "painterx-understood" });
+    }
   };
 
   const run = async (kind, fn) => {
@@ -279,7 +283,7 @@ export default function Generator() {
     setMode("text");
   };
 
-  const eta = { generate: 120, remix: 120, upscale: 160, cutout: 15 }[busy] || 60;
+  const eta = { generate: 120, remix: 200, upscale: 160, cutout: 15 }[busy] || 60;
   const action = mode === "image" ? (tool === "upscale" ? "Upscale to 4K" : tool === "remove-bg" ? "Remove background" : "Remix") : "Generate";
   const placeholder = remix
     ? tool === "upscale" ? "Ready to upscale your photo to 4K. Press the arrow."

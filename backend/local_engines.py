@@ -3,6 +3,7 @@ import base64
 import io
 import logging
 import os
+import re
 import threading
 import wave
 from pathlib import Path
@@ -47,6 +48,8 @@ PHOTO_STEPS = 4
 PHOTO_DRAFT_STEPS = 3
 PHOTO_NEGATIVE = ("nsfw, nude, deformed face, distorted, disfigured, blurry, cartoon, painting, lowres, "
                   "bad anatomy, extra fingers, watermark, text")
+DETAILED_TOKENS = 30   # prompts this long describe several things; turn guidance on so none of them get dropped
+DETAIL_GUIDANCE = 1.6  # LCM works with 1-2; >1 also makes the negative prompt (nsfw, deformed...) effective
 PHOTO_ASPECTS = {"1:1": (512, 512), "16:9": (704, 384), "9:16": (384, 704), "4:3": (576, 448), "3:4": (512, 640)}
 ASPECTS = {"1:1": (512, 512), "16:9": (640, 384), "9:16": (384, 640), "4:3": (576, 448), "3:4": (448, 576)}
 
@@ -230,10 +233,58 @@ def _hd(img, longest: Optional[int] = None, kind: str = "compact") -> str:
         return _to_data_url(img)
 
 
+def _open_image(b64: str, mode: str = "RGB"):
+    """Decode an uploaded image and apply its EXIF orientation, so phone photos are never processed sideways."""
+    from PIL import Image, ImageOps
+    raw = base64.b64decode(b64.split(",", 1)[1] if b64.startswith("data:") else b64)
+    img = Image.open(io.BytesIO(raw))
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:  # noqa: BLE001
+        pass
+    return img.convert(mode)
+
+
+def _chunk_ids(tok, text: str) -> list:
+    ids = tok(text, truncation=False, add_special_tokens=False).input_ids
+    size = tok.model_max_length - 2
+    return [ids[i:i + size] for i in range(0, min(len(ids), size * 3), size)] or [[]]
+
+
+def _encode_chunks(pipe, chunks: list):
+    import torch
+    tok = pipe.tokenizer
+    pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    embs = []
+    with torch.no_grad():
+        for c in chunks:
+            row = [tok.bos_token_id] + c + [tok.eos_token_id]
+            row += [pad] * (tok.model_max_length - len(row))
+            embs.append(pipe.text_encoder(torch.tensor([row], device=pipe.text_encoder.device))[0])
+    return torch.cat(embs, dim=1)
+
+
+def _prompt_args(pipe, prompt: str, negative: Optional[str] = None) -> dict:
+    """CLIP reads only 77 tokens, so long descriptions used to be cut off mid-sentence. Long prompts are encoded
+    in 75-token chunks (up to 3) and joined, so every detail the user wrote reaches the model. When a negative
+    prompt is given (guidance on), it is chunked to the same length."""
+    chunks = _chunk_ids(pipe.tokenizer, prompt)
+    if len(chunks) == 1:
+        return {"prompt": prompt, **({"negative_prompt": negative} if negative else {})}
+    out = {"prompt_embeds": _encode_chunks(pipe, chunks)}
+    if negative:
+        neg = _chunk_ids(pipe.tokenizer, negative)[:len(chunks)]
+        out["negative_prompt_embeds"] = _encode_chunks(pipe, neg + [[]] * (len(chunks) - len(neg)))
+    return out
+
+
+def prompt_tokens(pipe_tok_text: str) -> int:
+    return len(re.findall(r"\w+|[^\w\s]", pipe_tok_text))
+
+
 def _load_image(b64: str, longest: int):
     from PIL import Image
-    raw = base64.b64decode(b64.split(",", 1)[1] if b64.startswith("data:") else b64)
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img = _open_image(b64)
     scale = longest / max(img.size)
     w, h = (max(64, int(d * scale) // 64 * 64) for d in img.size)
     return img.resize((w, h), Image.LANCZOS)
@@ -242,8 +293,7 @@ def _load_image(b64: str, longest: int):
 def preview(b64: str, longest: int = 768) -> str:
     """Light JPEG preview of a large (HD/4K) image for gallery and history lists."""
     from PIL import Image
-    raw = base64.b64decode(b64.split(",", 1)[1] if b64.startswith("data:") else b64)
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img = _open_image(b64)
     img.thumbnail((longest, longest), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
@@ -262,7 +312,7 @@ def generate_image(prompt: str, aspect: Optional[str] = "1:1") -> str:
     with _heavy_lock, _image_lock:
         _claim("image")
         t2i, _ = _pipes()
-        img = t2i(prompt=prompt, num_inference_steps=2, guidance_scale=0.0, width=w, height=h).images[0]
+        img = t2i(**_prompt_args(t2i, prompt), num_inference_steps=2, guidance_scale=0.0, width=w, height=h).images[0]
         return _hd(img)
 
 
@@ -279,7 +329,7 @@ def edit_image(prompt: str, image_b64: str, strength: float = 0.6, longest: int 
 # ---------- Painter-X: instruction-based editing (InstructPix2Pix) ----------
 EDIT_MODEL = "timbrooks/instruct-pix2pix"
 EDIT_STEPS = 10
-EDIT_IMAGE_GUIDANCE = 1.6  # a little higher than the 1.5 default so faces and layout stay closer to the photo
+EDIT_IMAGE_GUIDANCE = 1.7  # a little higher than the 1.5 default so faces and layout stay closer to the photo
 
 
 def _ip2p_pipe():
@@ -303,32 +353,114 @@ def _ip2p_pipe():
     return _ip2p
 
 
-def instruct_edit(instruction: str, image_b64: str, longest: int = 512) -> str:
+# ---------- Luchii region masks: keep an edit inside the part the user named ----------
+PARSE_MODEL = "mattmdjaga/segformer_b2_clothes"
+REGION_LABELS = {"hair": [2], "clothes": [4, 5, 6, 7, 8, 17], "hat": [1], "face": [11], "shoes": [9, 10], "bag": [16]}
+REGION_WORDS = [
+    ("hair", re.compile(r"\b(hair|hairstyle|haircut|ponytail|braids?|curls)\b", re.I)),
+    ("clothes", re.compile(r"\b(clothes|clothing|outfit|shirt|t-shirt|dress(?:ed)?|jacket|sweater|hoodie|coat|suit|blazer|"
+                           r"top|blouse|jeans|pants|skirt|wear(?:ing)?|uniform|costume|armou?r|kimono)\b", re.I)),
+    ("hat", re.compile(r"\b(hat|cap|beanie)\b(?!.*\badd\b)", re.I)),
+    ("shoes", re.compile(r"\b(shoes|sneakers|boots|heels)\b", re.I)),
+]
+_parser = None
+_parse_lock = threading.Lock()
+
+
+def _parse_pipe():
+    global _parser
+    if _parser is None:
+        import torch
+        from huggingface_hub import snapshot_download
+        from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
+        path = snapshot_download(PARSE_MODEL, cache_dir=str(PHOTO_MODELS_DIR),
+                                 allow_patterns=["config.json", "preprocessor_config.json", "model.safetensors"])
+        model = SegformerForSemanticSegmentation.from_pretrained(path, torch_dtype=torch.float32).eval()
+        _parser = (SegformerImageProcessor.from_pretrained(path), model)
+        logger.info("Luchii region parser loaded")
+    return _parser
+
+
+def region_for(step: str) -> Optional[str]:
+    if re.match(r"\s*add\b", step, re.I):  # "add sunglasses" adds something new, no region to keep it inside
+        return None
+    for name, rx in REGION_WORDS:
+        if rx.search(step):
+            return name
+    return None
+
+
+def _region_mask(img, region: str):
+    """Soft mask of the named region (hair, clothes...) or None when that region is not in the photo."""
+    import numpy as np
+    import torch
+    from PIL import Image, ImageFilter
+    with _parse_lock:
+        proc, model = _parse_pipe()
+        with torch.no_grad():
+            logits = model(**proc(images=img, return_tensors="pt")).logits
+        seg = torch.nn.functional.interpolate(logits, size=img.size[::-1], mode="bilinear", align_corners=False).argmax(1)[0].numpy()
+    mask = np.isin(seg, REGION_LABELS[region])
+    if mask.mean() < 0.004:
+        return None
+    m = Image.fromarray((mask * 255).astype("uint8"), "L")
+    grow = max(5, (max(img.size) // 90) | 1)
+    return m.filter(ImageFilter.MaxFilter(grow)).filter(ImageFilter.GaussianBlur(grow / 2))
+
+
+def instruct_edit(instruction: str, image_b64: str, longest: int = 512,
+                  image_guidance: float = EDIT_IMAGE_GUIDANCE) -> str:
     """Follows plain-language edit commands ("make it snowy", "turn day into night") while keeping the
     original layout. ~2.5 min on this 2-core CPU, so callers run it as a job."""
     src = _load_image(image_b64, longest)
+    # "make the hair blue and change the clothes" in one pass bleeds the colour over the whole picture,
+    # so multi-part requests are applied one step at a time (max 3 steps).
+    steps = [p.strip(" ,") for p in re.split(r"\s*(?:,\s*and\s+|\s+and then\s+|\s+and\s+(?=(?:make|turn|change|add|remove|replace|dress|put|give|swap)\b)|;\s*)",
+                                             instruction) if p.strip(" ,")][:3] or [instruction]
     with _heavy_lock, _image_lock:
         _claim("edit")
         pipe = _ip2p_pipe()
-        img = pipe(instruction, image=src, num_inference_steps=EDIT_STEPS, guidance_scale=7.0,
-                   image_guidance_scale=EDIT_IMAGE_GUIDANCE).images[0]
+        from PIL import Image
+        img = src
+        for step in steps:
+            region = region_for(step)
+            # A targeted edit may change its region freely (lower image guidance); the mask keeps everything else.
+            out = pipe(step, image=img, num_inference_steps=EDIT_STEPS, guidance_scale=7.5,
+                       image_guidance_scale=1.4 if region else image_guidance).images[0]
+            if out.size != img.size:
+                out = out.resize(img.size, Image.LANCZOS)
+            mask = None
+            if region:
+                try:
+                    mask = _region_mask(img, region)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Region mask failed; applying the edit to the whole image")
+            img = Image.composite(out, img, mask) if mask is not None else out
         return _hd(img)
 
 
 REMIX_STRENGTH = 0.5
 REMIX_HINT = "RAW photo, ultra realistic, sharp focus, detailed face, natural skin texture, high detail"
+ART_HINT = "highly detailed, masterpiece, rich texture"
+REMIX_ART = re.compile(r"\b(anime|manga|cartoon|comic|illustration|painting|painted|watercolou?r|sketch|drawing|pixel art|"
+                       r"pop art|stained glass|claymation|clay|3d|render|van gogh|oil|lego|origami|mosaic|ukiyo-e)\b", re.I)
 
 
 def photo_remix(prompt: str, image_b64: str, strength: float = REMIX_STRENGTH, longest: int = 640) -> str:
-    """Painter-X remix: photoreal img2img on the Nova-Muse engine (RV6 + LCM) keeps the layout and faces sharp."""
+    """Painter-X remix: photoreal img2img on the Nova-Muse engine (RV6 + LCM) keeps the layout and faces sharp.
+    Art-style remixes (oil painting, anime, sketch...) skip the photo hint, which would pull them back to a photo,
+    and get a stronger change so the new look actually shows."""
     import math
     from diffusers import StableDiffusionImg2ImgPipeline
     src = _load_image(image_b64, longest)
+    art = bool(REMIX_ART.search(prompt))
+    strength = max(strength, 0.68) if art else strength
     with _heavy_lock, _image_lock:
         _claim("photo")
         pipe = StableDiffusionImg2ImgPipeline(**_photo_pipe().components)
         pipe.set_progress_bar_config(disable=True)
-        img = pipe(prompt=f"{prompt}, {REMIX_HINT}", negative_prompt=PHOTO_NEGATIVE, image=src, strength=strength,
+        full = f"{prompt}, {ART_HINT if art else REMIX_HINT}"
+        img = pipe(**_prompt_args(pipe, full), image=src, strength=strength,
                    num_inference_steps=math.ceil(PHOTO_STEPS / strength), guidance_scale=1.0).images[0]
         return _hd(img)
 
@@ -340,8 +472,7 @@ UPSCALE_LONGEST = 3840  # true 4K UHD long edge
 def upscale_image(image_b64: str) -> str:
     """Luchii Prime 4K: Real-ESRGAN x4plus super-resolution, then resampled to a 3840px long edge."""
     from PIL import Image
-    raw = base64.b64decode(image_b64.split(",", 1)[1] if image_b64.startswith("data:") else image_b64)
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img = _open_image(image_b64)
     if max(img.size) > UPSCALE_BASE:
         s = UPSCALE_BASE / max(img.size)
         img = img.resize((round(img.width * s), round(img.height * s)), Image.LANCZOS)
@@ -389,8 +520,10 @@ def generate_photo(prompt: str, aspect: Optional[str] = "1:1", draft: bool = Fal
         _claim("photo")
         pipe = _photo_pipe()
         gen = torch.Generator().manual_seed(int(seed)) if seed is not None else None
-        img = pipe(prompt=prompt, negative_prompt=PHOTO_NEGATIVE, num_inference_steps=PHOTO_DRAFT_STEPS if draft else PHOTO_STEPS,
-                   guidance_scale=1.0, width=w, height=h, generator=gen).images[0]
+        detailed = prompt_tokens(prompt) >= DETAILED_TOKENS
+        img = pipe(**_prompt_args(pipe, prompt, PHOTO_NEGATIVE if detailed else None),
+                   num_inference_steps=PHOTO_DRAFT_STEPS if draft else PHOTO_STEPS,
+                   guidance_scale=DETAIL_GUIDANCE if detailed else 1.0, width=w, height=h, generator=gen).images[0]
         return _hd(img)
 
 
@@ -402,8 +535,7 @@ def remove_background(image_b64: str) -> str:
     global _cutout
     from PIL import Image
     from rembg import new_session, remove
-    raw = base64.b64decode(image_b64.split(",", 1)[1] if image_b64.startswith("data:") else image_b64)
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img = _open_image(image_b64)
     img.thumbnail((2048, 2048), Image.LANCZOS)
     with _image_lock:
         if _cutout is None:
