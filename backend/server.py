@@ -4,7 +4,6 @@ from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env")
 
 import asyncio
-import hashlib
 import json
 import os
 import random
@@ -249,13 +248,6 @@ async def frasberg(method: str, path: str, json: Optional[dict] = None, key_inde
     raise HTTPException(status_code=424, detail=f"Frasberg: {best or last}")
 
 
-async def frasberg_image(payload: dict) -> str:
-    r, _ = await frasberg("POST", "/generate/image", payload, feature="image")
-    d = r.json()
-    b64 = d.get("image_base64") or d.get("image") or (d.get("data") or [{}])[0].get("b64_json")
-    if not b64:
-        raise HTTPException(status_code=424, detail="Frasberg returned no image")
-    return as_data_url(b64, d.get("mime") or "image/png")
 
 
 async def gpu_image(prompt: str, aspect: Optional[str]) -> Optional[str]:
@@ -278,19 +270,10 @@ async def gpu_image(prompt: str, aspect: Optional[str]) -> Optional[str]:
     return None
 
 
-FRASBERG_IMAGE_RETRY_S = 600
-_frasberg_image_down_until = 0.0
 
 
 async def image_with_fallback(frasberg_payload: dict, local_fn, *args) -> tuple:
-    global _frasberg_image_down_until
-    # When Frasberg's image API is down, every request used to wait for it to fail first. Skip it for 10 min.
-    if time.time() >= _frasberg_image_down_until:
-        try:
-            return await frasberg_image(frasberg_payload), "frasberg"
-        except HTTPException as e:
-            _frasberg_image_down_until = time.time() + FRASBERG_IMAGE_RETRY_S
-            logger.warning("Frasberg image failed (%s); using Luchii in-house image engine", e.detail)
+    # Images run on the Luchii engines only; frasberg.com serves the LLM and API keys.
     if local_engines.image_busy():
         raise HTTPException(status_code=429, detail="Frasberg Creator is finishing another image. Yours is in the queue.",
                             headers={"Retry-After": "8"})
@@ -304,10 +287,6 @@ async def image_with_fallback(frasberg_payload: dict, local_fn, *args) -> tuple:
 
 
 async def speak_with_fallback(text: str, voice: Optional[str]) -> dict:
-    try:
-        return {**(await speak(text, voice)), "engine": "frasberg"}
-    except HTTPException as e:
-        logger.warning("Frasberg voice failed (%s); using Luchii in-house voice engine", e.detail)
     try:
         return {**(await asyncio.to_thread(local_engines.synthesize, text, voice or "nova")), "engine": "luchii-local"}
     except Exception as e:  # noqa: BLE001
@@ -703,34 +682,8 @@ async def share(gen_id: str):
     return doc
 
 
-async def frasberg_upload(path: str, filename: str, data: bytes, ctype: str, feature: str) -> dict:
-    last, best = "Frasberg is unavailable", None
-    async with httpx.AsyncClient(timeout=120) as hc:
-        for i in key_order(feature):
-            try:
-                r = await hc.post(f"{FRASBERG_BASE}{path}", headers={"Authorization": f"Bearer {FRASBERG_KEYS[i]}"},
-                                  files={"file": (filename, data, ctype)})
-            except httpx.HTTPError as e:
-                last = f"Frasberg connection error: {e.__class__.__name__}"
-                continue
-            if r.status_code < 400:
-                return r.json()
-            last = upstream_detail(r)
-            if r.status_code != 403:
-                best = last
-            logger.warning("Frasberg upload %s key#%s -> %s %s", path, i, r.status_code, last)
-            if r.status_code in (400, 413, 422) or r.status_code >= 500:
-                break
-    raise HTTPException(status_code=424, detail=f"Frasberg: {best or last}")
 
 
-async def speak(text: str, voice: Optional[str] = None) -> dict:
-    payload = {"text": text, **({"voice": voice} if voice else {})}
-    r, _ = await frasberg("POST", "/voice/speak", payload, feature="tts")
-    d = r.json()
-    if not d.get("audio_base64"):
-        raise HTTPException(status_code=424, detail="Frasberg returned no audio")
-    return {"audio_base64": strip_data_url(d["audio_base64"]), "mime": d.get("mime", "audio/mp3")}
 
 
 @api.post("/sts")
@@ -742,17 +695,10 @@ async def speech_to_speech(file: UploadFile = File(...), voice: str = Form("nova
     if voice == "clone" and not (user and user.get("voice_clone")):
         raise HTTPException(status_code=400, detail="Log in and save a voice sample on the Voice Cloning page first")
     try:
-        d = await frasberg_upload("/voice/transcribe", file.filename or "voice.webm", audio,
-                                  file.content_type or "audio/webm", "stt")
-        text = (d.get("text") or "").strip()
-    except HTTPException as e:
-        logger.warning("Frasberg transcribe failed (%s); using Luchii in-house transcription", e.detail)
-        try:
-            text = await asyncio.to_thread(local_engines.transcribe, audio)
-        except Exception as le:  # noqa: BLE001
-            logger.exception("Local transcribe failed")
-            raise HTTPException(status_code=400,
-                                detail=f"Could not transcribe audio: {le.__class__.__name__}")
+        text = await asyncio.to_thread(local_engines.transcribe, audio)
+    except Exception as le:  # noqa: BLE001
+        logger.exception("Local transcribe failed")
+        raise HTTPException(status_code=400, detail=f"Could not transcribe audio: {le.__class__.__name__}")
     if not text:
         raise HTTPException(status_code=400, detail="No speech detected in the recording")
     speech = await speak_in_clone(text, user["voice_clone"]) if voice == "clone" else await speak_with_fallback(text, voice)
@@ -781,14 +727,9 @@ async def voice_clone(file: UploadFile = File(...), user: dict = Depends(current
         raise HTTPException(status_code=400, detail="File too large (max 8 MB)")
     name, ctype = file.filename or "sample.webm", file.content_type or "audio/webm"
     try:
-        async with clone_lock:
-            d = await frasberg_upload("/voice/clone", name, data, ctype, "clone")
-    except HTTPException as e:
-        logger.warning("Frasberg clone upload failed (%s); keeping sample for in-house cloning", e.detail)
-        try:
-            d = {"duration_sec": await asyncio.to_thread(local_engines.audio_duration, data), "cloning_status": "ready"}
-        except Exception:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail="Could not read that audio file")
+        d = {"duration_sec": await asyncio.to_thread(local_engines.audio_duration, data), "cloning_status": "ready"}
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Could not read that audio file")
     file_id = await fs.upload_from_stream(f"voice-samples/{user['id']}/{uuid.uuid4()}", data,
                                           metadata={"user_id": user["id"], "content_type": ctype})
     clone = {"file_id": file_id, "filename": name, "content_type": ctype,
@@ -824,12 +765,6 @@ async def voice_clone_speak(body: CloneSpeakIn, user: dict = Depends(current_use
 
 async def speak_in_clone(text: str, clone: dict) -> dict:
     sample = await read_sample(clone)
-    try:
-        async with clone_lock:
-            await frasberg_upload("/voice/clone", clone["filename"], sample, clone["content_type"], "clone")
-            return {**(await speak(text)), "engine": "frasberg"}
-    except HTTPException as e:
-        logger.warning("Frasberg cloned speech failed (%s); using in-house voice converter", e.detail)
     try:
         return {**(await asyncio.to_thread(local_engines.speak_cloned, text, sample)), "engine": "luchii-local"}
     except Exception as e:  # noqa: BLE001
@@ -894,47 +829,6 @@ def is_sample_url(url: str) -> bool:
     return not url or any(h in url.lower() for h in SAMPLE_HOSTS)
 
 
-async def frasberg_video(prompt: str, duration: int) -> Optional[bytes]:
-    """Ask the Frasberg Video Engine for a render. Returns MP4 bytes only for a genuine, prompt-specific render;
-    returns None when Frasberg hands back a public stock sample or fails, so the caller falls back."""
-    try:
-        r, ki = await frasberg("POST", "/generate/video", {"prompt": prompt, "duration": duration,
-                                                           "output_format": "mp4"}, feature="video")
-        task = r.json().get("task_id")
-        if not task:
-            return None
-        for _ in range(60):  # up to ~5 min
-            await asyncio.sleep(5)
-            jr, _ = await frasberg("GET", f"/jobs/{task}", key_index=ki)
-            d = jr.json()
-            if d.get("status") == "failed":
-                logger.warning("Frasberg video job failed: %s", d.get("error"))
-                return None
-            if d.get("status") == "completed":
-                url = d.get("video_url") or (d.get("result") or {}).get("url") or ""
-                if is_sample_url(url):
-                    logger.warning("Frasberg video returned a stock sample (%s); rejecting", url)
-                    return None
-                if url.startswith("/"):
-                    url = FRASBERG_BASE.rsplit("/api", 1)[0] + url
-                async with httpx.AsyncClient(timeout=120, follow_redirects=True) as hc:
-                    vr = await hc.get(url, headers={"Authorization": f"Bearer {FRASBERG_KEYS[ki]}"})
-                if vr.status_code != 200 or len(vr.content) <= 1000:
-                    return None
-                # Content fingerprint: identical bytes already served for a different prompt = canned clip.
-                digest = hashlib.sha256(vr.content).hexdigest()
-                seen = await db.frasberg_video_hashes.find_one({"sha256": digest}, {"_id": 0})
-                if seen and seen.get("prompt") != prompt:
-                    logger.warning("Frasberg video bytes repeat a previous render (%s); rejecting as canned", digest[:12])
-                    return None
-                await db.frasberg_video_hashes.update_one({"sha256": digest}, {"$setOnInsert": {
-                    "sha256": digest, "prompt": prompt, "url": url, "at": now_iso()}}, upsert=True)
-                return vr.content
-    except HTTPException as e:
-        logger.warning("Frasberg video unavailable (%s)", e.detail)
-    except Exception:  # noqa: BLE001
-        logger.exception("Frasberg video error")
-    return None
 
 
 GPU_VIDEO_DEFAULT = "frasberg-motion-fast"
@@ -1023,9 +917,6 @@ async def _render_video(job: dict) -> tuple:
     # clips are not blocked behind a cold start.
     await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "running", "started_at": now_iso()}})
     data, engine = await gpu_render_video(job, full)
-    if data is None:
-        data = await frasberg_video(full, job["duration"])
-        engine = "frasberg"
     if data is None:
         await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "queued"}})
         async with media_queues["video"]:
@@ -1397,31 +1288,10 @@ async def _timed(coro):
     return status, detail, int((time.monotonic() - t) * 1000)
 
 
-async def probe_image():
-    await frasberg_image({"prompt": "status check: a small red circle"})
-    return "online", "Generating images"
 
 
-async def probe_voice():
-    await frasberg("POST", "/voice/speak", {"text": "Status check", "voice": "nova"}, feature="tts")
-    return "online", "Speaking"
 
 
-async def probe_job(path: str, payload: dict, kind: str):
-    r, ki = await frasberg("POST", path, payload, feature=kind)
-    task = r.json().get("task_id")
-    for _ in range(12):
-        await asyncio.sleep(3)
-        jr, _ = await frasberg("GET", f"/jobs/{task}", key_index=ki)
-        d = jr.json()
-        if d.get("status") == "completed":
-            url = d.get("video_url") or (d.get("result") or {}).get("url") or ""
-            if kind == "video" and is_sample_url(url):
-                return "degraded", f"Returns public sample file instead of a render ({url.split('/')[2] if '//' in url else 'no url'})"
-            return "online", "Jobs completing"
-        if d.get("status") == "failed":
-            return "offline", d.get("error") or "Job failed"
-    return "degraded", "Job did not finish within 36s"
 
 
 async def probe_chat():
@@ -1440,13 +1310,13 @@ async def probe_chat():
 
 async def probe_local_voice():
     await asyncio.to_thread(local_engines.synthesize, "Status check", "nova")
-    return "online", "Piper voices running on Frasberg edge"
+    return "online", "Piper voices running on Luchii engines"
 
 
 async def probe_local_image():
     st = local_engines.status()
     if st["image_loaded"]:
-        return "online", "SD-Turbo loaded on Frasberg edge (CPU)"
+        return "online", "SD-Turbo loaded on Luchii engines (CPU)"
     if st["image_downloaded"]:
         return "online", "SD-Turbo ready, loads on first image"
     return "degraded", "SD-Turbo downloads on first image (~2.5 GB)"
@@ -1457,7 +1327,7 @@ async def probe_local_3d():
     if local_engines.busy_3d():
         return "online", "Building a 3D model now"
     if st["shape_loaded"]:
-        return "online", "Shap-E loaded on Frasberg edge (CPU)"
+        return "online", "Shap-E loaded on Luchii engines (CPU)"
     if st["shape_downloaded"]:
         return "online", "Shap-E ready, loads on first model"
     return "degraded", "Shap-E downloads on first model (~4 GB)"
@@ -1469,18 +1339,11 @@ async def probe_local_clone():
 
 
 ENGINES = [
-    ("image", "Image Engine", "Generate, edit, upscale", probe_image),
-    ("voice", "Voice Engine", "Text to Speech", probe_voice),
-    ("video", "Astral Video Engine", "Video Creator",
-     lambda: probe_job("/generate/video", {"prompt": "status check", "duration": 5, "model": "frasberg-engine",
-                                           "ratio": "16:9", "output_format": "mp4"}, "video")),
-    ("music", "Music Engine", "Audio Studio",
-     lambda: probe_job("/generate/music", {"prompt": "status check", "duration": 15, "model": "frasberg-music"}, "music")),
-    ("chat", "Luchii Chat (luchii-6-plus)", "Language model", probe_chat),
-    ("local_voice", "Frasberg Edge Voice", "Text to Speech & Speech to Speech fallback", probe_local_voice),
-    ("local_image", "Frasberg Edge Image", "Generate, edit, upscale fallback", probe_local_image),
-    ("local_3d", "Frasberg Edge 3D", "3D Studio", probe_local_3d),
-    ("local_clone", "Frasberg Edge Voice Clone", "Cloned voice in Voice Cloning & Speech to Speech", probe_local_clone),
+    ("chat", "Luchii Chat (luchii-6-plus, via frasberg.com)", "Language model", probe_chat),
+    ("local_voice", "Luchii Voice Engine", "Text to Speech & Speech to Speech", probe_local_voice),
+    ("local_image", "Luchii Image Engine", "Generate, edit, upscale", probe_local_image),
+    ("local_3d", "Luchii 3D Engine", "3D Studio", probe_local_3d),
+    ("local_clone", "Luchii Voice Clone Engine", "Cloned voice in Voice Cloning & Speech to Speech", probe_local_clone),
 ]
 
 
