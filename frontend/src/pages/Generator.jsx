@@ -5,8 +5,9 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import {
   Wand2, Download, Loader2, ImageIcon, ArrowLeft, Dice5, X, Maximize2, LayoutGrid, Share2,
-  SplitSquareHorizontal, CheckCircle2, Shuffle, Scissors, Type, Upload, Paperclip, ArrowUp,
+  SplitSquareHorizontal, CheckCircle2, Shuffle, Scissors, Type, Upload, Paperclip, ArrowUp, Globe,
 } from "lucide-react";
+import RemixHistory from "../components/RemixHistory";
 import { toast } from "sonner";
 import { brand } from "../mock";
 import { useAuth } from "../context/AuthContext";
@@ -76,7 +77,7 @@ const autoModel = (p, s) => (ART.test(p) ? "Luchii Dreamline"
   : ({ anime: "Luchii Dreamline", "digital-art": "Luchii Dreamline", "3d": "Luchii Vision" })[s] || "Luchii Nova-Muse");
 
 export default function Generator() {
-  const { user, authHeader } = useAuth();
+  const { user, authHeader, setAutoPublish } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const fileRef = useRef(null);
@@ -104,6 +105,10 @@ export default function Generator() {
   const chipsPaused = useRef(false);
   const is4k = dims && Math.max(dims.w, dims.h) >= 3800;
   const [resultKind, setResultKind] = useState(null);
+  const [resultPublic, setResultPublic] = useState(false);
+  const [refParentId, setRefParentId] = useState(null); // generation the attached photo came from (remix history)
+  const [chain, setChain] = useState(null);
+  const [opening, setOpening] = useState(false);
   const isCutout = resultKind === "cutout";
 
   const markQueued = (q) => setQueued(q);
@@ -122,6 +127,7 @@ export default function Generator() {
     try {
       const blob = await (await fetch(url)).blob();
       setRefImage(await toDataUrl(blob));
+      setRefParentId(null);
       setMode("image");
     } catch (_) {
       toast.error("Could not load that image.");
@@ -139,6 +145,8 @@ export default function Generator() {
     const st = searchParams.get("style");
     const ar = searchParams.get("aspect");
     const ref = searchParams.get("ref");
+    const gen = searchParams.get("gen");
+    if (gen) openVersion({ id: gen });
     if (st && STYLES.some((s) => s.id === st)) setStyle(st);
     if (ar && ASPECTS.includes(ar)) setAspect(ar);
     if (ref) {
@@ -151,7 +159,7 @@ export default function Generator() {
   useEffect(() => {
     axios.get(`${API}/generations`, { params: { session_id: getSessionId(), limit: 8 } })
       .then((res) => setHistory(res.data.map((g) => ({
-        id: g.id, url: g.image_base64, hasFull: !!g.has_full, prompt: g.prompt, kind: g.kind,
+        id: g.id, url: g.image_base64, hasFull: !!g.has_full, prompt: g.prompt, kind: g.kind, public: !!g.public,
         model: luchiiModelFor(g.kind, g.style, null, g.model),
       }))))
       .catch(() => { /* non-critical */ });
@@ -159,12 +167,64 @@ export default function Generator() {
 
   const openHistory = async (h) => {
     setBeforeImage(null); setResultId(h.id); setResultModel(h.model || "Luchii Nova-Muse"); setResultKind(h.kind || null);
+    setResultPublic(!!h.public);
     setImage(h.url);
     if (h.hasFull) { // lists carry a light preview of HD/4K images; load the full file
       try {
         const { data } = await axios.get(`${API}/share/${h.id}`);
         if (data?.image_base64) setImage(data.image_base64);
       } catch (_) { /* keep the preview */ }
+    }
+  };
+
+  // Remix history: every version of this photo's chain, refreshed whenever a new result is shown.
+  useEffect(() => {
+    if (!resultId) { setChain(null); return undefined; }
+    let alive = true;
+    axios.get(`${API}/generations/${resultId}/history`)
+      .then(({ data }) => { if (alive) setChain(data); })
+      .catch(() => { if (alive) setChain(null); });
+    return () => { alive = false; };
+  }, [resultId]);
+
+  const openVersion = async (it) => {
+    setOpening(true);
+    try {
+      const { data } = await axios.get(`${API}/share/${it.id}`);
+      setImage(data.image_base64);
+      setResultId(data.id);
+      setResultModel(data.kind === "source" ? "Luchii Painter-X" : luchiiModelFor(data.kind, data.style, null, data.model));
+      setResultKind(data.kind || null);
+      setResultPublic(!!data.public);
+      setBeforeImage(null);
+      if (data.parent_id) {
+        axios.get(`${API}/share/${data.parent_id}`).then(({ data: p }) => setBeforeImage(p.image_base64)).catch(() => {});
+      }
+    } catch (_) {
+      toast.error("Could not open that version.");
+    } finally {
+      setOpening(false);
+    }
+  };
+
+  const togglePublish = async () => {
+    if (!resultId) return;
+    try {
+      const { data } = await axios.post(`${API}/generations/${resultId}/publish`, { public: !resultPublic }, { headers: authHeader });
+      setResultPublic(data.public);
+      setChain((c) => (c ? { ...c, items: c.items.map((x) => (x.id === resultId ? { ...x, public: data.public } : x)) } : c));
+      toast.success(data.public ? "Published to the public gallery" : "Removed from the public gallery");
+    } catch (_) {
+      toast.error("Only your own saved images can be published.");
+    }
+  };
+
+  const toggleAutoPublish = async () => {
+    try {
+      const on = await setAutoPublish(!user?.auto_publish);
+      toast.success(on ? "Auto-publish on: new images go straight to the public gallery" : "Auto-publish off: new images stay private");
+    } catch (_) {
+      toast.error("Could not change auto-publish.");
     }
   };
 
@@ -183,6 +243,7 @@ export default function Generator() {
     if (!file) return;
     if (!file.type.startsWith("image/")) { toast.error("Please attach an image file."); return; }
     setRefImage(await toDataUrl(file));
+    setRefParentId(null);
     setMode("image");
     setRefPrompt(null);
     inputRef.current?.focus();
@@ -196,7 +257,8 @@ export default function Generator() {
     const model = luchiiModelFor(res.data.kind, res.data.style, null, res.data.model);
     setResultModel(model);
     setResultKind(res.data.kind || null);
-    setHistory((h) => [{ id: res.data.id, url, prompt: label, model, kind: res.data.kind }, ...h].slice(0, 8));
+    setResultPublic(!!res.data.public);
+    setHistory((h) => [{ id: res.data.id, url, prompt: label, model, kind: res.data.kind, public: !!res.data.public }, ...h].slice(0, 8));
     const done = res.data.instruction;
     if (res.data.kind === "edit" && done && done.toLowerCase() !== (res.data.prompt || "").toLowerCase().replace(/[.!]+$/, "")) {
       toast.success("Painter-X edited exactly this", { description: done, id: "painterx-understood" });
@@ -234,9 +296,11 @@ export default function Generator() {
       return run("remix", async () => {
         const res = await runImageJob("/edit", {
           prompt: prompt.trim(), image_base64: src, session_id: getSessionId(), style: style === "auto" ? null : style,
+          parent_id: refParentId,
         }, authHeader, markQueued);
         finish(res, prompt.trim(), src);
-        toast.success("Remix ready!");
+        setRefParentId(res.data.parent_id || null); // later remixes of the same photo join the same history
+        toast.success(res.data.public ? "Remix ready and published!" : "Remix ready!");
       });
     }
     return run("generate", async () => {
@@ -245,14 +309,15 @@ export default function Generator() {
         prompt: prompt.trim(), style: style === "auto" ? null : style, aspect_ratio: aspect, session_id: getSessionId(), quality: "full",
       }, authHeader, markQueued);
       finish(res, prompt.trim());
-      toast.success(user ? "Saved to your gallery!" : "Image ready!");
+      toast.success(res.data.public ? "Saved and published to the public gallery!" : user ? "Saved to your gallery!" : "Image ready!");
     });
   };
 
   const handleUpscale = (src = image) => {
     if (!src || busy) return;
     run("upscale", async () => {
-      const res = await runImageJob("/upscale", { image_base64: src, session_id: getSessionId(), prompt: "Upscaled to 4K" }, authHeader, markQueued);
+      const parent = src === image ? resultId : refParentId;
+      const res = await runImageJob("/upscale", { image_base64: src, session_id: getSessionId(), prompt: "Upscaled to 4K", parent_id: parent }, authHeader, markQueued);
       finish({ data: { ...res.data, model: "Luchii Prime" } }, "Upscaled to 4K", src === image ? null : src);
       toast.success("Upscaled to 4K!");
     });
@@ -261,7 +326,8 @@ export default function Generator() {
   const handleCutout = (src = image) => {
     if (!src || busy) return;
     run("cutout", async () => {
-      const res = await runImageJob("/remove-bg", { image_base64: src, session_id: getSessionId() }, authHeader, markQueued);
+      const parent = src === image ? resultId : refParentId;
+      const res = await runImageJob("/remove-bg", { image_base64: src, session_id: getSessionId(), parent_id: parent }, authHeader, markQueued);
       finish(res, "Background removed", src);
       toast.success("Background removed!");
     });
@@ -365,7 +431,14 @@ export default function Generator() {
                   )}
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
-                  <button data-testid="remix-result-btn" onClick={() => { setRefImage(image); setMode("image"); setRefPrompt(null); setTool("edit"); setPrompt(""); inputRef.current?.focus(); }}
+                  {user && resultKind !== "source" && (
+                    <button data-testid="result-publish-btn" onClick={togglePublish} aria-pressed={resultPublic}
+                      title={resultPublic ? "Remove from the public gallery" : "Publish to the public gallery"}
+                      className={`inline-flex items-center gap-1.5 rounded-full backdrop-blur px-4 py-2 text-sm font-medium ${resultPublic ? "bg-[#00F0FF]/20 text-[#00F0FF] border border-[#00F0FF]/50 hover:bg-[#00F0FF]/30" : "bg-black/70 hover:bg-black"}`}>
+                      <Globe className="w-4 h-4" /> {resultPublic ? "Public" : "Publish"}
+                    </button>
+                  )}
+                  <button data-testid="remix-result-btn" onClick={() => { setRefImage(image); setRefParentId(resultId); setMode("image"); setRefPrompt(null); setTool("edit"); setPrompt(""); inputRef.current?.focus(); }}
                     className="inline-flex items-center gap-1.5 rounded-full bg-black/70 backdrop-blur px-4 py-2 text-sm font-medium hover:bg-black">
                     <Wand2 className="w-4 h-4" /> Remix
                   </button>
@@ -400,6 +473,8 @@ export default function Generator() {
           )}
         </div>
 
+        {chain && <RemixHistory data={chain} currentId={resultId} onOpen={openVersion} busy={!!busy || opening} />}
+
         {/* Composer: prompt, presets, photo, style and size all built into one input */}
         <div data-testid="composer" className="rounded-3xl border border-white/10 bg-[#1E2327]/95 backdrop-blur p-3 shadow-2xl shadow-black/40 focus-within:border-[#00F0FF]/50 transition-colors">
           <div className="flex items-center gap-2 overflow-x-auto pb-2 [scrollbar-width:none]"
@@ -422,7 +497,7 @@ export default function Generator() {
               {refImage ? (
                 <div data-testid="attached-image" className="relative">
                   <img src={refImage} alt="attached" className="h-14 w-14 rounded-xl object-cover border border-white/10" />
-                  <button type="button" data-testid="attached-remove" onClick={() => { setRefImage(null); setRefPrompt(null); setMode("text"); setTool(null); }}
+                  <button type="button" data-testid="attached-remove" onClick={() => { setRefImage(null); setRefParentId(null); setRefPrompt(null); setMode("text"); setTool(null); }}
                     className="absolute -top-1.5 -right-1.5 grid place-items-center w-5 h-5 rounded-full bg-black border border-white/20 hover:bg-neutral-800">
                     <X className="w-3 h-3" />
                   </button>
@@ -479,6 +554,16 @@ export default function Generator() {
                 className="h-8 rounded-full border border-white/10 bg-black/30 px-3 text-xs text-neutral-200 focus:outline-none focus:border-[#00F0FF]/60">
                 {ASPECTS.map((a) => <option key={a} value={a}>{a}</option>)}
               </select>
+            )}
+            {user && (
+              <button type="button" role="switch" aria-checked={!!user.auto_publish} data-testid="auto-publish-toggle" onClick={toggleAutoPublish}
+                title="Send each new image straight to the public homepage gallery"
+                className={`inline-flex items-center gap-1.5 h-8 rounded-full border px-3 text-xs font-medium transition-colors ${user.auto_publish ? "border-[#00F0FF]/60 bg-[#00F0FF]/10 text-[#00F0FF]" : "border-white/10 bg-black/30 text-neutral-400 hover:text-white"}`}>
+                <Globe className="w-3.5 h-3.5" /> Auto-publish
+                <span className={`relative w-7 h-4 rounded-full transition-colors ${user.auto_publish ? "bg-[#00F0FF]" : "bg-white/15"}`}>
+                  <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${user.auto_publish ? "left-3.5" : "left-0.5"}`} />
+                </span>
+              </button>
             )}
             <span data-testid="auto-model-hint" className="hidden sm:inline text-[11px] text-neutral-500 ml-1 truncate">
               {mode === "image" ? (tool === "upscale" || tool === "remove-bg" ? "Luchii Prime" : "Luchii Painter-X") : autoModel(prompt, style)}

@@ -87,14 +87,25 @@ async function toJpegDataUrl(file, max = 1280) {
 }
 
 
+const PHASE_SUB = {
+  "gpu-boot": "Free GPUs sleep when nobody is rendering. The first clip after a break takes about 6–10 min; the next ones start right away.",
+  "gpu-queued": "A real GPU picks your clip up in a moment.",
+  "gpu-render": "Real AI motion on the Frasberg GPU · Created by Luchii",
+};
+
 function Progress({ kind, job, eta }) {
   const queued = job.status === "queued";
   const pct = job.progress ? ` ${Math.round(job.progress * 100)}%` : "";
+  const phase = kind === "video" && !queued ? job.phase : null;
+  const label = queued ? `In the queue: #${job.queue_position || 1}`
+    : phase === "gpu-boot" ? `${job.phase_detail || "Starting a free Frasberg GPU"}…`
+      : phase === "gpu-render" ? `Rendering real motion...${pct}`
+        : kind === "video" ? `Rendering your clip...${pct}` : "Composing your track...";
   return (
     <div className="py-6" data-testid={queued ? `${kind}-queue-notice` : `${kind}-rendering`}>
-      <LogoLoader
-        label={queued ? `In the queue: #${job.queue_position || 1}` : kind === "video" ? `Rendering your clip...${pct}` : "Composing your track..."}
-        sublabel={queued ? "Another request is finishing first. Yours starts next." : `Created by Luchii · ${eta}`} />
+      <LogoLoader label={label}
+        sublabel={queued ? "Another request is finishing first. Yours starts next." : PHASE_SUB[phase] || `Created by Luchii · ${eta}`} />
+      {phase && <p className="sr-only" data-testid="video-phase">{phase}</p>}
     </div>
   );
 }
@@ -138,10 +149,12 @@ export default function Studio({ kind }) {
   }, [kind]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const current = engines.find((e) => e.id === engine);
-  const gpuLive = current?.status === "online";
+  const gpuLive = current?.status === "online" || current?.status === "on-demand";
   const durations = kind === "video" && gpuLive && current.durations?.length ? current.durations : cfg.durations;
   useEffect(() => { if (!durations.includes(duration)) setDuration(durations.includes(5) ? 5 : durations[0]); }, [durations, duration]);
-  const etaText = kind === "video" && gpuLive ? fmtEta(current.eta_seconds) : cfg.eta(duration);
+  const etaText = kind === "video" && gpuLive
+    ? `${fmtEta(current.eta_seconds)}${current.status === "on-demand" ? " on a free GPU (plus 6–10 min if it has to wake up)" : ""}`
+    : cfg.eta(duration);
 
   const pickImage = async (e) => {
     const f = e.target.files?.[0];

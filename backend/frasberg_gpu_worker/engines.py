@@ -44,6 +44,25 @@ def loaded_model():
     return _loaded["model"]
 
 
+def _dtype():
+    """bf16 on Ampere+; T4/V100 (sm < 8) have no native bf16, so they run fp16 unless FRASBERG_DTYPE says otherwise."""
+    import torch
+    want = os.environ.get("FRASBERG_DTYPE", "auto").lower()
+    if want in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if want in ("fp16", "float16", "half"):
+        return torch.float16
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] < 8:
+        return torch.float16
+    return torch.bfloat16
+
+
+def preload(model):
+    """Load an engine before the first job arrives (warm start), so the first render skips the load."""
+    with _lock:
+        _pipes(model)
+
+
 def unload():
     with _lock:
         _loaded.update(model=None, pipes=None)
@@ -66,7 +85,7 @@ def _place(pipe, model):
 
 def _load(model):
     import torch
-    bf16 = torch.bfloat16
+    bf16 = _dtype()
     if model == "frasberg-motion-fast":
         from diffusers import LTXConditionPipeline, LTXLatentUpsamplePipeline
         base = LTXConditionPipeline.from_pretrained(REPOS[model][0], torch_dtype=bf16)

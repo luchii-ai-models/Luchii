@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import axios from "axios";
-import { Activity, RefreshCw, Loader2, Cpu, Download, Gift } from "lucide-react";
+import { Activity, RefreshCw, Loader2, Cpu, Download, Gift, Rocket, Square, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
 import Navbar from "../components/Navbar";
@@ -34,6 +34,75 @@ const EngineCard = ({ e }) => {
     </div>
   );
 };
+
+const KAGGLE_TONE = { running: "text-emerald-300", queued: "text-amber-300", new_script: "text-amber-300",
+  complete: "text-neutral-400", error: "text-rose-300", none: "text-neutral-500", unknown: "text-neutral-500" };
+
+function KagglePanel({ authHeader, onChange }) {
+  const [k, setK] = useState(null);
+  const [act, setAct] = useState(null);
+  const load = useCallback(() => axios.get(`${API}/gpu-admin/kaggle`, { headers: authHeader }).then(({ data }) => setK(data)).catch(() => {}), [authHeader]);
+  useEffect(() => { load(); const t = setInterval(() => document.visibilityState === "visible" && load(), 20000); return () => clearInterval(t); }, [load]);
+
+  const launch = async () => {
+    setAct("launch");
+    try {
+      const { data } = await axios.post(`${API}/gpu-admin/kaggle/launch`, null, { headers: authHeader });
+      if (data.launched) toast.success("Free Kaggle GPU is starting. It comes online in about 6–10 minutes.");
+      else toast.message(data.reason || "Nothing to start");
+      load(); onChange?.();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not start the Kaggle GPU"); } finally { setAct(null); }
+  };
+  const stop = async () => {
+    setAct("stop");
+    try {
+      const { data } = await axios.post(`${API}/gpu-admin/stop`, null, { headers: authHeader });
+      toast.success(data.stop_requested ? "Stop sent. The worker finishes its current clip, then shuts down." : "No GPU worker is online");
+      load(); onChange?.();
+    } catch { toast.error("Could not stop the GPU worker"); } finally { setAct(null); }
+  };
+
+  if (!k) return null;
+  if (!k.configured) {
+    return (
+      <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-5 text-sm text-neutral-400" data-testid="kaggle-panel">
+        Free Kaggle GPU is not connected. Add <code>KAGGLE_API_TOKEN</code> and <code>KAGGLE_USERNAME</code> to the backend to start GPUs on demand.
+      </div>
+    );
+  }
+  return (
+    <div className="mt-5 rounded-2xl border border-[#00F0FF]/25 bg-[#00F0FF]/5 p-5" data-testid="kaggle-panel">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 font-semibold text-white"><Gift className="w-4 h-4 text-[#00F0FF]" /> Free Kaggle GPU · on demand</div>
+          <p className="text-xs text-neutral-400 mt-1">
+            Account <b className="text-neutral-200">{k.username}</b> · Tesla T4 · starts automatically on the first video request and shuts down after {k.max_idle_min} idle minutes
+          </p>
+          <p className="text-sm mt-2" data-testid="kaggle-status">
+            Kaggle session: <b className={KAGGLE_TONE[k.status] || "text-neutral-300"}>{k.status === "none" ? "never started" : k.status}</b>
+            {k.boot && <span className="text-neutral-400"> · {k.boot.label}{k.boot.detail ? ` (${k.boot.detail})` : ""}</span>}
+            {k.message && <span className="text-rose-300"> · {k.message}</span>}
+          </p>
+          <p className="text-[11px] text-neutral-500 mt-1">{k.launches_7d} launch{k.launches_7d === 1 ? "" : "es"} this week · Kaggle gives 30 free GPU hours a week</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button data-testid="kaggle-launch-btn" onClick={launch} disabled={!!act}
+            className="rounded-full bg-[#00F0FF] text-black hover:bg-[#00d4de] font-semibold">
+            {act === "launch" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Rocket className="w-4 h-4 mr-2" />} Start GPU now
+          </Button>
+          <Button data-testid="kaggle-stop-btn" onClick={stop} disabled={!!act} variant="outline"
+            className="rounded-full border-white/15 bg-transparent text-white hover:bg-white/10">
+            {act === "stop" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Square className="w-4 h-4 mr-2" />} Stop
+          </Button>
+          <a href={k.url} target="_blank" rel="noreferrer" data-testid="kaggle-open-link"
+            className="inline-flex items-center h-9 rounded-full border border-white/15 px-4 text-sm text-neutral-200 hover:bg-white/10">
+            <ExternalLink className="w-4 h-4 mr-2" /> Kaggle notebook
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function GpuPanel({ authHeader }) {
   const [gpu, setGpu] = useState(null);
@@ -70,8 +139,10 @@ function GpuPanel({ authHeader }) {
         </Button>
       </div>
 
-      <div className="mt-5 rounded-2xl border border-[#00F0FF]/25 bg-[#00F0FF]/5 p-5 text-sm text-neutral-300" data-testid="gpu-free-howto">
-        <div className="flex items-center gap-2 font-semibold text-white"><Gift className="w-4 h-4 text-[#00F0FF]" /> Real AI video at zero cost</div>
+      <KagglePanel authHeader={authHeader} onChange={load} />
+
+      <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.02] p-5 text-sm text-neutral-300" data-testid="gpu-free-howto">
+        <div className="flex items-center gap-2 font-semibold text-white"><Gift className="w-4 h-4 text-[#00F0FF]" /> Manual option: run the worker yourself</div>
         <ol className="mt-2 list-decimal list-inside space-y-1 text-neutral-400">
           <li>Download the notebook above. It already contains this gateway URL and your worker secret, so keep it private.</li>
           <li>On <b className="text-neutral-200">kaggle.com</b>, go to New Notebook → File → Import Notebook, set Accelerator to <b className="text-neutral-200">GPU T4 x1</b> and Internet to On, then click Run All. Kaggle gives 30 free GPU hours a week. You can also use Colab's free T4.</li>
@@ -84,7 +155,7 @@ function GpuPanel({ authHeader }) {
           <div key={e.id} data-testid={`gpu-engine-${e.id}`} className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-sm">{e.name}</span>
-              <span className={`text-xs ${e.status === "online" ? "text-emerald-300" : "text-neutral-500"}`}>{e.status === "online" ? `${e.workers_online} online${e.warm ? " · warm" : ""}` : "offline"}</span>
+              <span className={`text-xs ${e.status === "online" ? "text-emerald-300" : e.status === "on-demand" ? "text-[#00F0FF]" : "text-neutral-500"}`}>{e.status === "online" ? `${e.workers_online} online${e.warm ? " · warm" : ""}` : e.status === "on-demand" ? "on demand" : "offline"}</span>
             </div>
             <p className="text-[11px] text-neutral-500 mt-1">{e.built_on} · needs {e.min_vram_gb}GB+ VRAM · {e.queue_depth} queued</p>
           </div>

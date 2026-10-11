@@ -70,6 +70,7 @@ MODELS = {
     },
 }
 ASPECTS = {"16:9", "9:16", "1:1"}
+ON_DEMAND: set = set()   # engines a free GPU can be started for on request (Kaggle), shown as "on demand"
 WORKER_TTL = 45          # seconds without a heartbeat before a worker counts as offline
 JOB_LEASE = 180          # seconds without progress before a running job is re-queued
 MAX_ATTEMPTS = 3
@@ -233,7 +234,8 @@ async def engines(include_hidden: bool = False):
         workers = await online_workers(mid)
         data.append({"id": mid, **{k: v for k, v in spec.items() if k != "hidden"},
                      "workers_online": len(workers), "warm": any(w.get("loaded_model") == mid for w in workers),
-                     "queue_depth": await _queue_depth(mid), "status": "online" if workers else "offline"})
+                     "queue_depth": await _queue_depth(mid), "on_demand": mid in ON_DEMAND,
+                     "status": "online" if workers else ("on-demand" if mid in ON_DEMAND else "offline")})
     return {"object": "list", "provider": "frasberg", "data": data}
 
 
@@ -334,7 +336,56 @@ async def heartbeat(body: HeartbeatIn, request: Request):
                   "loaded_model": body.loaded_model, "busy": body.busy, "version": body.version,
                   "last_seen": _iso(_now()), "ip": request.client.host if request.client else None},
          "$setOnInsert": {"first_seen": _iso(_now())}}, upsert=True)
-    return {"ok": True, "accepted_models": models}
+    w = await db.gpu_workers.find_one({"worker_id": body.worker_id}, {"_id": 0, "stop_requested": 1})
+    return {"ok": True, "accepted_models": models, "stop": bool((w or {}).get("stop_requested"))}
+
+
+class BootIn(BaseModel):
+    worker_id: str
+    stage: str = Field(max_length=40)
+    detail: str = Field(default="", max_length=300)
+
+
+BOOT_STAGES = {"session-started": "GPU session started", "installing": "Installing the render engine",
+               "downloading": "Downloading model weights", "loading": "Loading the model onto the GPU",
+               "ready": "GPU worker online", "stopped": "GPU worker stopped", "failed": "GPU session failed"}
+
+
+@router.post("/worker/boot", dependencies=[Depends(worker_auth)])
+async def boot(body: BootIn):
+    """Lifecycle beacons from a (free) GPU session, so the app can say what a cold-starting worker is doing."""
+    now = _iso(_now())
+    await db.gpu_boot.update_one(
+        {"worker_id": body.worker_id},
+        {"$set": {"worker_id": body.worker_id, "stage": body.stage, "label": BOOT_STAGES.get(body.stage, body.stage),
+                  "detail": body.detail, "at": now},
+         "$setOnInsert": {"started_at": now},
+         "$push": {"log": {"$each": [{"stage": body.stage, "detail": body.detail, "at": now}], "$slice": -20}}},
+        upsert=True)
+    return {"ok": True}
+
+
+class OfflineIn(BaseModel):
+    worker_id: str
+
+
+@router.post("/worker/offline", dependencies=[Depends(worker_auth)])
+async def offline(body: OfflineIn):
+    await db.gpu_workers.update_one({"worker_id": body.worker_id},
+                                    {"$set": {"last_seen": _iso(_now() - timedelta(seconds=WORKER_TTL * 10)), "busy": False}})
+    return {"ok": True}
+
+
+async def latest_boot(minutes: int = 40) -> Optional[dict]:
+    since = _iso(_now() - timedelta(minutes=minutes))
+    return await db.gpu_boot.find_one({"at": {"$gte": since}}, {"_id": 0, "log": 0}, sort=[("at", -1)])
+
+
+async def request_stop() -> int:
+    """Ask every online worker to finish its current job and exit (frees a free Kaggle/Colab GPU session)."""
+    since = _iso(_now() - timedelta(seconds=WORKER_TTL))
+    res = await db.gpu_workers.update_many({"last_seen": {"$gte": since}}, {"$set": {"stop_requested": True}})
+    return res.modified_count
 
 
 @router.post("/worker/claim", dependencies=[Depends(worker_auth)])
@@ -416,51 +467,81 @@ def _cell(kind: str, src: str) -> dict:
     return c
 
 
-def build_notebook(gateway: str, secret: str, models: str = "frasberg-motion-free") -> dict:
-    """A ready-to-run notebook that turns a free Kaggle/Colab T4 into a Frasberg GPU worker."""
+def build_notebook(gateway: str, secret: str, models: str = "frasberg-motion-free", worker_id: Optional[str] = None,
+                   max_idle_s: int = 1200) -> dict:
+    """A ready-to-run notebook that turns a free Kaggle/Colab T4 into a Frasberg GPU worker.
+
+    It runs unattended (Kaggle "Save & Run All" / API push): every step reports a boot stage to the gateway, the
+    weights are prefetched, the engine is preloaded, and the worker exits after `max_idle_s` without jobs so an idle
+    session stops spending the weekly free GPU hours."""
+    wid = worker_id or f"freegpu-{uuid.uuid4().hex[:8]}"
     cells = [
         _cell("markdown", f"""
 # Frasberg GPU Worker - free T4 (Kaggle / Colab)
 This notebook turns a free GPU into a **Frasberg Motion Free** render node for your Frasberg Creator app.
 
-**Kaggle:** Settings → Accelerator **GPU T4 x1**, Internet **On**, then *Run All*. That gives you 30 free GPU-hours a week.
+**Kaggle:** Settings → Accelerator **GPU T4**, Internet **On**, then *Run All* (30 free GPU-hours a week).
 **Colab:** Runtime → Change runtime type → **T4 GPU**, then *Run all*.
 
-Leave the last cell running. While it runs, the **Frasberg Motion Free** engine shows **online** in the Video Creator.
-When the session ends (Kaggle sessions last up to 12h; Colab's free sessions are shorter), just run it again.
+While the last cell runs, **Frasberg Motion Free** shows **online** in the Video Creator. The worker shuts itself
+down after {max_idle_s // 60} idle minutes to save GPU hours; the app starts it again on the next video.
 Gateway: `{gateway}` · engines: `{models}`
 """),
         _cell("code", f"""
-import os
+import os, sys, subprocess, requests
 os.environ["FRASBERG_GATEWAY_URL"] = "{gateway}"
 os.environ["FRASBERG_WORKER_SECRET"] = "{secret}"  # keep this notebook private
 os.environ["FRASBERG_WORKER_MODELS"] = "{models}"
+os.environ["FRASBERG_WORKER_ID"] = "{wid}"
 os.environ["FRASBERG_IDLE_UNLOAD_S"] = "1800"
+os.environ["FRASBERG_WORKER_MAX_IDLE_S"] = "{max_idle_s}"
+os.environ["FRASBERG_PRELOAD"] = "1"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
+os.environ.setdefault("HF_HOME", "/tmp/hf")
 WORKDIR = "/kaggle/working/frasberg" if os.path.isdir("/kaggle") else "/content/frasberg"
 os.makedirs(WORKDIR, exist_ok=True)
-!nvidia-smi --query-gpu=name,memory.total --format=csv
+H = {{"X-Frasberg-Worker-Secret": os.environ["FRASBERG_WORKER_SECRET"]}}
+GW = os.environ["FRASBERG_GATEWAY_URL"]
+
+def boot(stage, detail=""):
+    try:
+        requests.post(f"{{GW}}/worker/boot", headers=H, timeout=30,
+                      json={{"worker_id": os.environ["FRASBERG_WORKER_ID"], "stage": stage, "detail": str(detail)[:300]}})
+    except Exception as e:
+        print("boot beacon failed:", e)
+
+def sh(cmd, stage):
+    print("$", cmd, flush=True)
+    p = subprocess.Popen(cmd, shell=True, cwd=WORKDIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    tail = []
+    for line in p.stdout:
+        print(line, end="", flush=True)
+        tail = (tail + [line.strip()])[-3:]
+    if p.wait() != 0:
+        boot("failed", f"{{stage}}: {{' | '.join(tail)}}")
+        raise SystemExit(f"{{stage}} failed")
+
+gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
+print(gpu)
+boot("session-started", gpu or "no GPU detected")
 """),
         _cell("code", """
-!pip install -q -U "diffusers>=0.32" "transformers>=4.46,<5" "accelerate>=1.2" sentencepiece protobuf ftfy "imageio[ffmpeg]" imageio-ffmpeg hf_transfer requests
-"""),
-        _cell("code", """
-import requests
-H = {"X-Frasberg-Worker-Secret": os.environ["FRASBERG_WORKER_SECRET"]}
+boot("installing")
+sh(f'{sys.executable} -m pip install -q "diffusers>=0.32" "transformers>=4.46" "accelerate>=1.2" sentencepiece protobuf ftfy "imageio[ffmpeg]" imageio-ffmpeg hf_transfer', "install")
 for name in ["worker.py", "engines.py", "prefetch.py"]:
-    r = requests.get(f"{os.environ['FRASBERG_GATEWAY_URL']}/worker/files/{name}", headers=H, timeout=60)
+    r = requests.get(f"{GW}/worker/files/{name}", headers=H, timeout=60)
     r.raise_for_status()
     open(f"{WORKDIR}/{name}", "w").write(r.text)
     print("fetched", name, len(r.text), "bytes")
 """),
         _cell("code", """
-%cd {WORKDIR}
-!python prefetch.py {os.environ["FRASBERG_WORKER_MODELS"].replace(",", " ")}
+boot("downloading", os.environ["FRASBERG_WORKER_MODELS"])
+sh(f'{sys.executable} prefetch.py {os.environ["FRASBERG_WORKER_MODELS"].replace(",", " ")}', "download")
 """),
         _cell("code", """
-# Runs forever: claims Frasberg jobs, renders on this GPU, uploads results. Stop it with the Stop button.
-%cd {WORKDIR}
-!python worker.py
+# Runs until idle: claims Frasberg jobs, renders on this GPU, uploads results. Stop it with the Stop button.
+sh(f"{sys.executable} worker.py", "worker")
 """),
     ]
     return {"cells": cells, "metadata": {"accelerator": "GPU", "kernelspec": {"name": "python3", "display_name": "Python 3"},

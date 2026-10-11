@@ -27,6 +27,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 import local_engines
 import frasberg_gpu
+import kaggle_gpu
 
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
@@ -35,6 +36,9 @@ takes_fs = AsyncIOMotorGridFSBucket(db, bucket_name="voice_takes")
 models_fs = AsyncIOMotorGridFSBucket(db, bucket_name="models3d")
 media_fs = AsyncIOMotorGridFSBucket(db, bucket_name="media")
 frasberg_gpu.init(db)
+kaggle_gpu.init(db)
+if kaggle_gpu.enabled():
+    frasberg_gpu.ON_DEMAND.add("frasberg-motion-free")
 
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALG = "HS256"
@@ -177,7 +181,7 @@ def make_token(user_id: str, email: str) -> str:
 
 
 def public_user(u: dict) -> dict:
-    return {"id": u["id"], "name": u.get("name", ""), "email": u["email"]}
+    return {"id": u["id"], "name": u.get("name", ""), "email": u["email"], "auto_publish": bool(u.get("auto_publish"))}
 
 
 async def optional_user(request: Request) -> Optional[dict]:
@@ -311,15 +315,47 @@ async def speak_with_fallback(text: str, voice: Optional[str]) -> dict:
         raise HTTPException(status_code=424, detail=f"Luchii voice engine error: {e.__class__.__name__}")
 
 
+def wants_publish(user: Optional[dict], publish: Optional[bool]) -> bool:
+    """Signed-in creators can send new images straight to the public gallery (per request, or their auto-publish
+    setting). Guests never publish: their images have no owner who could take them down again."""
+    if not user:
+        return False
+    return bool(user.get("auto_publish")) if publish is None else bool(publish)
+
+
+async def resolve_parent(parent_id: Optional[str], src_image: str, session_id: Optional[str],
+                         user: Optional[dict]) -> dict:
+    """Remix history: link a new edit to the image it was made from. A fresh upload becomes a hidden step-0
+    'source' doc, so the chain always starts at the original photo."""
+    if parent_id:
+        p = await db.generations.find_one({"id": parent_id}, {"_id": 0, "id": 1, "root_id": 1, "step": 1})
+        if p:
+            return {"parent_id": p["id"], "root_id": p.get("root_id") or p["id"], "step": (p.get("step") or 0) + 1}
+    src = {"id": str(uuid.uuid4()), "kind": "source", "hidden": True, "prompt": "Original photo",
+           "image_base64": src_image, "session_id": session_id, "user_id": user["id"] if user else None,
+           "author": user.get("name") if user else None, "step": 0, "created_at": now_iso()}
+    src["root_id"] = src["id"]
+    if len(src_image) > LIST_THUMB_OVER:
+        try:
+            src["thumb_base64"] = await asyncio.to_thread(local_engines.preview, src_image)
+        except Exception:  # noqa: BLE001
+            logger.exception("Preview for source failed")
+    await db.generations.insert_one(src.copy())
+    return {"parent_id": src["id"], "root_id": src["id"], "step": 1}
+
+
 async def save_generation(kind: str, prompt: str, image: str, session_id: Optional[str],
                           user: Optional[dict], style: Optional[str] = None, aspect: Optional[str] = None,
-                          model: Optional[str] = None) -> dict:
+                          model: Optional[str] = None, publish: Optional[bool] = None,
+                          lineage: Optional[dict] = None, extra: Optional[dict] = None) -> dict:
     doc = {
         "id": str(uuid.uuid4()), "kind": kind, "prompt": prompt, "style": style,
         "aspect_ratio": aspect, "model": model, "image_base64": image, "session_id": session_id,
         "user_id": user["id"] if user else None, "author": user.get("name") if user else None,
-        "created_at": now_iso(),
+        "created_at": now_iso(), **(lineage or {}), **(extra or {}),
     }
+    if wants_publish(user, publish):
+        doc.update(public=True, published_at=doc["created_at"])
     if image and len(image) > LIST_THUMB_OVER:
         try:  # 4K / HD images: lists send a light preview, the full file loads on open/download
             doc["thumb_base64"] = await asyncio.to_thread(local_engines.preview, image)
@@ -359,6 +395,7 @@ class GenerateIn(BaseModel):
     model: Optional[str] = None
     quality: Optional[str] = None  # "draft" (Nova-Muse quick preview) or "full"
     seed: Optional[int] = None
+    publish: Optional[bool] = None  # None = follow the user's auto-publish setting
 
 
 class EditIn(BaseModel):
@@ -366,17 +403,23 @@ class EditIn(BaseModel):
     image_base64: str
     session_id: Optional[str] = None
     style: Optional[str] = None
+    parent_id: Optional[str] = None  # generation this remix was made from (remix history)
+    publish: Optional[bool] = None
 
 
 class CutoutIn(BaseModel):
     image_base64: str
     session_id: Optional[str] = None
+    parent_id: Optional[str] = None
+    publish: Optional[bool] = None
 
 
 class UpscaleIn(BaseModel):
     image_base64: str
     prompt: Optional[str] = "Upscaled"
     session_id: Optional[str] = None
+    parent_id: Optional[str] = None
+    publish: Optional[bool] = None
 
 
 class TTSIn(BaseModel):
@@ -451,10 +494,11 @@ async def generate(body: GenerateIn, user: Optional[dict] = Depends(optional_use
             local_fn, args = local_engines.generate_image, (local_prompt, body.aspect_ratio)
         img, engine = await image_with_fallback({"prompt": full, "style": body.style, "aspect_ratio": body.aspect_ratio},
                                                 local_fn, *args)
-    doc = await save_generation("generate", body.prompt, img, body.session_id, user, body.style, body.aspect_ratio, model)
+    doc = await save_generation("generate", body.prompt, img, body.session_id, user, body.style, body.aspect_ratio, model,
+                                publish=body.publish)
     return {"id": doc["id"], "kind": "generate", "image_base64": img, "prompt": body.prompt, "style": body.style,
             "model": model, "engine": engine, "quality": "draft" if draft else "full", "seed": seed,
-            "aspect_ratio": body.aspect_ratio}
+            "aspect_ratio": body.aspect_ratio, "public": bool(doc.get("public"))}
 
 
 @api.post("/edit")
@@ -473,9 +517,12 @@ async def edit(body: EditIn, user: Optional[dict] = Depends(optional_user)):
         local_fn, args, mode = local_engines.fast_edit, (instruction, body.image_base64), "describe"
     img, engine = await image_with_fallback({"prompt": instruction, "image_base64": strip_data_url(body.image_base64)},
                                             local_fn, *args)
-    doc = await save_generation("edit", body.prompt, img, body.session_id, user, "Remix", model="Luchii Painter-X")
+    lineage = await resolve_parent(body.parent_id, body.image_base64, body.session_id, user)
+    doc = await save_generation("edit", body.prompt, img, body.session_id, user, "Remix", model="Luchii Painter-X",
+                                publish=body.publish, lineage=lineage, extra={"instruction": instruction, "edit_mode": mode})
     return {"id": doc["id"], "kind": "edit", "model": "Luchii Painter-X", "image_base64": img, "prompt": body.prompt,
-            "engine": engine, "style": body.style, "instruction": instruction, "edit_mode": mode}
+            "engine": engine, "style": body.style, "instruction": instruction, "edit_mode": mode,
+            "public": bool(doc.get("public")), **lineage}
 
 
 @api.post("/remove-bg")
@@ -488,17 +535,22 @@ async def remove_bg(body: CutoutIn, user: Optional[dict] = Depends(optional_user
     except Exception as e:  # noqa: BLE001
         logger.exception("Background removal failed")
         raise HTTPException(status_code=424, detail=f"Luchii cutout engine error: {e.__class__.__name__}")
-    doc = await save_generation("cutout", "Background removed", img, body.session_id, user, "Cutout", model="Luchii Prime")
+    lineage = await resolve_parent(body.parent_id, body.image_base64, body.session_id, user)
+    doc = await save_generation("cutout", "Background removed", img, body.session_id, user, "Cutout", model="Luchii Prime",
+                                publish=body.publish, lineage=lineage)
     return {"id": doc["id"], "kind": "cutout", "model": "Luchii Prime", "image_base64": img, "prompt": "Background removed",
-            "engine": "luchii-local"}
+            "engine": "luchii-local", "public": bool(doc.get("public")), **lineage}
 
 
 @api.post("/upscale")
 async def upscale(body: UpscaleIn, user: Optional[dict] = Depends(optional_user)):
     img, engine = await image_with_fallback({"prompt": UPSCALE_PRESET, "image_base64": strip_data_url(body.image_base64)},
                                             local_engines.upscale_image, body.image_base64)
-    doc = await save_generation("upscale", body.prompt or "Upscaled", img, body.session_id, user, "Upscale 4K")
-    return {"id": doc["id"], "kind": "upscale", "model": "Luchii Prime", "image_base64": img, "prompt": body.prompt, "engine": engine}
+    lineage = await resolve_parent(body.parent_id, body.image_base64, body.session_id, user)
+    doc = await save_generation("upscale", body.prompt or "Upscaled", img, body.session_id, user, "Upscale 4K",
+                                publish=body.publish, lineage=lineage)
+    return {"id": doc["id"], "kind": "upscale", "model": "Luchii Prime", "image_base64": img, "prompt": body.prompt,
+            "engine": engine, "public": bool(doc.get("public")), **lineage}
 
 
 # ---------- image jobs (async; photoreal renders take ~2 min, longer than the ingress timeout) ----------
@@ -579,13 +631,13 @@ async def tts(body: TTSIn):
 
 @api.get("/generations")
 async def generations(session_id: str, limit: int = 8):
-    cur = db.generations.find({"session_id": session_id, "image_base64": {"$ne": None}}, {"_id": 0})
+    cur = db.generations.find({"session_id": session_id, "image_base64": {"$ne": None}, "hidden": {"$ne": True}}, {"_id": 0})
     return [_listed(d) for d in await cur.sort("created_at", -1).limit(min(limit, 60)).to_list(None)]
 
 
 @api.get("/my/generations")
 async def my_generations(limit: int = 60, user: dict = Depends(current_user)):
-    cur = db.generations.find({"user_id": user["id"], "image_base64": {"$ne": None}}, {"_id": 0})
+    cur = db.generations.find({"user_id": user["id"], "image_base64": {"$ne": None}, "hidden": {"$ne": True}}, {"_id": 0})
     return [_listed(d) for d in await cur.sort("created_at", -1).limit(min(limit, 200)).to_list(None)]
 
 
@@ -614,9 +666,71 @@ async def delete_generation(gen_id: str, user: dict = Depends(current_user)):
     return {"deleted": gen_id}
 
 
+class SettingsIn(BaseModel):
+    auto_publish: bool
+
+
+class PublishIn(BaseModel):
+    public: bool
+
+
+def user_settings(user: dict) -> dict:
+    return {"auto_publish": bool(user.get("auto_publish"))}
+
+
+@api.get("/me/settings")
+async def get_settings(user: dict = Depends(current_user)):
+    return user_settings(user)
+
+
+@api.put("/me/settings")
+async def put_settings(body: SettingsIn, user: dict = Depends(current_user)):
+    await db.users.update_one({"id": user["id"]}, {"$set": {"auto_publish": body.auto_publish}})
+    return {"auto_publish": body.auto_publish}
+
+
+@api.post("/generations/{gen_id}/publish")
+async def publish_generation(gen_id: str, body: PublishIn, user: dict = Depends(current_user)):
+    upd = {"$set": {"public": True, "published_at": now_iso()}} if body.public else \
+        {"$set": {"public": False}, "$unset": {"published_at": ""}}
+    res = await db.generations.update_one({"id": gen_id, "user_id": user["id"], "hidden": {"$ne": True}}, upd)
+    if not res.matched_count:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"id": gen_id, "public": body.public}
+
+
+HISTORY_FIELDS = {"_id": 0, "id": 1, "parent_id": 1, "root_id": 1, "step": 1, "kind": 1, "prompt": 1, "instruction": 1,
+                  "model": 1, "style": 1, "created_at": 1, "public": 1, "mini_base64": 1, "thumb_base64": 1}
+
+
+@api.get("/generations/{gen_id}/history")
+async def remix_history(gen_id: str):
+    """Every version in this photo's Painter-X chain (original upload, each remix, upscales, cut-outs), oldest first,
+    with small previews. parent_id links let the client draw the path to any version and branch from it."""
+    g = await db.generations.find_one({"id": gen_id}, {"_id": 0, "id": 1, "root_id": 1})
+    if not g:
+        raise HTTPException(status_code=404, detail="Not found")
+    root = g.get("root_id") or g["id"]
+    docs = await db.generations.find({"$or": [{"id": root}, {"root_id": root}], "image_base64": {"$ne": None}},
+                                     HISTORY_FIELDS).sort("created_at", 1).limit(80).to_list(80)
+    for d in docs:
+        if not d.get("mini_base64"):
+            full = await db.generations.find_one({"id": d["id"]}, {"_id": 0, "image_base64": 1})
+            try:
+                d["mini_base64"] = await asyncio.to_thread(local_engines.preview, d.pop("thumb_base64", None) or full["image_base64"], 320)
+                await db.generations.update_one({"id": d["id"]}, {"$set": {"mini_base64": d["mini_base64"]}})
+            except Exception:  # noqa: BLE001
+                logger.exception("History preview failed for %s", d["id"])
+                d["mini_base64"] = None
+        d.pop("thumb_base64", None)
+        d["public"] = bool(d.get("public"))
+        d.setdefault("step", 0 if d["id"] == root else None)
+    return {"root_id": root, "current_id": gen_id, "items": docs}
+
+
 @api.get("/gallery/public")
 async def public_gallery(limit: int = 48):
-    cur = db.generations.find({"public": True, "image_base64": {"$ne": None}},
+    cur = db.generations.find({"public": True, "image_base64": {"$ne": None}, "hidden": {"$ne": True}},
                               {"_id": 0, "id": 1, "prompt": 1, "style": 1, "model": 1, "author": 1,
                                "created_at": 1, "image_base64": 1, "thumb_base64": 1})
     return [_listed(d) for d in await cur.sort("created_at", -1).limit(min(limit, 120)).to_list(None)]
@@ -625,7 +739,7 @@ async def public_gallery(limit: int = 48):
 async def publish_recent_generations(hours: float) -> int:
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     res = await db.generations.update_many(
-        {"created_at": {"$gte": since}, "image_base64": {"$ne": None}, "public": {"$ne": True}},
+        {"created_at": {"$gte": since}, "image_base64": {"$ne": None}, "public": {"$ne": True}, "hidden": {"$ne": True}},
         {"$set": {"public": True, "published_at": now_iso()}})
     return res.modified_count
 
@@ -633,7 +747,8 @@ async def publish_recent_generations(hours: float) -> int:
 @api.get("/share/{gen_id}")
 async def share(gen_id: str):
     doc = await db.generations.find_one({"id": gen_id},
-                                        {"_id": 0, "id": 1, "kind": 1, "model": 1, "prompt": 1, "style": 1, "image_base64": 1, "author": 1})
+                                        {"_id": 0, "id": 1, "kind": 1, "model": 1, "prompt": 1, "style": 1, "image_base64": 1, "author": 1,
+                                         "parent_id": 1, "root_id": 1, "step": 1, "public": 1, "instruction": 1})
     if not doc:
         raise HTTPException(status_code=404, detail="Not found")
     return doc
@@ -816,7 +931,9 @@ async def job_out(job: dict) -> dict:
            "style": job.get("style"), "duration": job.get("duration"), "error": job.get("error"),
            "engine": ENGINE_LABELS.get(job.get("render_engine") or "", job.get("render_engine")), "model": job.get("model"),
            "mode": "image-to-video" if job.get("has_image") else None,
-           "luchii_model": job.get("luchii_model"), "progress": job.get("progress"), "url": f"/api/media/{job['id']}" if job["status"] == "completed" else None}
+           "luchii_model": job.get("luchii_model"), "progress": job.get("progress"),
+           "phase": job.get("phase"), "phase_detail": job.get("phase_detail"),
+           "url": f"/api/media/{job['id']}" if job["status"] == "completed" else None}
     if job["status"] == "queued":
         out["queue_position"] = await db.jobs.count_documents(
             {"kind": job["kind"], "engine": "local", "status": {"$in": ["queued", "running"]},
@@ -875,8 +992,25 @@ GPU_VIDEO_DEFAULT = "frasberg-motion-fast"
 GPU_VIDEO_ORDER = ["frasberg-motion-fast", "frasberg-motion-pro", "frasberg-motion-ultra", "frasberg-motion-free"]
 
 
+FREE_GPU_MODEL = "frasberg-motion-free"
+
+
+def public_gateway(request: Request) -> str:
+    """This server's public /api/gpu URL, as the browser reached it (what a Kaggle worker must call back to)."""
+    base = os.environ.get("FRASBERG_PUBLIC_URL", "").rstrip("/")
+    if not base:
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+        base = f"https://{host}" if host else ""
+    return f"{base}/api/gpu" if base else ""
+
+
+async def _set_phase(job_id: str, phase: str, detail: str):
+    await db.jobs.update_one({"id": job_id}, {"$set": {"phase": phase, "phase_detail": detail}})
+
+
 async def gpu_render_video(job: dict, prompt: str):
-    """Frasberg Serverless GPU first: chosen engine if a worker is online, else any online Frasberg motion engine."""
+    """Frasberg Serverless GPU first: the chosen engine if a worker is online, else any online Frasberg motion engine,
+    else a free Kaggle T4 started on demand (Frasberg Motion Free). Returns (None, None) to fall back to Lite."""
     wanted = job.get("model") or GPU_VIDEO_DEFAULT
     order = [wanted] + [m for m in GPU_VIDEO_ORDER if m != wanted]
     model = None
@@ -884,6 +1018,15 @@ async def gpu_render_video(job: dict, prompt: str):
         if m in frasberg_gpu.MODELS and await frasberg_gpu.is_online(m):
             model = m
             break
+    gateway = job.get("gateway") or ""
+    cold = False
+    if not model and kaggle_gpu.enabled() and gateway:
+        await _set_phase(job["id"], "gpu-boot", "Starting a free Frasberg GPU")
+        res = await kaggle_gpu.launch(gateway, os.environ["FRASBERG_WORKER_SECRET"], reason=f"video {job['id'][:8]}")
+        if res.get("launched") or await kaggle_gpu.booting(gateway):
+            model, cold = FREE_GPU_MODEL, True
+        else:
+            logger.warning("Free GPU not available: %s", res.get("reason"))
     if not model:
         return None, None
     try:
@@ -891,7 +1034,8 @@ async def gpu_render_video(job: dict, prompt: str):
                                       aspect_ratio=job.get("aspect_ratio") or "16:9",
                                       image_base64=job.get("image_base64"), owner="luchii")
         await db.jobs.update_one({"id": job["id"]}, {"$set": {"gpu_task": g["id"], "model": model}})
-        for _ in range(720):  # up to 60 min (ultra on a busy queue)
+        last_phase = None
+        for i in range(720):  # up to 60 min (cold start + ultra on a busy queue)
             await asyncio.sleep(5)
             cur = await frasberg_gpu.get_job(g["id"])
             await db.jobs.update_one({"id": job["id"]}, {"$set": {"progress": cur.get("progress")}})
@@ -900,11 +1044,22 @@ async def gpu_render_video(job: dict, prompt: str):
             if cur["status"] == "failed":
                 logger.warning("Frasberg GPU %s failed: %s", model, cur.get("error"))
                 return None, None
+            phase = "gpu-render" if cur["status"] == "running" else "gpu-queued"
             if cur["status"] == "queued" and not await frasberg_gpu.is_online(model):
-                logger.warning("Frasberg GPU %s went offline; falling back", model)
-                await frasberg_gpu.db.gpu_jobs.update_one({"id": g["id"], "status": "queued"},
-                                                          {"$set": {"status": "failed", "error": "No GPU workers online"}})
-                return None, None
+                boot = await kaggle_gpu.booting(gateway) if cold or kaggle_gpu.enabled() else None
+                if not boot:
+                    logger.warning("Frasberg GPU %s went offline; falling back", model)
+                    await frasberg_gpu.db.gpu_jobs.update_one({"id": g["id"], "status": "queued"},
+                                                              {"$set": {"status": "failed", "error": "No GPU workers online"}})
+                    return None, None
+                phase = "gpu-boot"
+                detail = (boot.get("boot") or {}).get("label") or (
+                    "Waiting for a free Kaggle GPU" if boot.get("kaggle_status") == "queued" else "Starting a free Frasberg GPU")
+            else:
+                detail = "Rendering on the Frasberg GPU" if phase == "gpu-render" else "Queued on the Frasberg GPU"
+            if (phase, detail) != last_phase:
+                await _set_phase(job["id"], phase, detail)
+                last_phase = (phase, detail)
     except HTTPException as e:
         logger.warning("Frasberg GPU submit failed: %s", e.detail)
     except Exception:  # noqa: BLE001
@@ -912,38 +1067,49 @@ async def gpu_render_video(job: dict, prompt: str):
     return None, None
 
 
+async def _render_video(job: dict) -> tuple:
+    style = VIDEO_STYLES.get(job.get("style") or "", "")
+    full = f"{job['prompt']}. {style}" if style else job["prompt"]
+    # The GPU path (which may wait minutes for a free GPU to boot) runs outside the local CPU queue, so other
+    # clips are not blocked behind a cold start.
+    await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "running", "started_at": now_iso()}})
+    data, engine = await gpu_render_video(job, full)
+    if data is None:
+        data = await frasberg_video(full, job["duration"])
+        engine = "frasberg"
+    if data is None:
+        await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "queued"}})
+        async with media_queues["video"]:
+            await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "running", "phase": "lite",
+                                                                  "phase_detail": "Rendering a preview on Frasberg Lite"}})
+            data = await asyncio.to_thread(local_engines.generate_video, job["prompt"], job["duration"], style)
+        engine = "Frasberg Lite (CPU)"
+        await db.jobs.update_one({"id": job["id"]}, {"$set": {"has_image": False}})
+    await db.jobs.update_one({"id": job["id"]}, {"$set": {"render_engine": engine}})
+    return data, "video/mp4"
+
+
 async def run_media(job: dict):
     kind = job["kind"]
-    async with media_queues[kind]:
-        await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "running", "started_at": now_iso()}})
-        try:
-            if kind == "video":
-                style = VIDEO_STYLES.get(job.get("style") or "", "")
-                full = f"{job['prompt']}. {style}" if style else job["prompt"]
-                data, engine = await gpu_render_video(job, full)
-                if data is None:
-                    data = await frasberg_video(full, job["duration"])
-                    engine = "frasberg"
-                if data is None:
-                    data = await asyncio.to_thread(local_engines.generate_video, job["prompt"], job["duration"], style)
-                    engine = "Frasberg Lite (CPU)"
-                    await db.jobs.update_one({"id": job["id"]}, {"$set": {"has_image": False}})
-                await db.jobs.update_one({"id": job["id"]}, {"$set": {"render_engine": engine}})
-                mime = "video/mp4"
-            else:
+    try:
+        if kind == "video":
+            data, mime = await _render_video(job)
+        else:
+            async with media_queues[kind]:
+                await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "running", "started_at": now_iso()}})
                 style = MUSIC_STYLES.get(job.get("style") or "", "")
                 data = await asyncio.to_thread(local_engines.generate_music,
                                                f"{job['prompt']}. {style}" if style else job["prompt"], job["duration"])
-                mime = "audio/wav"
-            file_id = await media_fs.upload_from_stream(f"{kind}/{job['id']}", data, metadata={"mime": mime})
-            update = {"status": "completed", "file_id": file_id, "mime": mime}
-        except Exception as e:  # noqa: BLE001
-            logger.exception("%s generation failed", kind)
-            update = {"status": "failed", "error": f"{kind.title()} engine error: {e.__class__.__name__}"}
-        await db.jobs.update_one({"id": job["id"]}, {"$set": {**update, "finished_at": now_iso()}})
+            mime = "audio/wav"
+        file_id = await media_fs.upload_from_stream(f"{kind}/{job['id']}", data, metadata={"mime": mime})
+        update = {"status": "completed", "file_id": file_id, "mime": mime}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("%s generation failed", kind)
+        update = {"status": "failed", "error": f"{kind.title()} engine error: {e.__class__.__name__}"}
+    await db.jobs.update_one({"id": job["id"]}, {"$set": {**update, "finished_at": now_iso()}})
 
 
-async def create_media_job(kind: str, body: JobIn, user: Optional[dict]):
+async def create_media_job(kind: str, body: JobIn, user: Optional[dict], gateway: str = ""):
     lo, hi = MEDIA_LIMITS[kind]
     job = {"id": str(uuid.uuid4()), "kind": kind, "engine": "local", "status": "queued", "prompt": body.prompt.strip(),
            "style": body.style, "duration": max(lo, min(hi, body.duration)), "error": None,
@@ -952,13 +1118,13 @@ async def create_media_job(kind: str, body: JobIn, user: Optional[dict]):
            "luchii_model": luchii_media_model(kind, body.luchii_model, bool(body.image_base64 and kind == "video")),
            "user_id": user["id"] if user else None, "created_at": now_iso()}
     await db.jobs.insert_one(job.copy())
-    asyncio.create_task(run_media({**job, "image_base64": body.image_base64 if kind == "video" else None}))
+    asyncio.create_task(run_media({**job, "gateway": gateway, "image_base64": body.image_base64 if kind == "video" else None}))
     return await job_out(job)
 
 
 @api.post("/video")
-async def video(body: JobIn, user: Optional[dict] = Depends(optional_user)):
-    return await create_media_job("video", body, user)
+async def video(body: JobIn, request: Request, user: Optional[dict] = Depends(optional_user)):
+    return await create_media_job("video", body, user, public_gateway(request))
 
 
 @api.post("/music")
@@ -1399,7 +1565,27 @@ async def engines_status(refresh: bool = False, _: dict = Depends(admin_user)):
 @api.get("/gpu-admin/overview")
 async def gpu_admin_overview(_: dict = Depends(admin_user)):
     return {"workers": await frasberg_gpu.recent_workers(), "jobs": await frasberg_gpu.job_stats(),
-            "engines": (await frasberg_gpu.engines())["data"]}
+            "engines": (await frasberg_gpu.engines())["data"], "boot": await frasberg_gpu.latest_boot()}
+
+
+@api.get("/gpu-admin/kaggle")
+async def gpu_admin_kaggle(request: Request, _: dict = Depends(admin_user)):
+    return await kaggle_gpu.overview(public_gateway(request))
+
+
+@api.post("/gpu-admin/kaggle/launch")
+async def gpu_admin_kaggle_launch(request: Request, force: bool = False, admin: dict = Depends(admin_user)):
+    if not kaggle_gpu.enabled():
+        raise HTTPException(status_code=400, detail="Add KAGGLE_API_TOKEN and KAGGLE_USERNAME to the backend first")
+    gateway = public_gateway(request)
+    if not gateway:
+        raise HTTPException(status_code=400, detail="Could not work out this server's public URL")
+    return await kaggle_gpu.launch(gateway, os.environ["FRASBERG_WORKER_SECRET"], reason=f"admin {admin['email']}", force=force)
+
+
+@api.post("/gpu-admin/stop")
+async def gpu_admin_stop(_: dict = Depends(admin_user)):
+    return {"stop_requested": await frasberg_gpu.request_stop()}
 
 
 @api.get("/gpu-admin/notebook")

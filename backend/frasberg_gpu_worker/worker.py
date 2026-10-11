@@ -5,12 +5,15 @@ renders them, and uploads the result in chunks.  Models stay warm while traffic 
 unloaded after FRASBERG_IDLE_UNLOAD_S seconds of idleness (scale-to-zero VRAM).
 
 Env:
-  FRASBERG_GATEWAY_URL     e.g. https://luchii.example.com/api/gpu
-  FRASBERG_WORKER_SECRET   shared secret (same value as the gateway's FRASBERG_WORKER_SECRET)
-  FRASBERG_WORKER_MODELS   comma list, e.g. frasberg-motion-fast,frasberg-image   (default: auto by VRAM)
-  FRASBERG_WORKER_ID       optional stable id (default: hostname-random)
-  FRASBERG_IDLE_UNLOAD_S   default 600
-  HF_HOME                  model cache dir (mount a persistent volume here)
+  FRASBERG_GATEWAY_URL       e.g. https://luchii.example.com/api/gpu
+  FRASBERG_WORKER_SECRET     shared secret (same value as the gateway's FRASBERG_WORKER_SECRET)
+  FRASBERG_WORKER_MODELS     comma list, e.g. frasberg-motion-fast,frasberg-image   (default: auto by VRAM)
+  FRASBERG_WORKER_ID         optional stable id (default: hostname-random)
+  FRASBERG_IDLE_UNLOAD_S     default 600
+  FRASBERG_WORKER_MAX_IDLE_S exit the process after this many idle seconds (0 = never). Free Kaggle/Colab
+                             sessions use it so an unused GPU stops burning the weekly quota.
+  FRASBERG_PRELOAD           "1" = load the first engine into memory before taking jobs (warm start)
+  HF_HOME                    model cache dir (mount a persistent volume here)
 """
 import base64
 import io
@@ -29,15 +32,17 @@ import engines
 log = logging.getLogger("frasberg.worker")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 GATEWAY = os.environ["FRASBERG_GATEWAY_URL"].rstrip("/")
 SECRET = os.environ["FRASBERG_WORKER_SECRET"]
 WORKER_ID = os.environ.get("FRASBERG_WORKER_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
 IDLE_UNLOAD = int(os.environ.get("FRASBERG_IDLE_UNLOAD_S", "600"))
+MAX_IDLE = int(os.environ.get("FRASBERG_WORKER_MAX_IDLE_S", "0"))
+PRELOAD = os.environ.get("FRASBERG_PRELOAD") == "1"
 CHUNK = 3 * 1024 * 1024
 H = {"X-Frasberg-Worker-Secret": SECRET, "X-Frasberg-Worker-Id": WORKER_ID}
 
-state = {"busy": False, "last_job": time.time()}
+state = {"busy": False, "last_job": time.time(), "stop": None}
 
 
 def models_for_this_gpu() -> list:
@@ -57,13 +62,23 @@ def post(path, **kw):
     return r.json()
 
 
+def boot(stage: str, detail: str = ""):
+    """Report a boot / lifecycle stage so the admin panel can show what a fresh GPU session is doing."""
+    try:
+        post("/worker/boot", json={"worker_id": WORKER_ID, "stage": stage, "detail": detail[:300]})
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def heartbeat_loop():
     gpu, vram = engines.gpu_info()
     while True:
         try:
-            post("/worker/heartbeat", json={"worker_id": WORKER_ID, "models": MODELS, "gpu": gpu, "vram_gb": vram,
-                                            "loaded_model": engines.loaded_model(), "busy": state["busy"],
-                                            "version": VERSION})
+            res = post("/worker/heartbeat", json={"worker_id": WORKER_ID, "models": MODELS, "gpu": gpu, "vram_gb": vram,
+                                                  "loaded_model": engines.loaded_model(), "busy": state["busy"],
+                                                  "version": VERSION})
+            if res.get("stop"):
+                state["stop"] = "Stopped from the Frasberg admin panel"
         except Exception as e:  # noqa: BLE001
             log.warning("heartbeat failed: %s", e)
         if not state["busy"] and engines.loaded_model() and time.time() - state["last_job"] > IDLE_UNLOAD:
@@ -113,12 +128,24 @@ def run(job: dict):
 
 
 def main():
-    log.info("Frasberg GPU Worker %s id=%s gpu=%s models=%s gateway=%s", VERSION, WORKER_ID, engines.gpu_info(),
-             MODELS, GATEWAY)
+    log.info("Frasberg GPU Worker %s id=%s gpu=%s models=%s gateway=%s max_idle=%s", VERSION, WORKER_ID,
+             engines.gpu_info(), MODELS, GATEWAY, MAX_IDLE)
     if not MODELS:
         raise SystemExit("No Frasberg engines fit this GPU - set FRASBERG_WORKER_MODELS explicitly")
+    if PRELOAD:
+        boot("loading", f"Loading {MODELS[0]} into GPU memory")
+        t0 = time.time()
+        engines.preload(MODELS[0])
+        log.info("preloaded %s in %.0fs", MODELS[0], time.time() - t0)
     threading.Thread(target=heartbeat_loop, daemon=True).start()
+    boot("ready", f"Serving {', '.join(MODELS)}")
+    state["last_job"] = time.time()
     while True:
+        if state["stop"]:
+            break
+        if MAX_IDLE and not state["busy"] and time.time() - state["last_job"] > MAX_IDLE:
+            state["stop"] = f"No jobs for {MAX_IDLE // 60} min - shutting down to save free GPU hours"
+            break
         try:
             job = post("/worker/claim", json={"worker_id": WORKER_ID, "models": MODELS,
                                               "loaded_model": engines.loaded_model()}).get("job")
@@ -145,6 +172,12 @@ def main():
         finally:
             state["busy"] = False
             state["last_job"] = time.time()
+    log.info("worker exiting: %s", state["stop"])
+    boot("stopped", state["stop"] or "")
+    try:  # drop the worker from the online list right away
+        post("/worker/offline", json={"worker_id": WORKER_ID})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 if __name__ == "__main__":
