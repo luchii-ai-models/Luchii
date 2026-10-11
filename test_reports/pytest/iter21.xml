@@ -1,11 +1,1 @@
-<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="2" failures="0" skipped="0" tests="2" time="1.081" timestamp="2026-10-10T12:12:49.213845+00:00" hostname="agent-env-0360b6e7-6994-4e4e-b099-5cd021cb02d2"><testcase classname="" name="tests.test_create_fixes_iter21" time="0.000"><error message="collection failure">backend/tests/test_create_fixes_iter21.py:7: in &lt;module&gt;
-    BASE = os.environ["REACT_APP_BACKEND_URL"].rstrip("/") + "/api"
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-&lt;frozen os&gt;:679: in __getitem__
-    ???
-E   KeyError: 'REACT_APP_BACKEND_URL'</error><error message="collection failure">backend/tests/test_create_fixes_iter21.py:7: in &lt;module&gt;
-    BASE = os.environ["REACT_APP_BACKEND_URL"].rstrip("/") + "/api"
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-&lt;frozen os&gt;:679: in __getitem__
-    ???
-E   KeyError: 'REACT_APP_BACKEND_URL'</error></testcase></testsuite></testsuites>
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="5" time="250.721" timestamp="2026-10-11T03:47:18.008295+00:00" hostname="agent-env-7a1d4761-d44c-4684-93ec-3d9ed876ba1b"><testcase classname="tests.test_eyes_remix_iter21" name="test_3_exif_rotation_upright" time="135.451" /><testcase classname="tests.test_eyes_remix_iter21" name="test_4_art_style_fast[turn it into an oil painting-oil]" time="7.066" /><testcase classname="tests.test_eyes_remix_iter21" name="test_4_art_style_fast[turn it into a pencil sketch-sketch]" time="2.599" /><testcase classname="tests.test_eyes_remix_iter21" name="test_5_snowy_scene" time="59.027" /><testcase classname="tests.test_eyes_remix_iter21" name="test_6_no_safety_false_positive" time="46.477" /></testsuite></testsuites>
