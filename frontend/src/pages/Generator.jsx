@@ -172,7 +172,7 @@ export default function Generator() {
     if (!resultId) return;
     const link = `${window.location.origin}/s/${resultId}`;
     try {
-      if (navigator.share) await navigator.share({ title: "My Frasberg Creator creation", url: link });
+      if (navigator.share) await navigator.share({ title: "Made with Luchii", url: link });
       else { await navigator.clipboard.writeText(link); toast.success("Share link copied to clipboard!"); }
     } catch (e) {
       try { await navigator.clipboard.writeText(link); toast.success("Share link copied to clipboard!"); } catch (_) { /* ignore */ }

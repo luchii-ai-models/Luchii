@@ -29,7 +29,7 @@ export default function VideoShare() {
       <Navbar />
       <main className="max-w-[1100px] mx-auto px-5 md:px-8 pt-28 pb-24" data-testid="video-share-page">
         <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-neutral-300 mb-5">
-          <Clapperboard className="w-3.5 h-3.5 text-[#00F0FF]" /> Made with {video ? luchiiModelFor("video", null, video.mode, video.luchii_model) : "Luchii"} · Powered by Frasberg
+          <Clapperboard className="w-3.5 h-3.5 text-[#00F0FF]" /> Made with {video ? luchiiModelFor("video", null, video.mode, video.luchii_model) : "Luchii"}
         </div>
         <h1 className="font-display font-bold tracking-tight text-3xl sm:text-4xl lg:text-5xl line-clamp-3" data-testid="video-share-title">
           {error ? "Video not found" : video ? video.prompt : "Loading…"}

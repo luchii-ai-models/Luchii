@@ -155,8 +155,11 @@ function ModelsList({ models }) {
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4" data-testid="gallery-models">
       {done.map((m) => (
         <div key={m.id} data-testid={`gallery-model-${m.id}`} className="rounded-xl border border-white/10 bg-[#1E2327] overflow-hidden">
-          <model-viewer src={`${BACKEND}${m.model_url}`} alt={m.prompt} camera-controls auto-rotate
-            style={{ width: "100%", height: "220px", background: "#11161A" }} />
+          <div className="relative">
+            <model-viewer src={`${BACKEND}${m.model_url}`} alt={m.prompt} camera-controls auto-rotate
+              style={{ width: "100%", height: "220px", background: "#11161A" }} />
+            <LuchiiBadge overlay model="Luchii Sculpt 3D" className="!top-2 !bottom-auto" testId={`gallery-model-luchii-badge-${m.id}`} />
+          </div>
           <div className="p-3 flex items-center justify-between gap-2">
             <p className="text-xs text-neutral-300 line-clamp-1">{m.prompt}</p>
             <a href={`${BACKEND}${m.model_url}`} download className="text-white/70 hover:text-white" title="Download .glb"><Download className="w-4 h-4" /></a>
@@ -235,7 +238,7 @@ export default function Gallery() {
         <div className="flex items-end justify-between mb-8">
           <div>
             <h1 className="font-display text-3xl font-bold">My gallery</h1>
-            <p className="text-sm text-neutral-500 mt-1">Everything you've created with Frasberg Creator.</p>
+            <p className="text-sm text-neutral-500 mt-1">Everything you've created with Luchii models.</p>
           </div>
           <Button onClick={() => navigate("/create")}
             className="bg-[#00F0FF] text-black hover:bg-[#00d4de] font-semibold rounded-full">

@@ -97,7 +97,11 @@ export default function Models() {
                       Soon
                     </span>
                   )}
-                  <span className="absolute bottom-3 left-3 text-[10px] text-neutral-300">Sample output</span>
+                  <span data-testid={`model-credit-${m.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+                    className="absolute bottom-3 left-3 z-10 inline-flex items-center gap-1.5 text-[10px] font-semibold text-white bg-black/55 backdrop-blur border border-[#00F0FF]/30 rounded-full pl-1 pr-2.5 py-0.5">
+                    <img src="/luchii-logo.png" alt="" className="w-4 h-4 rounded-full object-contain" />
+                    {fam.logo ? "Made with Luchii" : "Created by Luchii"}
+                  </span>
                 </div>
 
                 <div className="p-5 flex flex-col flex-1">

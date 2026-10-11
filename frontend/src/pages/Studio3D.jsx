@@ -51,7 +51,7 @@ function Viewer({ model }) {
       <div data-testid={queued ? "model-queue-notice" : "model-building"}>
         <LogoLoader
           label={model.status === "failed" ? "This model didn't finish" : queued ? `In the queue: #${model.queue_position || 1}` : "Sculpting your 3D model..."}
-          sublabel={model.status === "failed" ? model.error : "Powered by Frasberg · usually 2–4 minutes"} />
+          sublabel={model.status === "failed" ? model.error : "Created by Luchii · usually 2–4 minutes"} />
       </div>
     );
   }
@@ -163,7 +163,7 @@ export default function Studio3D() {
       <Navbar />
       <main className="max-w-[1200px] mx-auto px-5 md:px-8 pt-28 pb-24" data-testid="studio-3d-page">
         <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-neutral-300 mb-5">
-          <Box className="w-3.5 h-3.5 text-[#00F0FF]" /> Frasberg Creator 3D Studio · Powered by Frasberg
+          <Box className="w-3.5 h-3.5 text-[#00F0FF]" /> Frasberg Creator 3D Studio · Made with Luchii Sculpt 3D
         </div>
         <h1 className="font-display font-bold tracking-tight text-4xl sm:text-5xl lg:text-6xl">
           Turn a prompt or photo into a <span className="text-[#00F0FF]">3D model</span>

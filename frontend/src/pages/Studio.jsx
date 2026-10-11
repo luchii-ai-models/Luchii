@@ -59,7 +59,7 @@ const TIKTOK = TIKTOK_VIDEO_PRESETS.map((p) => (p.surprise ? { ...p, icon: Shuff
 export async function shareVideo(id) {
   const url = `${window.location.origin}/v/${id}`;
   if (navigator.share) {
-    try { await navigator.share({ title: "Made with Frasberg Motion", url }); return; } catch (e) { if (e?.name === "AbortError") return; }
+    try { await navigator.share({ title: "Made with Luchii", url }); return; } catch (e) { if (e?.name === "AbortError") return; }
   }
   try { await navigator.clipboard.writeText(url); toast.success("Share link copied!"); } catch { toast.message("Copy this link to share", { description: url, duration: 10000 }); }
 }
@@ -93,7 +93,7 @@ function Progress({ kind, job, eta }) {
     <div className="py-6" data-testid={queued ? `${kind}-queue-notice` : `${kind}-rendering`}>
       <LogoLoader
         label={queued ? `In the queue: #${job.queue_position || 1}` : kind === "video" ? `Rendering your clip...${pct}` : "Composing your track..."}
-        sublabel={queued ? "Another request is finishing first. Yours starts next." : `Powered by Frasberg · ${eta}`} />
+        sublabel={queued ? "Another request is finishing first. Yours starts next." : `Created by Luchii · ${eta}`} />
     </div>
   );
 }
