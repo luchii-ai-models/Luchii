@@ -28,6 +28,7 @@ from starlette.middleware.cors import CORSMiddleware
 import local_engines
 import frasberg_gpu
 import kaggle_gpu
+import aws_gpu
 
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
@@ -37,8 +38,11 @@ models_fs = AsyncIOMotorGridFSBucket(db, bucket_name="models3d")
 media_fs = AsyncIOMotorGridFSBucket(db, bucket_name="media")
 frasberg_gpu.init(db)
 kaggle_gpu.init(db)
+aws_gpu.init(db)
 if kaggle_gpu.enabled():
     frasberg_gpu.ON_DEMAND.add("frasberg-motion-free")
+if aws_gpu.enabled():
+    frasberg_gpu.ON_DEMAND.update(aws_gpu.models())
 
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALG = "HS256"
@@ -968,12 +972,20 @@ async def gpu_render_video(job: dict, prompt: str):
             model = m
             break
     gateway = job.get("gateway") or ""
-    cold = False
+    cold = None  # "aws" | "kaggle": which cold-starting GPU host this job is waiting for
+    if not model and aws_gpu.enabled() and gateway:
+        await _set_phase(job["id"], "gpu-boot", "Starting the Frasberg GPU")
+        res = await aws_gpu.ensure(gateway, os.environ["FRASBERG_WORKER_SECRET"], reason=f"video {job['id'][:8]}")
+        if res.get("ok") and await aws_gpu.booting(gateway):
+            aws_models = aws_gpu.models()
+            model, cold = (wanted if wanted in aws_models else aws_models[0]), "aws"
+        elif not res.get("ok"):
+            logger.warning("AWS GPU not available: %s", res.get("reason"))
     if not model and kaggle_gpu.enabled() and gateway:
         await _set_phase(job["id"], "gpu-boot", "Starting a free Frasberg GPU")
         res = await kaggle_gpu.launch(gateway, os.environ["FRASBERG_WORKER_SECRET"], reason=f"video {job['id'][:8]}")
         if res.get("launched") or await kaggle_gpu.booting(gateway):
-            model, cold = FREE_GPU_MODEL, True
+            model, cold = FREE_GPU_MODEL, "kaggle"
         else:
             logger.warning("Free GPU not available: %s", res.get("reason"))
     if not model:
@@ -995,7 +1007,12 @@ async def gpu_render_video(job: dict, prompt: str):
                 return None, None
             phase = "gpu-render" if cur["status"] == "running" else "gpu-queued"
             if cur["status"] == "queued" and not await frasberg_gpu.is_online(model):
-                boot = await kaggle_gpu.booting(gateway) if cold or kaggle_gpu.enabled() else None
+                if cold == "aws" or (not cold and aws_gpu.enabled()):
+                    boot = await aws_gpu.booting(gateway)
+                else:
+                    boot = None
+                if not boot and (cold == "kaggle" or kaggle_gpu.enabled()):
+                    boot = await kaggle_gpu.booting(gateway)
                 if not boot:
                     logger.warning("Frasberg GPU %s went offline; falling back", model)
                     await frasberg_gpu.db.gpu_jobs.update_one({"id": g["id"], "status": "queued"},
@@ -1003,7 +1020,8 @@ async def gpu_render_video(job: dict, prompt: str):
                     return None, None
                 phase = "gpu-boot"
                 detail = (boot.get("boot") or {}).get("label") or (
-                    "Waiting for a free Kaggle GPU" if boot.get("kaggle_status") == "queued" else "Starting a free Frasberg GPU")
+                    "Waiting for a free Kaggle GPU" if boot.get("kaggle_status") == "queued" else
+                    "Starting the Frasberg GPU" if boot.get("instance") else "Starting a free Frasberg GPU")
             else:
                 detail = "Rendering on the Frasberg GPU" if phase == "gpu-render" else "Queued on the Frasberg GPU"
             if (phase, detail) != last_phase:
@@ -1527,6 +1545,33 @@ async def gpu_admin_kaggle_launch(request: Request, force: bool = False, admin: 
     return await kaggle_gpu.launch(gateway, os.environ["FRASBERG_WORKER_SECRET"], reason=f"admin {admin['email']}", force=force)
 
 
+@api.get("/gpu-admin/aws")
+async def gpu_admin_aws(request: Request, _: dict = Depends(admin_user)):
+    return await aws_gpu.overview(public_gateway(request))
+
+
+@api.post("/gpu-admin/aws/start")
+async def gpu_admin_aws_start(request: Request, _: dict = Depends(admin_user)):
+    if not aws_gpu.enabled():
+        raise HTTPException(status_code=400, detail="Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to the backend first")
+    gateway = public_gateway(request)
+    if not gateway:
+        raise HTTPException(status_code=400, detail="Could not work out this server's public URL")
+    return await aws_gpu.resume(gateway, os.environ["FRASBERG_WORKER_SECRET"])
+
+
+@api.post("/gpu-admin/aws/stop")
+async def gpu_admin_aws_stop(request: Request, _: dict = Depends(admin_user)):
+    return await aws_gpu.stop(public_gateway(request))
+
+
+@api.post("/gpu-admin/aws/terminate")
+async def gpu_admin_aws_terminate(request: Request, confirm: bool = False, _: dict = Depends(admin_user)):
+    if not confirm:
+        raise HTTPException(status_code=409, detail="Pass confirm=true to delete the AWS GPU server")
+    return await aws_gpu.terminate(public_gateway(request))
+
+
 @api.post("/gpu-admin/stop")
 async def gpu_admin_stop(_: dict = Depends(admin_user)):
     return {"stop_requested": await frasberg_gpu.request_stop()}
@@ -1807,6 +1852,9 @@ async def startup():
     await _resume_interrupted_jobs()
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, local_engines.warm_up)
+    base = os.environ.get("FRASBERG_PUBLIC_URL", "").rstrip("/")
+    if aws_gpu.enabled() and aws_gpu.mode() == "always_on" and base:
+        asyncio.create_task(aws_gpu.reconcile_loop(f"{base}/api/gpu", os.environ["FRASBERG_WORKER_SECRET"]))
 
 
 @app.on_event("shutdown")

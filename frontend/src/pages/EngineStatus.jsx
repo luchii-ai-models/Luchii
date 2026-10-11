@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import axios from "axios";
-import { Activity, RefreshCw, Loader2, Cpu, Download, Gift, Rocket, Square, ExternalLink } from "lucide-react";
+import { Activity, RefreshCw, Loader2, Cpu, Download, Gift, Rocket, Square, ExternalLink, Server } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
 import Navbar from "../components/Navbar";
@@ -104,6 +104,71 @@ function KagglePanel({ authHeader, onChange }) {
   );
 }
 
+const AWS_TONE = { running: "text-emerald-300", pending: "text-amber-300", stopping: "text-amber-300", stopped: "text-neutral-400" };
+
+function AwsPanel({ authHeader, onChange }) {
+  const [a, setA] = useState(null);
+  const [act, setAct] = useState(null);
+  const load = useCallback(() => axios.get(`${API}/gpu-admin/aws`, { headers: authHeader }).then(({ data }) => setA(data)).catch(() => {}), [authHeader]);
+  useEffect(() => { load(); const t = setInterval(() => document.visibilityState === "visible" && load(), 20000); return () => clearInterval(t); }, [load]);
+
+  const call = async (name, path, ok) => {
+    setAct(name);
+    try {
+      const { data } = await axios.post(`${API}/gpu-admin/aws/${path}`, null, { headers: authHeader });
+      if (data.ok === false || data.stopped === false) toast.message(data.reason || "Nothing to do");
+      else toast.success(ok);
+      load(); onChange?.();
+    } catch (e) { toast.error(e?.response?.data?.detail || "AWS request failed"); } finally { setAct(null); }
+  };
+
+  if (!a) return null;
+  if (!a.configured) {
+    return (
+      <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-5 text-sm text-neutral-400" data-testid="aws-panel">
+        AWS GPU is not connected. Add <code>AWS_ACCESS_KEY_ID</code> and <code>AWS_SECRET_ACCESS_KEY</code> to the backend to run a dedicated GPU.
+      </div>
+    );
+  }
+  const st = a.instance?.state || "none";
+  const quotaLow = a.quota != null && a.quota < a.quota_needed;
+  return (
+    <div className="mt-5 rounded-2xl border border-emerald-400/25 bg-emerald-400/5 p-5" data-testid="aws-panel">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 font-semibold text-white"><Server className="w-4 h-4 text-emerald-300" /> AWS GPU · {a.mode === "always_on" ? "always on" : "on demand"}</div>
+          <p className="text-xs text-neutral-400 mt-1">
+            {a.instance_type} (NVIDIA A10G 24GB) · {a.region} · serves {a.models.join(", ")} · first choice for every video, Kaggle is the backup
+          </p>
+          <p className="text-sm mt-2 break-words" data-testid="aws-status">
+            Server: <b className={AWS_TONE[st] || "text-neutral-500"}>{st === "none" ? "not created yet" : st}</b>
+            {a.instance && <span className="text-neutral-500"> · {a.instance.instance_id}{a.instance.az ? ` · ${a.instance.az}` : ""}</span>}
+            {a.boot && <span className="text-neutral-400"> · {a.boot.label}{a.boot.detail ? ` (${a.boot.detail})` : ""}</span>}
+            {a.paused && <span className="text-amber-300"> · paused by admin</span>}
+          </p>
+          {quotaLow && (
+            <p className="text-xs text-amber-300 mt-1" data-testid="aws-quota">
+              GPU quota is {a.quota} vCPU, needs {a.quota_needed}.
+              {a.quota_request ? ` Increase request: ${a.quota_request.status}${a.quota_request.case_id ? ` (support case ${a.quota_request.case_id})` : ""}. The server starts by itself once AWS approves it.` : " Request an increase in AWS Service Quotas."}
+            </p>
+          )}
+          {a.error && !quotaLow && <p className="text-xs text-rose-300 mt-1 break-words" data-testid="aws-error">{a.error}</p>}
+        </div>
+        <div className="flex flex-wrap gap-2 shrink-0">
+          <Button data-testid="aws-start-btn" onClick={() => call("start", "start", "AWS GPU is starting. First boot takes about 15–25 minutes, later starts about 3–5.")} disabled={!!act}
+            className="rounded-full bg-emerald-400 text-black hover:bg-emerald-300 font-semibold">
+            {act === "start" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Rocket className="w-4 h-4 mr-2" />} Start
+          </Button>
+          <Button data-testid="aws-stop-btn" onClick={() => call("stop", "stop", "AWS GPU is stopping. It stays off until you press Start.")} disabled={!!act} variant="outline"
+            className="rounded-full border-white/15 bg-transparent text-white hover:bg-white/10">
+            {act === "stop" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Square className="w-4 h-4 mr-2" />} Stop
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GpuPanel({ authHeader }) {
   const [gpu, setGpu] = useState(null);
   const [dl, setDl] = useState(false);
@@ -139,6 +204,7 @@ function GpuPanel({ authHeader }) {
         </Button>
       </div>
 
+      <AwsPanel authHeader={authHeader} onChange={load} />
       <KagglePanel authHeader={authHeader} onChange={load} />
 
       <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.02] p-5 text-sm text-neutral-300" data-testid="gpu-free-howto">
