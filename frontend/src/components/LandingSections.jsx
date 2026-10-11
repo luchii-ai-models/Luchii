@@ -2,12 +2,9 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { Image as ImageIcon, ArrowUpRight } from "lucide-react";
-import {
-  Accordion, AccordionContent, AccordionItem, AccordionTrigger,
-} from "./ui/accordion";
 import { Button } from "./ui/button";
 import { toast } from "sonner";
-import { tools, showcase as fallbackShowcase, faqs } from "../mock";
+import { tools, showcase as fallbackShowcase } from "../mock";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -153,23 +150,6 @@ export default function LandingSections() {
             </button>
           ))}
         </div>
-      </section>
-
-      {/* FAQ */}
-      <section className="max-w-3xl mx-auto px-5 md:px-8 py-20 md:py-28">
-        <SectionHead title="Answers to your top questions" />
-        <Accordion type="single" collapsible className="w-full">
-          {faqs.map((f, i) => (
-            <AccordionItem key={i} value={`item-${i}`} className="border-white/10">
-              <AccordionTrigger className="text-left text-base md:text-lg font-medium hover:no-underline hover:text-[#00F0FF]">
-                {f.q}
-              </AccordionTrigger>
-              <AccordionContent className="text-neutral-400 text-base leading-relaxed">
-                {f.a}
-              </AccordionContent>
-            </AccordionItem>
-          ))}
-        </Accordion>
       </section>
     </>
   );
