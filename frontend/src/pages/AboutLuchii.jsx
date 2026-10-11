@@ -3,7 +3,8 @@ import { Link } from "react-router-dom";
 import { ArrowUpRight, Brain, Cpu, Layers, ShieldCheck, Sparkles, Zap } from "lucide-react";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
-import { brand } from "../mock";
+import { brand, faqs } from "../mock";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "../components/ui/accordion";
 
 const PILLARS = [
   { icon: Brain, title: "Autonomous intelligence", text: "Luchii plans, reasons and refines on its own, turning a single idea into finished images, video, music, voice and 3D." },
@@ -53,6 +54,22 @@ export default function AboutLuchii() {
         <p className="mt-6 text-sm text-neutral-500 max-w-2xl">
           Look for the Luchii badge on your images, videos and songs. It marks work created by a Luchii model.
         </p>
+      </section>
+
+      <section className="max-w-[1100px] mx-auto px-5 md:px-8 pb-16" data-testid="about-faq">
+        <h2 className="font-display font-bold tracking-tight text-3xl md:text-5xl mb-10">Answers to your top questions</h2>
+        <Accordion type="single" collapsible className="w-full max-w-3xl">
+          {faqs.map((f, i) => (
+            <AccordionItem key={i} value={`item-${i}`} className="border-white/10" data-testid={`about-faq-item-${i}`}>
+              <AccordionTrigger className="text-left text-base md:text-lg font-medium hover:no-underline hover:text-[#00F0FF]">
+                {f.q}
+              </AccordionTrigger>
+              <AccordionContent className="text-neutral-400 text-base leading-relaxed">
+                {f.a}
+              </AccordionContent>
+            </AccordionItem>
+          ))}
+        </Accordion>
       </section>
 
       <section className="max-w-[1100px] mx-auto px-5 md:px-8 pb-24 flex flex-wrap gap-3">
