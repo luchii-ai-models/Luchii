@@ -9,7 +9,7 @@ import pytest
 import requests
 from pymongo import MongoClient
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://luchii-ai-models.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://frb-secure-runtime.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 GPU = f"{API}/gpu"
 

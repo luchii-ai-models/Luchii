@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 
 # Configuration
-BASE_URL = "https://luchii-ai-models.preview.emergentagent.com/api"
+BASE_URL = "https://frb-secure-runtime.preview.emergentagent.com/api"
 TEST_EMAIL = "test@luchii.ai"
 TEST_PASSWORD = "Test1234!"
 

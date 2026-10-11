@@ -12,7 +12,7 @@ import { LinqAlerts } from "../components/linq/LinqAlerts";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-const LINQ_APP_URL = "https://img-gallery-fix-1.preview.emergentagent.com";
+const LINQ_APP_URL = "https://frb-secure-runtime.preview.emergentagent.com";
 
 const TABS = [
   { id: "ladder", label: "Ascension Ladder" },

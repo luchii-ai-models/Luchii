@@ -178,3 +178,9 @@ Hardware reality of this pod: **2 CPU cores, no AVX2/bf16 hardware, ~6GB effecti
     - Descriptive remixes also go through fast_edit. IP2P is no longer used.
   - luchii_face.py (Face Fix): YuNet detection, FFHQ alignment and GFPGAN 1.4 ONNX, blended at 0.85. It runs on every photo render and edit (not on art styles), about 3.5s. Weights are in /root/luchii-models/face.
   - Safety filter: Falconsai/nsfw_image_detection checks each render (threshold 0.6). If flagged, it does one guided retry with SAFE_PROMPT and the negative prompt; if still flagged it raises UnsafeImage, returned as 422 "The Luchii safety filter blocked this result…".
+
+## Update (2026-10-11, re-import into new pod)
+- origin/main of luchii-ai-models/frasberg-secure-runtime is identical to /app HEAD (nothing new to pull).
+- Recreated backend/.env (8 frb_live keys + FRASBERG_KEY_ROUTES, new JWT/worker secrets, ADMIN_EMAILS) and frontend/.env. Created model dirs, installed backend deps (emergentintegrations/litellm skipped) + ffmpeg, restarted.
+- Seeded admin.tester@luchiiapp.com / AdminTest123! and test@luchii.ai / Test1234! (memory/test_credentials.md).
+- Smoke: auth/me, engines status, public gallery OK. Nova-Muse draft render completed in ~36s (luchii-local). Home + /create render on desktop and mobile.

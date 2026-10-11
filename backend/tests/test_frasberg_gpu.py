@@ -5,7 +5,7 @@ import uuid
 import requests
 import pytest
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://luchii-ai-models.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://frb-secure-runtime.preview.emergentagent.com").rstrip("/")
 GPU = f"{BASE}/api/gpu"
 
 # Load env from backend/.env

@@ -8,7 +8,7 @@ import requests
 
 BASE_URL = os.environ.get(
     "REACT_APP_BACKEND_URL",
-    "https://img-gallery-fix-1.preview.emergentagent.com",
+    "https://frb-secure-runtime.preview.emergentagent.com",
 ).rstrip("/")
 
 
