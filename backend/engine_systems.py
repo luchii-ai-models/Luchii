@@ -230,4 +230,29 @@ async def creation_stats(limit: int = 15) -> dict:
         out["kinds"][k] = {"checked": await db.engine_diagnostics.count_documents(q),
                            "blocked": await db.engine_diagnostics.count_documents({**q, "payload.allowed": False})}
     out["recent"] = await db.engine_diagnostics.find(match, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    ids = [r["owner_id"][5:] for r in out["recent"] if r["owner_id"].startswith("user:")]
+    emails = {u["id"]: u["email"] for u in await db.users.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "email": 1}).to_list(limit)}
+    for r in out["recent"]:
+        r["owner_label"] = emails.get(r["owner_id"][5:], r["owner_id"]) if r["owner_id"].startswith("user:") else r["owner_id"]
     return out
+
+
+async def user_blocks() -> list:
+    rows = await db.engine_policy.find({"owner": {"$regex": "^user:"}, "blockedActions": {"$regex": "^create:"}},
+                                       {"_id": 0}).to_list(500)
+    ids = [r["owner"][5:] for r in rows]
+    users = {u["id"]: u for u in await db.users.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "email": 1, "name": 1}).to_list(500)}
+    out = []
+    for r in rows:
+        u = users.get(r["owner"][5:], {})
+        out.append({"user_id": r["owner"][5:], "email": u.get("email"), "name": u.get("name"),
+                    "kinds": [a[7:] for a in r["blockedActions"] if a.startswith("create:")],
+                    "updated_at": r.get("updated_at"), "updated_by": r.get("updated_by")})
+    return sorted(out, key=lambda x: x.get("updated_at") or "", reverse=True)
+
+
+async def set_user_block(user_id: str, kinds: list, by: str) -> dict:
+    owner = f"user:{user_id}"
+    keep = [a for a in (await load_policy(owner))["blockedActions"] if not a.startswith("create:")]
+    await save_policy(owner, keep + [f"create:{k}" for k in kinds if k in CREATION_KINDS], by)
+    return await load_policy(owner)

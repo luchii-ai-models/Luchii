@@ -3,6 +3,7 @@ import axios from "axios";
 import { Network, Play, Loader2, ShieldBan, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
+import UserBlocks from "./UserBlocks";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const field = "w-full h-10 rounded-lg border border-white/10 bg-black/50 px-3 text-sm text-white outline-none focus:border-[#00F0FF]/60";
@@ -100,6 +101,7 @@ export default function EngineSystems({ headers }) {
         <BlockEditor label="Governance · global block (all owners)" testid="engine-gov-global" value={sys.governance.globalBlock} onSave={(a) => save("governance", a, "global")} />
       </div>
       <p className="mt-2 text-[11px] text-neutral-500">Block creations for everyone with <code>create:image</code>, <code>create:video</code> or <code>create:music</code> in the global block.</p>
+      <UserBlocks headers={headers} onChange={load} />
       {creations && (
         <div className="mt-5 rounded-xl border border-white/10 bg-white/[0.03] p-4" data-testid="engine-creations">
           <div className="text-sm font-semibold text-white">Creations checked by the Engine Flow</div>
@@ -116,7 +118,7 @@ export default function EngineSystems({ headers }) {
             {creations.recent.slice(0, 8).map((r) => (
               <div key={r.id} className="flex gap-2 text-[11px] text-neutral-400">
                 <span className={r.payload.allowed ? "text-emerald-300" : "text-amber-300"}>{r.payload.allowed ? "allowed" : "blocked"}</span>
-                <span>{r.payload.action}</span><span className="text-neutral-600">{r.owner_id}</span>
+                <span>{r.payload.action}</span><span className="text-neutral-600">{r.owner_label || r.owner_id}</span>
                 <span className="ml-auto text-neutral-600">{new Date(r.created_at).toLocaleTimeString()}</span>
               </div>
             ))}

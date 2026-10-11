@@ -13,7 +13,7 @@ import time
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 import bcrypt
 import httpx
@@ -2039,6 +2039,32 @@ async def engines_diagnostics(component: Optional[str] = None, owner: str = Depe
             raise HTTPException(status_code=404, detail="Unknown component")
         return {"component": component, "events": await engine_systems.fetch_diagnostics(owner, component)}
     return await engine_systems.aggregate_diagnostics(owner)
+
+
+class UserBlockIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    kinds: list[Literal["image", "video", "music"]] = Field(default_factory=list)
+
+
+def _admin_owner(owner: str):
+    if not owner.startswith("admin:"):
+        raise HTTPException(status_code=403, detail="Admins only")
+
+
+@api.get("/engines/user-blocks")
+async def engines_user_blocks(owner: str = Depends(engine_owner)):
+    _admin_owner(owner)
+    return {"blocks": await engine_systems.user_blocks()}
+
+
+@api.put("/engines/user-blocks")
+async def engines_user_block_set(body: UserBlockIn, owner: str = Depends(engine_owner)):
+    _admin_owner(owner)
+    u = await db.users.find_one({"email": body.email.strip().lower()}, {"_id": 0, "id": 1, "email": 1})
+    if not u:
+        raise HTTPException(status_code=404, detail="No user with that email")
+    pol = await engine_systems.set_user_block(u["id"], body.kinds, owner)
+    return {"email": u["email"], "user_id": u["id"], "kinds": [a[7:] for a in pol["blockedActions"] if a.startswith("create:")]}
 
 
 @api.get("/engines/creations")
