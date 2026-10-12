@@ -1,0 +1,28 @@
+{
+  "summary": "Iter62 full test of Luchii Code nav/model-pair fix + new Frasberg Game Builder (prompt->rules->WorldDefinition->real engines) + Frasberg Image XL + regressions. 19/19 backend pytest pass (/app/backend/tests/test_iter62_game_builder.py). Frontend: nav-luchii-code and footer-luchii-code-link both point to /chat?model=luchii-7b&agent=builder. All four workspace agent URLs show correct header + workspace-model-select value — critically /chat?model=luchii-7b&agent=builder correctly shows 'Luchii Builder · Code generation · Luchii-7b' with dropdown on 'builder' EVEN AFTER visiting architect first (localStorage override bug is fixed). Changing dropdown navigates to /chat?model=<tier>&agent=<key> correctly for all 4 pairs. Game Builder UI at /game-builder (logged in): game-mode-toggle with engine (default) + ai modes; all 7 engine chips (auto + racer3d + streets + carjack + dungeon3d + spaceshooter + maze3d); building 'neon night street race 3 laps pink traffic' produced racer3d world named 'Night Las Vegas Racer' with engine-world-panel, play iframe, 10 tunable sliders, time + weather selects, save and JSON-toggle. Switching to AI mode hides engine-prompt. /games library includes 'carjack' and /api/games/carjack/play loads. GET /api/creator/gpu/v1/engines includes 'frasberg-image-xl'. Backend rule engine correctly maps all 6 prompts (racer3d, carjack $5000, spaceshooter 7 lives + bossEvery 3, dungeon3d 12 enemies, maze3d 'Mist Hollow', streets startCash 900). engine param forces engine, unknown engine->400, unauth->401, enriched_by='rules' when Frasberg upstream unreachable (as expected per user choice). PATCH clamps config (maxSpeed 9999 -> 120), rejects unknown config key with 400, sets time_of_day/weather. GET /play returns engine HTML with window.FRASBERG_WORLD injected and /api/games/assets/world.js. Game-builder worlds also surface in /api/v1/worldgraph payload (same owner). DELETE removes world and subsequent GET -> 404.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter62_game_builder.py",
+    "/app/test_reports/pytest/iter62.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "game_world_builder.py pick_engine fallback uses index tiebreak that favors spaceshooter when no keywords hit at all and no car/shoot cues — fine for current prompts but worth documenting the default-fallback behaviour.",
+    "PATCH /api/game-builder/worlds/{id} updates the engine component props in scenes[0].components but does not revalidate against the full WorldDefinition pydantic model after mutation — if a future config key clashes with a required WD invariant it won't be caught. Not critical today because _clamp enforces the tunable allow-list.",
+    "frasberg_complete logs 'Frasberg server unreachable' at INFO on every world creation when upstream is down — noisy, consider log-once or DEBUG."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter62_game_builder.py (new, 19 tests)"
+  ],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "100% (navbar, 4 agent URLs, dropdown nav, game-builder engine mode, AI toggle, games library)"},
+  "test_credentials": "test@luchii.ai / Test1234! (regular user, auto-registered if missing); admin@frasbergai.com / Federation20261+ (seeded)",
+  "seed_data_creation": "Backend tests create ~7 WorldGraph records (racer3d x1, carjack x1, spaceshooter x1, dungeon3d x1, maze3d x2 incl. engine-forced, streets x1) under test@luchii.ai; last one is deleted. Frontend test adds one more racer3d world. All owned by test user and tagged createdWith=frasberg-game-builder.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Game Builder router is at /api/game-builder (prefix added by include_router without /api, server-level api_router adds /api). WorldGraph list is at GET /api/v1/worldgraph and returns {payload:{worlds:[{id, owner_id, world:{id:wg-..., ...}}]}} — note the record id vs world.id distinction. Carjack is a vite build served from /app/games/carjack and /api/games/carjack/play; backdrops under /api/games/assets/. Frasberg upstream (api.frasberg.com) is unreachable from the pod, so enriched_by stays 'rules' and the chat demo returns the graceful 'turbulence' SSE message — do not count as a bug per user choice. Model/agent URL pairs: architect=luchii-70b, builder=luchii-7b, reviewer=luchii-7b, debugger=luchii-1b. workspace-model-select is a native <select> with values matching agent keys."
+}
