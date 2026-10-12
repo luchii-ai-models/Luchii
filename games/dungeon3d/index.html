@@ -104,7 +104,7 @@ for (let i = 0; i < 6; i++) {
 }
 
 // ─── Layer 3: First Person Controller ─────────────────────
-const player = { pos: new THREE.Vector3(0, 1, 12), vy: 0, yaw: 0, pitch: 0, hp: 100, grounded: true };
+const player = { pos: new THREE.Vector3(0, 1, 12), vy: 0, yaw: 0, pitch: 0, hp: FWC.playerHp ?? 100, grounded: true };
 const keys = {};
 document.addEventListener("keydown", e => { keys[e.code] = true; if (e.code === "KeyR") reload(); });
 document.addEventListener("keyup", e => keys[e.code] = false);
@@ -123,7 +123,7 @@ function spawnEnemy() {
   do { x = (Math.random()-0.5)*48; z = (Math.random()-0.5)*48; }
   while (Math.hypot(x-player.pos.x, z-player.pos.z) < 12);
   mesh.position.set(x, 1.1, z); mesh.castShadow = true; scene.add(mesh);
-  enemies.push({ mesh, health: 100, speed: 2.5 + Math.random()*2, state: "patrol",
+  enemies.push({ mesh, health: 100, speed: (2.5 + Math.random()*2) * (FWC.enemySpeed ?? 1), state: "patrol",
     patrolTarget: mesh.position.clone(), alertRange: 20, attackRange: 2, attackCooldown: 0, roamTimer: 0 });
 }
 function updateEnemies(dt) {
@@ -156,7 +156,7 @@ function updateEnemies(dt) {
 
 // ─── Layer 6: Weapon ──────────────────────────────────────
 const raycaster = new THREE.Raycaster();
-let ammo = 30, cooldown = 0, score = 0, wave = 1;
+let ammo = FWC.ammo ?? 30, cooldown = 0, score = 0, wave = 1;
 const flashMesh = new THREE.Mesh(new THREE.SphereGeometry(0.08), new THREE.MeshBasicMaterial({ color: 0xffff00 }));
 flashMesh.visible = false; scene.add(flashMesh);
 document.addEventListener("mousedown", e => { if (e.button === 0 && running && document.pointerLockElement) fire(); });
@@ -178,10 +178,10 @@ function fire() {
     }
   }
 }
-function reload() { ammo = 30; hud(); }
+function reload() { ammo = FWC.ammo ?? 30; hud(); }
 function nextWave() {
   wave++; hud();
-  for (let i = 0; i < 3 + wave * 2; i++) spawnEnemy();
+  for (let i = 0; i < (FWC.waveBase ?? 3) + wave * 2; i++) spawnEnemy();
 }
 
 // ─── HUD / game state ─────────────────────────────────────
@@ -195,9 +195,9 @@ function hud() {
 let running = false;
 function start() {
   enemies.forEach(e => scene.remove(e.mesh)); enemies.length = 0;
-  player.pos.set(0, 1, 12); player.hp = 100; player.yaw = 0; player.pitch = 0;
-  ammo = 30; score = 0; wave = 1; hud();
-  for (let i = 0; i < 5; i++) spawnEnemy();
+  player.pos.set(0, 1, 12); player.hp = FWC.playerHp ?? 100; player.yaw = 0; player.pitch = 0;
+  ammo = FWC.ammo ?? 30; score = 0; wave = 1; hud();
+  for (let i = 0; i < (FWC.startEnemies ?? 5); i++) spawnEnemy();
   document.getElementById("start").style.display = "none";
   document.getElementById("gameover").style.display = "none";
   running = true;
@@ -389,7 +389,7 @@ const lbScore = () => score;
   };
   const _goS = gameOver;
   gameOver = function () { if (!muted) LuchiiAudio.sfx("lose", 0.55); _goS(); };
-  let _hp = 100;
+  let _hp = FWC.playerHp ?? 100;
   setInterval(() => { if (running && player.hp < _hp && !muted) LuchiiAudio.sfx("hit", 0.4); _hp = player.hp; }, 120);
 })();
 // Champion — score to beat

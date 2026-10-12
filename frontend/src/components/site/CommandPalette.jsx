@@ -10,7 +10,7 @@ const PAGES = [
   { label: "Developer Console", to: "/dashboard", hint: "api keys · usage · wallet" },
   { label: "Frasberg Gift & Tokens", to: "/dashboard", hint: "balance · buy · send" },
   { label: "Workspace Home", to: "/apps", hint: "published apps" },
-  { label: "Luchii Builder", to: "/luchii?agent=architect", hint: "build with Luchii-70b" },
+  { label: "Luchii Builder", to: "/chat?model=luchii-7b&agent=builder", hint: "build with Luchii-7b" },
   { label: "Luchii Chat", to: "/luchii", hint: "talk to Luchii" },
   { label: "Singularity Codex", to: "/codex", hint: "17 books · lore" },
   { label: "FrasbergOS Simulator", to: "/os", hint: "eternal cycle" },

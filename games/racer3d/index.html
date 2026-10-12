@@ -42,7 +42,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
 <script>
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x0d0d1a, 0.012);
+scene.fog = new THREE.FogExp2(FWC.fogColor ?? 0x0d0d1a, FWC.fogDensity ?? 0.012);
 scene.background = null;
 const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.1, 600);
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -199,9 +199,9 @@ const glow = new THREE.PointLight(0xcfe8ff, 2, 9); glow.position.set(0, 1, 5); s
 
 // ── Traffic waves — ALWAYS leaves a free lane ─────────────
 let traffic = [];
-const COLORS = [0xff3355, 0xffaa22, 0x22ccff, 0x44ff88, 0xffffff, 0xaa66ff];
+const COLORS = FWC.trafficColors || [0xff3355, 0xffaa22, 0x22ccff, 0x44ff88, 0xffffff, 0xaa66ff];
 function laneCombo() {
-  const n = Math.random() < 0.55 ? 2 : 1;   // never all 3 lanes
+  const n = Math.random() < (FWC.trafficDensity ?? 0.55) ? 2 : 1;   // never all 3 lanes
   return [0, 1, 2].sort(() => Math.random() - 0.5).slice(0, n);
 }
 function spawnWave(z) {
@@ -261,7 +261,7 @@ function recyclePickup(p) {
   p.position.set(p.userData.baseLane, 0.9, -260 - Math.random()*120);
 }
 
-let running = false, speed = 30, score = 0, px = 0;
+let running = false, speed = FWC.startSpeed ?? 30, score = 0, px = 0;
 function hud() {
   document.getElementById("speed").textContent = Math.round((speed + (nitroT > 0 ? 26 : 0)) * 4);
   document.getElementById("score").textContent = Math.floor(score);
@@ -271,7 +271,7 @@ function start() {
   pickups.forEach(p => scene.remove(p)); pickups = [];
   for (let i = 1; i <= 6; i++) spawnWave(-40 - i * 36);
   for (let i = 0; i < 3; i++) spawnPickup(-90 - i * 110);
-  speed = 30; score = 0; px = 0; dist = 0; curve = 0; curveTarget = 0; nitroT = 0; slowT = 0;
+  speed = FWC.startSpeed ?? 30; score = 0; px = 0; dist = 0; curve = 0; curveTarget = 0; nitroT = 0; slowT = 0;
   player.position.x = 0;
   document.getElementById("start").style.display = "none";
   document.getElementById("gameover").style.display = "none";
@@ -295,9 +295,9 @@ function animate() {
     const ts = slowT > 0 ? 0.35 : 1;                      // near-miss slow motion
     const eff = speed + (nitroT > 0 ? 26 : 0);            // nitro boost
     const wdt = dt * ts;
-    speed += dt * 0.55;
+    speed += dt * (FWC.accel ?? 0.55);
     if (keys["KeyW"] || keys["ArrowUp"]) speed += dt * 6;
-    speed = Math.min(speed, 80);
+    speed = Math.min(speed, FWC.maxSpeed ?? 80);
     if (keys["KeyA"] || keys["ArrowLeft"]) px -= 10 * dt;
     if (keys["KeyD"] || keys["ArrowRight"]) px += 10 * dt;
     px += curve * dt * 2.4;                       // the road pulls through turns

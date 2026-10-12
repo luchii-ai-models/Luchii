@@ -2102,6 +2102,8 @@ import routes_engines
 import routes_worldgraph
 api_router.include_router(routes_engines.router)
 api_router.include_router(routes_worldgraph.router)
+import game_world_builder
+api_router.include_router(game_world_builder.router)
 api_router.include_router(routes_payments.router)
 api_router.include_router(routes_admin.router)
 api_router.include_router(routes_provider.router)

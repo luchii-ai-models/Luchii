@@ -263,17 +263,43 @@ async def frasberg_image(payload: dict) -> str:
     return as_data_url(b64, d.get("mime") or "image/png")
 
 
-async def gpu_image(prompt: str, aspect: Optional[str]) -> Optional[str]:
-    if not await frasberg_gpu.is_online("frasberg-image"):
+GPU_IMAGE_MODELS = ("frasberg-image", "frasberg-image-xl")
+GPU_IMAGE_BOOT_WAIT_S = 15 * 60
+
+
+async def _online_image_model() -> Optional[str]:
+    for m in GPU_IMAGE_MODELS:
+        if await frasberg_gpu.is_online(m):
+            return m
+    return None
+
+
+async def gpu_image(prompt: str, aspect: Optional[str], negative: Optional[str] = None,
+                    seed: Optional[int] = None, gateway: str = "") -> Optional[str]:
+    """High-precision path: a Frasberg GPU worker (FLUX / Juggernaut XL). Starts the free Kaggle T4 when none is
+    online and waits for it to boot, since the CPU fallback cannot match GPU quality."""
+    model = await _online_image_model()
+    if not model and gateway and kaggle_gpu.enabled():
+        res = await kaggle_gpu.launch(gateway, os.environ["FRASBERG_WORKER_SECRET"], reason="image",
+                                      models="frasberg-image-xl,frasberg-motion-free")
+        if res.get("launched") or await kaggle_gpu.booting(gateway):
+            t0 = time.time()
+            while time.time() - t0 < GPU_IMAGE_BOOT_WAIT_S and not model:
+                await asyncio.sleep(10)
+                model = await _online_image_model()
+                if not model and not await kaggle_gpu.booting(gateway):
+                    break
+    if not model:
         return None
     try:
-        g = await frasberg_gpu.submit("image", "frasberg-image", prompt, aspect_ratio=aspect or "1:1")
-        for _ in range(240):
+        g = await frasberg_gpu.submit("image", model, prompt, aspect_ratio=aspect or "1:1", negative_prompt=negative, seed=seed)
+        for _ in range(600):
             await asyncio.sleep(0.5)
             cur = await frasberg_gpu.get_job(g["id"])
             if cur["status"] == "completed":
                 return as_data_url(base64.b64encode(await frasberg_gpu.output_bytes(cur)).decode(), cur.get("mime") or "image/png")
             if cur["status"] == "failed":
+                logger.warning("Frasberg GPU image failed: %s", cur.get("error"))
                 break
         else:
             await db.gpu_jobs.update_one({"id": g["id"], "status": "queued"},
@@ -488,8 +514,12 @@ async def generate(body: GenerateIn, user: Optional[dict] = Depends(optional_use
     model_hint = "" if model in PHOTO_MODELS and body.style in ("3d", "digital-art", "anime") else LUCHII_IMAGE_MODELS.get(model or "")
     hint = ", ".join(h for h in (model_hint, STYLE_HINTS.get(body.style or "", "")) if h)
     full = f"{subject}. {hint}. Aspect ratio {body.aspect_ratio}." if hint else subject
-    img, engine = await gpu_image(full, body.aspect_ratio), "frasberg-image"
-    if not img:
+    gpu_prompt = f"{subject}, {hint}" if hint else subject
+    img = await gpu_image(gpu_prompt, body.aspect_ratio, seed=seed, gateway=env_gateway())
+    engine = "frasberg-gpu"
+    if img:
+        draft = False
+    else:
         focus = emphasize_subject(subject)
         local_prompt = f"{focus}, {hint}" if hint else focus
         if model in PHOTO_MODELS:
@@ -963,6 +993,11 @@ GPU_VIDEO_ORDER = ["frasberg-motion-fast", "frasberg-motion-pro", "frasberg-moti
 
 
 FREE_GPU_MODEL = "frasberg-motion-free"
+
+
+def env_gateway() -> str:
+    base = os.environ.get("FRASBERG_PUBLIC_URL", "").rstrip("/")
+    return f"{base}/api/creator/gpu" if base else ""
 
 
 def public_gateway(request: Request) -> str:

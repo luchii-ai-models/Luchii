@@ -4,6 +4,7 @@ frasberg-motion-fast   LTX-Video 0.9.7 distilled + spatial latent upscaler (2-st
 frasberg-motion-pro    Wan 2.2 TI2V-5B (text- and image-to-video, 720p/24fps)
 frasberg-motion-ultra  HunyuanVideo 13B (T2V) / HunyuanVideo-I2V
 frasberg-image         FLUX.1-schnell (4 steps)
+frasberg-image-xl      Juggernaut XL v9 (SDXL, fp16, DPM++ 2M Karras 30 steps) - fits a free 16GB T4
 frasberg-motion-free   LTX-Video 2B (T2V + I2V) - fits a free 16GB T4 (Kaggle / Colab)
 frasberg-dev-test      procedural test pattern (CPU, protocol self-test only)
 """
@@ -14,15 +15,20 @@ import tempfile
 import threading
 
 MIN_VRAM = {"frasberg-motion-fast": 24, "frasberg-motion-pro": 24, "frasberg-motion-ultra": 80,
-            "frasberg-image": 16, "frasberg-motion-free": 14, "frasberg-dev-test": 0}
+            "frasberg-image": 16, "frasberg-image-xl": 10, "frasberg-motion-free": 14, "frasberg-dev-test": 0}
 
 REPOS = {
     "frasberg-motion-fast": ("Lightricks/LTX-Video-0.9.7-distilled", "Lightricks/ltxv-spatial-upscaler-0.9.7"),
     "frasberg-motion-pro": ("Wan-AI/Wan2.2-TI2V-5B-Diffusers",),
     "frasberg-motion-ultra": ("hunyuanvideo-community/HunyuanVideo", "hunyuanvideo-community/HunyuanVideo-I2V"),
     "frasberg-image": ("black-forest-labs/FLUX.1-schnell",),
+    "frasberg-image-xl": ("RunDiffusion/Juggernaut-XL-v9",),
     "frasberg-motion-free": ("Lightricks/LTX-Video",),
 }
+XL_VAE = "madebyollin/sdxl-vae-fp16-fix"   # the stock SDXL VAE overflows (black images) in fp16
+REPO_VARIANT = {"frasberg-image-xl": "fp16"}
+XL_NEGATIVE = ("lowres, worst quality, low quality, blurry, jpeg artifacts, deformed, disfigured, bad anatomy, extra limbs, "
+               "extra fingers, mutated hands, cropped, watermark, signature, text, logo")
 NEGATIVE = "worst quality, inconsistent motion, blurry, jittery, distorted, watermark, text, deformed"
 
 _lock = threading.RLock()
@@ -104,6 +110,14 @@ def _load(model):
     if model == "frasberg-image":
         from diffusers import FluxPipeline
         return {"pipe": _place(FluxPipeline.from_pretrained(REPOS[model][0], torch_dtype=bf16), model)}
+    if model == "frasberg-image-xl":
+        from diffusers import AutoencoderKL, DPMSolverMultistepScheduler, StableDiffusionXLPipeline
+        vae = AutoencoderKL.from_pretrained(XL_VAE, torch_dtype=torch.float16)
+        pipe = StableDiffusionXLPipeline.from_pretrained(REPOS[model][0], vae=vae, torch_dtype=torch.float16, variant="fp16")
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, use_karras_sigmas=True,
+                                                                 algorithm_type="dpmsolver++")
+        pipe.enable_vae_slicing()
+        return {"pipe": _place(pipe, model)}
     if model == "frasberg-motion-free":
         from diffusers import LTXImageToVideoPipeline, LTXPipeline
         t2v = LTXPipeline.from_pretrained(REPOS[model][0], torch_dtype=bf16)
@@ -205,6 +219,14 @@ def render(model, *, prompt, negative_prompt=None, duration=5, aspect_ratio="16:
             img = pipes["pipe"](prompt=prompt, height=h, width=w, num_inference_steps=4, guidance_scale=0.0,
                                 max_sequence_length=256, generator=_gen(seed),
                                 callback_on_step_end=_cb(progress, 4)).images[0]
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue(), "image/png"
+        if model == "frasberg-image-xl":
+            h, w = {"16:9": (768, 1344), "9:16": (1344, 768)}.get(aspect_ratio, (1024, 1024))
+            img = pipes["pipe"](prompt=prompt, negative_prompt=negative_prompt or XL_NEGATIVE, height=h, width=w,
+                                num_inference_steps=30, guidance_scale=6.0, generator=_gen(seed),
+                                callback_on_step_end=_cb(progress, 30)).images[0]
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             return buf.getvalue(), "image/png"

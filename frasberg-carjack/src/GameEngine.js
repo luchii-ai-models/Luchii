@@ -20,6 +20,9 @@ import { ShowroomSystem }   from './ShowroomSystem.js';
 import { RaceSystem }       from './RaceSystem.js';
 import { VoiceSystem }      from './VoiceSystem.js';
 
+// Frasberg Game Builder world config (window.FWC is injected by /api/game-builder/worlds/{id}/play)
+const FWC = (typeof window !== 'undefined' && window.FWC) || {};
+
 export class GameEngine {
   constructor(canvas) {
     this.canvas  = canvas;
@@ -43,11 +46,11 @@ export class GameEngine {
     this.player = {
       x: 640 + spawnOff(), y: 360 + spawnOff(),
       angle: 0, speed: 0,
-      health: 100, maxHealth: 100,
-      money: 1500, wantedLevel: 0,
-      name: 'Frasberg',
-      carName: 'Frasberg GT',
-      color: '#e63946',
+      health: FWC.maxHealth ?? 100, maxHealth: FWC.maxHealth ?? 100,
+      money: FWC.startMoney ?? 1500, wantedLevel: 0,
+      name: FWC.playerName || 'Frasberg',
+      carName: FWC.carName || 'Frasberg GT',
+      color: FWC.carColor || '#e63946',
       inVehicle: true,
       isAlive: true,
     };
@@ -102,17 +105,17 @@ export class GameEngine {
     // Player car
     this.playerCar = this.car.spawnCar('player', {
       x: this.player.x, y: this.player.y,
-      isPlayer: true, color: this.player.color, maxSpeed: 220, accel: 0.55,
+      isPlayer: true, color: this.player.color, maxSpeed: FWC.maxSpeed ?? 220, accel: FWC.accel ?? 0.55,
     });
     this.playerCar.spec = { brand: 'Frasberg', model: 'GT', tier: 'sport', color: this.player.color, length: 4.7, topSpeed: 290 };
     // Restore save
     const saved = this.save.load();
-    if (saved?.money != null) this.player.money = saved.money;
-    if (saved?.player?.money != null) this.player.money = saved.player.money;
+    if (FWC.startMoney == null && saved?.money != null) this.player.money = saved.money;
+    if (FWC.startMoney == null && saved?.player?.money != null) this.player.money = saved.player.money;
     this.showroom.restore(saved?.garage);
     // World population
-    this.traffic.spawn(30, { x: this.player.x, z: this.player.y });
-    this.npcs.spawn(25);
+    this.traffic.spawn(FWC.trafficCount ?? 30, { x: this.player.x, z: this.player.y });
+    this.npcs.spawn(FWC.npcCount ?? 25);
     this.missions.loadFirstMission();
     this.events.start?.();
     // Multiplayer (non-blocking — game runs solo if server is down)
@@ -123,6 +126,14 @@ export class GameEngine {
 
   // ── Pre-game weather & time picker ───────────────────────────
   _showWeatherPicker() {
+    // A WorldGraph world that fixes weather / time of day starts straight away in that environment.
+    if (FWC.weather || FWC.hour != null) {
+      if (FWC.hour != null) this.worldMap.time = FWC.hour * 60;
+      this.weather.locked = true;
+      this.weather.transitionTo(FWC.weather || 'clear');
+      this.start();
+      return;
+    }
     const opts = [
       { label: '☀️ CLEAR DAY', weather: 'clear', hour: 12 },
       { label: '🌧 RAIN',      weather: 'rain',  hour: 15 },

@@ -52,7 +52,7 @@ const EXPLORE_GROUPS = [
       { label: "Developer Portal", to: "/developers/portal" },
       { label: "Developer Docs", to: "/developers/docs" },
       { label: "Visual Studio", to: "/visual-studio" },
-      { label: "Luchii Code", to: "/luchii-code" },
+      { label: "Luchii Code", to: "/chat?model=luchii-7b&agent=builder" },
       { label: "Frasberg Software", to: "/software" },
       { label: "Security Shield", to: "/security-shield" },
       { label: "Shield Dashboard", to: "/shield-dashboard" },
@@ -111,7 +111,7 @@ export default function Navbar() {
             <Link to="/auth?mode=login" className="text-[15px] text-lux-text2 transition-colors duration-200 hover:text-lux-text" data-testid="nav-signin">Sign in</Link>
           )}
           <Link to="/ai-models" className="text-[15px] text-lux-text2 transition-colors duration-200 hover:text-lux-text" data-testid="nav-ai-models">AI Models</Link>
-          <Link to="/luchii-code" className="text-[15px] text-lux-text2 transition-colors duration-200 hover:text-lux-text" data-testid="nav-luchii-code">Luchii Code</Link>
+          <Link to="/chat?model=luchii-7b&agent=builder" className="text-[15px] text-lux-text2 transition-colors duration-200 hover:text-lux-text" data-testid="nav-luchii-code">Luchii Code</Link>
           <Link to="/games" className="text-[15px] text-lux-text2 transition-colors duration-200 hover:text-lux-text" data-testid="nav-games">Games</Link>
           <Link to="/os" className="text-[15px] text-lux-text2 transition-colors duration-200 hover:text-lux-text" data-testid="nav-frasbergos">FrasbergOS</Link>
           <div className="relative" ref={exploreRef}>
@@ -189,7 +189,7 @@ export default function Navbar() {
                 <Link to="/auth?mode=login" onClick={() => setOpen(false)} className="py-2 text-sm text-lux-text2 hover:text-lux-text">Sign in</Link>
               )}
               <Link to="/ai-models" onClick={() => setOpen(false)} className="py-2 text-sm text-lux-text2 hover:text-lux-text">AI Models</Link>
-              <Link to="/luchii-code" onClick={() => setOpen(false)} className="py-2 text-sm text-lux-text2 hover:text-lux-text">Luchii Code</Link>
+              <Link to="/chat?model=luchii-7b&agent=builder" onClick={() => setOpen(false)} className="py-2 text-sm text-lux-text2 hover:text-lux-text">Luchii Code</Link>
               <Link to="/games" onClick={() => setOpen(false)} className="py-2 text-sm text-lux-text2 hover:text-lux-text">Games</Link>
               <Link to="/os" onClick={() => setOpen(false)} className="py-2 text-sm text-lux-text2 hover:text-lux-text">FrasbergOS</Link>
               <Link to="/create" onClick={() => setOpen(false)} className="py-2 text-sm text-lux-text2 hover:text-lux-text">Frasberg Creator</Link>

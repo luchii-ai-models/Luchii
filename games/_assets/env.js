@@ -1,4 +1,6 @@
 // Luchii Games — shared real-audio engine + environmental realism layer (FRASBERG INC.)
+// Frasberg Game Builder: world engine config (set by /api/game-builder/worlds/{id}/play, empty for stock play)
+window.FWC = window.FWC || {};
 (function () {
   var A = "/api/games/assets/";
   var cache = {};

@@ -199,6 +199,17 @@ async def builder_generate(body: GenerateReq, user: dict = Depends(auth_module.g
 
         async def stream_llm(sys_msg: str, text: str, emit_deltas: bool) -> str:
             out = ""
+            if body.type == "game":
+                # Game code builds go through the owner's Frasberg server first (LUCHII_UPSTREAM_URL).
+                import game_world_builder
+                via_frasberg = await game_world_builder.frasberg_complete(sys_msg, text, timeout=150, max_tokens=8192)
+                if via_frasberg:
+                    if emit_deltas:
+                        await queue.put({"delta": via_frasberg})
+                    return via_frasberg
+                if not EMERGENT_LLM_KEY:
+                    await queue.put({"edit_status": "Frasberg server is not reachable right now — use Engine mode to build from your Frasberg engines."})
+                    return ""
             try:
                 llm = LlmChat(
                     api_key=EMERGENT_LLM_KEY, session_id=f"builder-{uuid.uuid4()}",

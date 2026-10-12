@@ -183,7 +183,8 @@ export default function AgentWorkspace() {
   const saved = (() => {
     try { return JSON.parse(localStorage.getItem(`luchii-ws-${agentKey}`)) || {}; } catch { return {}; }
   })();
-  const [model, setModel] = useState(saved.model || params.get("model") || agent.model);
+  // The URL (?model=&agent=) is the source of truth; each agent runs on its own Luchii tier.
+  const [model, setModel] = useState(params.get("model") || agent.model);
   const [messages, setMessages] = useState(saved.messages || []);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
@@ -400,7 +401,7 @@ export default function AgentWorkspace() {
       setMessages(d.messages || []);
       setBuiltHtml(d.html || null);
       setSession(d.session || null);
-      if (d.model) setModel(d.model);
+      if (d.model && !params.get("model")) setModel(d.model);
       setPublishId(d.publish_id || null);
       setSavedSlug(d.slug || null);
       setSlugName(d.slug || "");
@@ -1049,11 +1050,14 @@ export default function AgentWorkspace() {
                     </div>
                   )}
                 </div>
-                <select value={model} onChange={(e) => setModel(e.target.value)} data-testid="workspace-model-select"
+                <select value={agentKey} onChange={(e) => { const k = e.target.value; navigate(`/chat?model=${AGENTS[k].model}&agent=${k}`); }}
+                  data-testid="workspace-model-select" title={`${agent.name} · ${agent.role}`}
                   className="rounded-md border px-3 py-1.5 font-mono text-[15px] outline-none" style={{ borderColor: T.border, background: T.inset, color: T.text }}>
-                  <option value="luchii-1b">✳ Luchii-1b</option>
-                  <option value="luchii-7b">✳ Luchii-7b</option>
-                  <option value="luchii-70b">✳ Luchii-70b</option>
+                  {Object.entries(AGENTS).map(([k, a]) => (
+                    <option key={k} value={k} data-testid={`workspace-agent-option-${k}`}>
+                      ✳ {a.name} · {a.model.replace("luchii", "Luchii")} — {a.role}
+                    </option>
+                  ))}
                   <option disabled>──────────</option>
                   <option value="frasberg-ai" disabled>◈ Frasberg — coming soon</option>
                   <option value="luchii-vision" disabled>✳ Luchii Earth 7 — coming soon</option>

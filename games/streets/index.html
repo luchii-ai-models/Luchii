@@ -767,11 +767,11 @@ document.addEventListener("keyup", e => keys[e.code] = false);
 const S = {
   running:false, inCar:false, carType:null,
   x:0, z:2, h:0, speed:0,
-  hp:100, cash:0, jacked:0, dist:0, wanted:0,
+  hp:100, cash:FWC.startCash ?? 0, jacked:0, dist:0, wanted:0,
   bustT:0, wantedT:0, dmgCd:0,
   hasBat:false, arsenal:{}, weapon:null, mission:null, missionT:6, blockT:0,
   missionsDone:0, fare:null,
-  debtDue:2500, debtT:240, pizza:null, pizzaCd:0, hitN:null, hitT:45,
+  debtDue:FWC.debtDue ?? 2500, debtT:FWC.debtTimer ?? 240, pizza:null, pizzaCd:0, hitN:null, hitT:45,
 };
 let player = makePed(); scene.add(player);
 let playerCar = null;
@@ -1635,7 +1635,7 @@ function updateDebt(dt) {
   const dp = document.getElementById("debtPill");
   if (dp) dp.textContent = `💰 FRANKIE'S CUT $${S.debtDue} · ${Math.max(0, Math.ceil(S.debtT))}s`;
   if (S.debtT > 0) return;
-  S.debtT = 240;
+  S.debtT = FWC.debtTimer ?? 240;
   if (S.cash >= S.debtDue) {
     S.cash -= S.debtDue;
     toast(`💰 FRANKIE COLLECTED $${S.debtDue} — "Nice doing business." NEXT CUT DUE`, "#ffd166");
@@ -1920,7 +1920,7 @@ function start() {
   npcs.forEach(n => scene.remove(n.mesh)); npcs.length = 0;
   if (playerCar) { scene.remove(playerCar); playerCar = null; }
   Object.assign(S, { running:true, inCar:false, carType:null, x:0, z:2, h:0, speed:0,
-    hp:100, cash:0, jacked:0, dist:0, wanted:0, bustT:0, wantedT:0, dmgCd:0,
+    hp:100, cash:FWC.startCash ?? 0, jacked:0, dist:0, wanted:0, bustT:0, wantedT:0, dmgCd:0,
     hasBat:false, arsenal:{}, weapon:null, mission:null, missionT:6, blockT:0,
     missionsDone:0, fare:null });
   roadblocks.forEach(b => scene.remove(b.mesh)); roadblocks.length = 0;

@@ -105,6 +105,15 @@ GAME_REGISTRY = [
         "controls": "WASD move · Mouse look",
         "engine": "",
     },
+    {
+        "id": "carjack",
+        "title": "Frasberg Carjack",
+        "genre": "Open World",
+        "description": "Frasberg City, open world. Vehicle physics, city traffic AI, pedestrians, carjacking, police chases, missions, dynamic weather and live multiplayer.",
+        "thumbnail": "/api/games/assets/backdrop-streets.jpg",
+        "controls": "WASD drive · F carjack · M map · Esc pause",
+        "engine": "",
+    },
 ]
 
 

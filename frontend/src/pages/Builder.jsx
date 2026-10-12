@@ -8,6 +8,7 @@ import Starfield from "../components/site/Starfield";
 import Seo from "../components/site/Seo";
 import Footer from "../components/site/Footer";
 import { motion } from "framer-motion";
+import GameEngineBuilder from "../components/builder/GameEngineBuilder";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -83,6 +84,7 @@ export default function Builder({ type = "website" }) {
   const navigate = useNavigate();
   const c = COPY[type];
   const [prompt, setPrompt] = useState("");
+  const [gameMode, setGameMode] = useState("engine");
   const [html, setHtml] = useState("");
   const [busy, setBusy] = useState(false);
   const [chars, setChars] = useState(0);
@@ -411,6 +413,21 @@ export default function Builder({ type = "website" }) {
           </p>
         </div>
 
+        {type === "game" && (
+          <div className="mt-8 flex justify-center" data-testid="game-mode-toggle">
+            <div className="inline-flex rounded-full border border-lux-border bg-lux-surface/70 p-1">
+              {[["engine", "Frasberg engines (WorldGraph)"], ["ai", "AI-written code (Frasberg server)"]].map(([m, label]) => (
+                <button key={m} type="button" onClick={() => setGameMode(m)} data-testid={`game-mode-${m}`}
+                  className={`rounded-full px-4 py-2 text-sm transition-colors ${gameMode === m ? "bg-lux-text font-600 text-lux-bg" : "text-lux-text2 hover:text-lux-text"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {type === "game" && gameMode === "engine" ? (
+          <GameEngineBuilder user={user} onSignIn={() => navigate(`/auth?mode=login&next=%2Fgame-builder`)} />
+        ) : (
         <div className="mt-10 grid gap-8 lg:grid-cols-[280px_1fr]">
           {/* Projects sidebar */}
           <aside data-testid="builder-projects-sidebar">
@@ -648,6 +665,7 @@ export default function Builder({ type = "website" }) {
             )}
           </div>
         </div>
+        )}
       </div>
 
       <ProGateModal open={proModal} onClose={() => setProModal(false)} />

@@ -28,7 +28,7 @@ function ChatRoute() {
   const [params] = useSearchParams();
   const agent = (params.get("agent") || "").toLowerCase();
   const workspaceAgents = ["architect", "builder", "reviewer", "debugger"];
-  return workspaceAgents.includes(agent) ? <AgentWorkspace /> : <Chat />;
+  return workspaceAgents.includes(agent) ? <AgentWorkspace key={agent} /> : <Chat />;
 }
 import Profile from "./pages/Profile";
 import Admin from "./pages/Admin";

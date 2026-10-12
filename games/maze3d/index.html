@@ -62,7 +62,7 @@ const lamp = new THREE.PointLight(0x6c63ff, 2, 14);
 scene.add(lamp);
 
 const CELL = 4;
-let SIZE = 9;
+let SIZE = FWC.startSize ?? 9;
 let grid = [], wallMeshes = [], beacon = null, beaconLight = null;
 
 function genMaze(n) {
@@ -136,10 +136,10 @@ function hud() {
   document.getElementById("level").textContent = level;
 }
 function start(reset) {
-  if (reset) { level = 1; SIZE = 9; }
+  if (reset) { level = 1; SIZE = FWC.startSize ?? 9; }
   buildMaze();
   player.pos.set(CELL, 1.6, CELL); player.yaw = Math.PI / 4;
-  timeLeft = 60 + SIZE * 4; hud();
+  timeLeft = Math.round((60 + SIZE * 4) * (FWC.timeMul ?? 1)); hud();
   ["start","win","lose"].forEach(id => document.getElementById(id).style.display = "none");
   running = true;
   document.body.requestPointerLock();

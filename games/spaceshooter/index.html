@@ -145,7 +145,7 @@ function makeBullet(vx, vy, dmg, color, homing) {
   scene.add(b); bullets.push(b);
 }
 
-let running = false, score = 0, lives = 3, wave = 1, cooldown = 0, invuln = 0;
+let running = false, score = 0, lives = FWC.lives ?? 3, wave = 1, cooldown = 0, invuln = 0;
 function hud() {
   document.getElementById("lives").textContent = lives + (shield ? " 🛡" : "");
   document.getElementById("score").textContent = score;
@@ -192,15 +192,15 @@ function applySector(w) {
 const bossTex = new THREE.TextureLoader().load("/api/games/assets/boss-alien.png");
 let boss = null;
 function spawnWave() {
-  if (wave % 5 === 0) { spawnBoss(); return; }
-  const rows = 2 + Math.min(wave, 4), cols = 6;
+  if (wave % (FWC.bossEvery ?? 5) === 0) { spawnBoss(); return; }
+  const rows = 2 + (FWC.extraRows ?? 0) + Math.min(wave, 4), cols = 6;
   for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
     const striker = wave >= 3 && Math.random() < 0.18;
     const e = striker
       ? new THREE.Mesh(new THREE.TetrahedronGeometry(0.8), new THREE.MeshStandardMaterial({ color: 0x22ccff, emissive: 0x003344 }))
       : new THREE.Mesh(new THREE.OctahedronGeometry(0.7), new THREE.MeshStandardMaterial({ color: 0xff3355, emissive: 0x440011 }));
     e.position.set((c - cols/2 + 0.5) * 2.6, 12 + r * 2.2, 0);
-    e.userData = { vx: 2 + wave * 0.4, hp: striker ? 1 : 1, type: striker ? "striker" : "basic", diving: false, r: 0.9 };
+    e.userData = { vx: (2 + wave * 0.4) * (FWC.enemySpeed ?? 1), hp: striker ? 1 : 1, type: striker ? "striker" : "basic", diving: false, r: 0.9 };
     scene.add(e); enemies.push(e);
   }
 }
@@ -273,7 +273,7 @@ function start() {
   [bullets, enemies, ebullets, powerups].forEach(arr => arr.forEach(o => scene.remove(o)));
   bullets = []; enemies = []; ebullets = []; powerups = []; boss = null;
   document.getElementById("bossbar").style.display = "none";
-  score = 0; lives = 3; wave = 1; weapon = 0; rapidTimer = 0; shield = 0; invuln = 0;
+  score = 0; lives = FWC.lives ?? 3; wave = FWC.startWave ?? 1; weapon = 0; rapidTimer = 0; shield = 0; invuln = 0;
   ship.position.set(0, -9, 0);
   hud();
   applySector(wave);
