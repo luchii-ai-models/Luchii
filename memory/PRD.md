@@ -231,3 +231,5 @@ Hardware reality of this pod: **2 CPU cores, no AVX2/bf16 hardware, ~6GB effecti
 - Fix: aws_gpu.py now pauses all AWS calls for 15 min after an auth error (AUTH_ERRORS, AUTH_BACKOFF_S). Before, it called AWS and logged a warning every 60s. ensure() and _short() now return a clear "AWS rejected the access key" reason.
 - Verified: Frasberg keys auth OK (/v1/models 200), Kaggle enabled, Nova-Muse draft ~60s cold. Tests: iteration_65 100%.
 - Backlog: S3 media storage (needs a valid AWS key). GridFS is still the media store.
+
+- 2026-10-12: Header wordmark changed from "Frasberg Creator" to "Frasberg" (Navbar plus the Gallery, Share, Generator and AuthModal headers). Page copy, hero and title unchanged.
