@@ -20,7 +20,8 @@ YUNET_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection
 # FFHQ 512 alignment template (left eye, right eye, nose, left mouth corner, right mouth corner in image space)
 TEMPLATE = np.array([[0.37691676, 0.46864664], [0.62285697, 0.46912813], [0.50123859, 0.61331904],
                      [0.39308822, 0.72541100], [0.61150205, 0.72490465]], np.float32) * 512
-BLEND = 0.85  # keep a little of the original skin texture
+BLEND = 0.7  # small faces: GFPGAN fixes eyes and teeth the 512px render could not draw
+MIN_BLEND = 0.25  # close-ups keep most of their own skin texture
 _lock = threading.Lock()
 _restorer = None
 
@@ -74,6 +75,26 @@ def _detect(bgr):
     return list(faces)
 
 
+def largest_face(img) -> int:
+    """Size in px of the biggest face in a PIL image (0 when none)."""
+    import cv2
+    try:
+        with _lock:
+            _load()
+            faces = _detect(cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR))
+        return int(max((max(f[2], f[3]) for f in faces), default=0))
+    except Exception:  # noqa: BLE001
+        logger.exception("Face detect failed")
+        return 0
+
+
+def _blend(face_px: float) -> float:
+    """GFPGAN restores at 512px: on bigger faces a full blend swaps real skin for a smooth, fake-looking face."""
+    if face_px <= 384:
+        return BLEND
+    return max(MIN_BLEND, BLEND * 384 / face_px)
+
+
 def restore_faces(img):
     """PIL in, PIL out. Faces smaller than 48px or no faces: returned unchanged."""
     import cv2
@@ -103,7 +124,7 @@ def restore_faces(img):
                 inv = cv2.invertAffineTransform(M)
                 back = cv2.warpAffine(fixed.astype(np.float32), inv, (w, h), flags=cv2.INTER_LANCZOS4,
                                       borderMode=cv2.BORDER_CONSTANT)
-                m = cv2.warpAffine(mask, inv, (w, h), flags=cv2.INTER_LINEAR)[..., None] * BLEND
+                m = cv2.warpAffine(mask, inv, (w, h), flags=cv2.INTER_LINEAR)[..., None] * _blend(max(f[2], f[3]))
                 out = out * (1 - m) + back * m
             if not faces:
                 return img

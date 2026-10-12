@@ -46,7 +46,7 @@ export default function AuthModal({ open, onOpenChange, defaultMode = "login" })
         <DialogHeader>
           <div className="flex items-center gap-2 mb-1">
             <img src={brand.logo} alt="Frasberg Creator logo" className="w-9 h-9 rounded-full object-contain" />
-            <span className="font-display text-lg font-bold">Frasberg Creator</span>
+            <span className="font-display text-lg font-bold">Frasberg</span>
           </div>
           <DialogTitle className="font-display text-2xl">
             {mode === "register" ? "Create your account" : "Welcome back"}

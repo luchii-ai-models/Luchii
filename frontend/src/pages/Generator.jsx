@@ -341,7 +341,7 @@ export default function Generator() {
         <div className="max-w-[1400px] mx-auto px-5 md:px-8 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <img src={brand.logo} alt="Frasberg Creator logo" className="w-9 h-9 rounded-full object-contain" />
-            <span className="font-display text-lg font-bold">Frasberg Creator</span>
+            <span className="font-display text-lg font-bold">Frasberg</span>
           </Link>
           <div className="flex items-center gap-4">
             {user && (

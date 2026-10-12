@@ -42,7 +42,7 @@ export default function Share() {
         <div className="max-w-[1100px] mx-auto px-5 md:px-8 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <img src={brand.logo} alt="Frasberg Creator logo" className="w-9 h-9 rounded-full object-contain" />
-            <span className="font-display text-lg font-bold">Frasberg Creator</span>
+            <span className="font-display text-lg font-bold">Frasberg</span>
           </Link>
           <Button onClick={() => navigate("/create")}
             className="bg-[#00F0FF] text-black hover:bg-[#00d4de] font-semibold rounded-full group">

@@ -44,6 +44,9 @@ AMI_NAME = "Deep Learning OSS Nvidia Driver AMI GPU PyTorch * (Ubuntu 24.04) *"
 SG_NAME = "frasberg-gpu-worker"
 EBS_GB_MONTH_USD = 0.08      # gp3 us-east-1, billed while the volume exists (also when the box is stopped)
 HOURLY_USD = {"g5.xlarge": 1.006, "g5.2xlarge": 1.212, "g6.xlarge": 0.805, "g6e.xlarge": 1.861, "g5.4xlarge": 1.624}
+AUTH_ERRORS = ("AuthFailure", "InvalidClientTokenId", "UnrecognizedClientException", "SignatureDoesNotMatch")
+AUTH_BACKOFF_S = 15 * 60
+_auth_fail_until = 0.0
 
 
 _settings: dict = {}
@@ -287,8 +290,10 @@ def _short(e: Exception) -> str:
     msg = str(e)
     if code in ("VcpuLimitExceeded", "InstanceLimitExceeded"):
         return "AWS GPU quota is too low (Running On-Demand G and VT instances). Waiting for the quota increase."
-    if code == "InsufficientInstanceCapacity":
+    if code in ("InsufficientInstanceCapacity",):
         return "AWS has no free g5 capacity in this region right now; retrying later."
+    if code in AUTH_ERRORS:
+        return "AWS rejected the access key; update AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
     return f"{code or e.__class__.__name__}: {msg[:220]}"
 
 
@@ -305,12 +310,20 @@ async def _save(gateway: str, **fields):
 async def instance(gateway: str, fresh: bool = False) -> Optional[dict]:
     name = name_for(gateway)
     hit = _cache.get(name)
+    global _auth_fail_until
     if hit and not fresh and time.monotonic() - hit[0] < STATUS_CACHE_S:
         return hit[1]
+    if time.monotonic() < _auth_fail_until:
+        return hit[1] if hit else None
     try:
         i = await asyncio.to_thread(_find_sync, name)
     except Exception as e:  # noqa: BLE001
-        log.warning("AWS describe failed: %s", e)
+        code = getattr(e, "response", {}).get("Error", {}).get("Code") if hasattr(e, "response") else None
+        if code in AUTH_ERRORS:
+            _auth_fail_until = time.monotonic() + AUTH_BACKOFF_S
+            log.warning("AWS credentials rejected (%s); pausing AWS calls for %ds", code, AUTH_BACKOFF_S)
+        else:
+            log.warning("AWS describe failed: %s", e)
         return hit[1] if hit else None
     info = None
     if i:
@@ -326,6 +339,8 @@ async def ensure(gateway: str, secret: str, reason: str) -> dict:
     """Make sure the GPU box exists and is running. Returns {"ok": bool, "action": ..., "reason": ...}."""
     if not enabled():
         return {"ok": False, "reason": "AWS GPU is not configured"}
+    if time.monotonic() < _auth_fail_until:
+        return {"ok": False, "reason": "AWS rejected the access key; update AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"}
     async with _lock:
         cur = await instance(gateway, fresh=True)
         try:

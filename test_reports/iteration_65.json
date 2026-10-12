@@ -1,0 +1,24 @@
+{
+  "summary": "Iter65 fresh-reimport smoke/regression after GitHub re-import of frasberg-secure-runtime. Backend: 10/10 pytest cases pass in test_iter65_smoke.py — JWT register/login + /api/auth/me for both admin and user; admin-only endpoints (/api/engines/status, /api/gpu-admin/overview, /api/gpu-admin/aws) return 200 for admin.tester@luchiiapp.com and 403 for test@luchii.ai; GET /api/gpu-admin/aws does NOT 500 despite invalid real AWS creds; POST /api/gpu-admin/aws/start exercises ensure() path and returns {ok: false, reason: 'AWS rejected the access key; update AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY'} as specified (new behaviour in aws_gpu.py AUTH_ERRORS handling + 15-min pause verified via backend log: 'AWS credentials rejected (AuthFailure); pausing AWS calls for 900s'); async T2I job POST /api/generate/jobs {quality:'draft', model:'Luchii Nova-Muse'} completes within ~60s on this CPU pod and returns image_base64. Frontend: all 8 routes (/, /create, /gallery, /video, /audio, /models, /3d, /sts) return 200 with zero console errors; /create UI end-to-end — logged in as test user via /api/auth/login, typed prompt, clicked Generate, image rendered and 'Image ready!' toast shown.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter65_smoke.py",
+    "/app/test_reports/pytest/iter65_smoke.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "aws_gpu.py: AUTH_ERRORS tuple + AUTH_BACKOFF_S=900s + _auth_fail_until monotonic gate correctly short-circuits both instance() and ensure() so admin endpoints never 500 on invalid creds; _short() returns the exact spec string 'AWS rejected the access key; update AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY' for all four AUTH_ERRORS codes.",
+    "overview() still invokes check_quota() which triggers _quota_sync and logs 'AWS quota check unavailable: ClientError' repeatedly in backend.err.log. Consider gating check_quota behind the same _auth_fail_until to silence the log spam while creds are known-invalid.",
+    "server.py is now 2165 lines — exceeds the 700-line guideline. Candidate split: image-jobs/, chat/, engines/, gpu-admin/ routers in separate modules.",
+    "/api/gpu-admin/aws does not surface the auth-rejection reason in its payload (error field remains null); only /aws/start exposes it. For admin UX it would help to add last_error to the overview payload when _auth_fail_until > now."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter65_smoke.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin.tester@luchiiapp.com / AdminTest123!; test@luchii.ai / Test1234!",
+  "seed_data_creation": "None (login-only; existing users).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: python -m pytest backend/tests/test_iter65_smoke.py -o addopts='' -v. The T2I draft job test currently has a 120s deadline — on this 2-4 CPU pod a first-boot generation took ~45-60s in our run but can spike to 90s+ under load, so do not parallelise with video/3D/music. AWS keys are invalid by design (frb_live key is InvalidClientTokenId); the test_gpu_admin_aws_reports_auth_rejection asserts /aws/start returns the controlled 'AWS rejected the access key' reason — if this ever starts failing with ok:true it means someone fixed the AWS keys and the test needs to be relaxed.",
+  "rca of the issue": "N/A — all tested behaviours pass."
+}
