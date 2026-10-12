@@ -232,6 +232,16 @@ def _to_jpeg_url(img, quality: int = 93) -> str:
 
 HD_SCALE = 4  # every 512px render is super-resolved (Luchii Prime compact, ~7s) to a crisp ~2K image
 SR_BLEND = 0.8  # keep 20% of the Lanczos image so skin and fabric keep natural texture
+PHOTO_SR_BLEND = 0.5  # photos: ESRGAN alone paints skin like wax, so keep half the natural upscale
+GRAIN = 2.2  # fine luminance grain, like a real camera sensor; stops skin looking airbrushed
+
+
+def _grain(img):
+    import numpy as np
+    from PIL import Image
+    a = np.asarray(img.convert("RGB")).astype(np.float32)
+    noise = np.random.default_rng().normal(0, GRAIN, a.shape[:2])[..., None]
+    return Image.fromarray(np.clip(a + noise, 0, 255).astype(np.uint8))
 
 
 def _hd(img, longest: Optional[int] = None, kind: str = "compact", faces: bool = False) -> str:
@@ -244,12 +254,12 @@ def _hd(img, longest: Optional[int] = None, kind: str = "compact", faces: bool =
         t0 = time.time()
         sr = luchii_sr.enhance(img, target, kind)
         soft = img.convert("RGB").resize(sr.size, Image.LANCZOS)
-        out = Image.blend(soft, sr, SR_BLEND)
+        out = Image.blend(soft, sr, PHOTO_SR_BLEND if faces else SR_BLEND)
         logger.info("Luchii Prime finish %.1fs -> %dx%d", time.time() - t0, *out.size)
         if faces:
             import luchii_face
             t0 = time.time()
-            out = luchii_face.restore_faces(out)
+            out = _grain(luchii_face.restore_faces(out))
             logger.info("Luchii Face Fix %.1fs", time.time() - t0)
         return _to_jpeg_url(out)
     except Exception:  # noqa: BLE001
@@ -717,13 +727,11 @@ def _photo_pipe():
         pipe.load_lora_weights(snapshot_download(PHOTO_LCM, cache_dir=cache))
         pipe.fuse_lora()
         pipe.unload_lora_weights()
-        # Speed: the full VAE decode alone took ~20s per image on this CPU; TAESD takes ~1s and the
-        # Luchii Prime finishing pass restores the fine detail. Linear layers run in bf16 (3-5x faster
-        # matmuls on this Neoverse-V2 CPU); convolutions and attention stay fp32, where bf16 is slow here.
-        from diffusers import AutoencoderTiny
-        pipe.vae = AutoencoderTiny.from_pretrained(snapshot_download(PHOTO_TINY_VAE, cache_dir=cache, allow_patterns=[
-            "config.json", "diffusion_pytorch_model.safetensors"]), torch_dtype=torch.float32)
-        del vae
+        # Pipelines decode with TAESD (~1s, edits stay fast). generate_photo decodes finals with the full VAE
+        # (_full_vae), which keeps pores, freckles and hair that TAESD smears into a plastic look.
+        global _full_vae
+        _full_vae = vae.to(memory_format=torch.channels_last)
+        pipe.vae = _tiny()
         _bf16_linears(pipe.unet)
         pipe.unet = pipe.unet.to(memory_format=torch.channels_last)
         pipe.set_progress_bar_config(disable=True)
@@ -743,15 +751,82 @@ def generate_photo(prompt: str, aspect: Optional[str] = "1:1", draft: bool = Fal
         pipe = _photo_pipe()
         gen = torch.Generator().manual_seed(int(seed)) if seed is not None else None
         detailed = prompt_tokens(prompt) >= DETAILED_TOKENS
-        img = pipe(**_prompt_args(pipe, prompt, PHOTO_NEGATIVE if detailed else None),
-                   num_inference_steps=PHOTO_DRAFT_STEPS if draft else PHOTO_STEPS,
-                   guidance_scale=DETAIL_GUIDANCE if detailed else 1.0, width=w, height=h, generator=gen).images[0]
+        lat = pipe(**_prompt_args(pipe, prompt, PHOTO_NEGATIVE if detailed else None),
+                   num_inference_steps=PHOTO_DRAFT_STEPS if draft else PHOTO_STEPS, output_type="latent",
+                   guidance_scale=DETAIL_GUIDANCE if detailed else 1.0, width=w, height=h, generator=gen).images
+        img = _decode(pipe, lat, full=False)
         if is_nsfw(img):  # re-render once with guidance, so the negative prompt (nude, topless...) really applies
-            img = pipe(**_prompt_args(pipe, prompt + SAFE_PROMPT, PHOTO_NEGATIVE), num_inference_steps=PHOTO_STEPS,
-                       guidance_scale=EDIT_GUIDANCE, width=w, height=h, generator=gen).images[0]
+            lat = pipe(**_prompt_args(pipe, prompt + SAFE_PROMPT, PHOTO_NEGATIVE), num_inference_steps=PHOTO_STEPS,
+                       guidance_scale=EDIT_GUIDANCE, width=w, height=h, generator=gen, output_type="latent").images
+            img = _decode(pipe, lat, full=False)
             if is_nsfw(img):
                 raise UnsafeImage()
-        return _hd(img, faces=True)
+        if not draft:
+            import luchii_face
+            if luchii_face.largest_face(img) >= HIRES_MIN_FACE:
+                img = _hires_pass(pipe, prompt, img, gen)
+            else:
+                img = _decode(pipe, lat, full=True)
+        return _hd(img, longest=2048, faces=True)
+
+
+_full_vae = None
+
+
+def _decode(pipe, lat, full: bool):
+    """Latents -> PIL. full=True uses the full SD VAE (fine skin and hair detail, ~20s at 512); else TAESD (~1s)."""
+    import torch
+    t0 = time.time()
+    with torch.no_grad():
+        if full:
+            x = _full_vae.decode(lat / _full_vae.config.scaling_factor).sample
+        else:
+            x = pipe.vae.decode(lat).sample
+    out = pipe.image_processor.postprocess(x, output_type="pil")[0]
+    logger.info("Luchii decode (%s) %.1fs", "full VAE" if full else "TAESD", time.time() - t0)
+    return out
+
+
+HIRES_SCALE = 1.25  # 512 -> 640: the photo engine paints real pores, lashes and hair at the larger size
+HIRES_STRENGTH = 0.35
+HIRES_STEPS = 6  # x strength -> 2 real denoise steps
+HIRES_FULL_DECODE = False  # full VAE at 768 costs ~65s on this CPU; TAESD at 768 keeps the new detail
+HIRES_MIN_FACE = 40  # px in the 512 render; people shots get the pass, landscapes and products skip it
+_tiny_vae = None
+
+
+def _tiny():
+    global _tiny_vae
+    if _tiny_vae is None:
+        import torch
+        from huggingface_hub import snapshot_download
+        from diffusers import AutoencoderTiny
+        _tiny_vae = AutoencoderTiny.from_pretrained(snapshot_download(PHOTO_TINY_VAE, cache_dir=str(PHOTO_MODELS_DIR), allow_patterns=[
+            "config.json", "diffusion_pytorch_model.safetensors"]), torch_dtype=torch.float32)
+    return _tiny_vae
+
+
+def _hires_pass(pipe, prompt: str, img, gen):
+    """Hi-res fix: re-render the upscaled image lightly so detail is generated, not smeared in by the upscaler."""
+    from PIL import Image
+    from diffusers import StableDiffusionImg2ImgPipeline
+    t0 = time.time()
+    big = img.resize((int(img.width * HIRES_SCALE) // 8 * 8, int(img.height * HIRES_SCALE) // 8 * 8), Image.LANCZOS)
+    import numpy as np
+    import torch
+    x = torch.from_numpy(np.asarray(big.convert("RGB"), dtype=np.float32) / 127.5 - 1).permute(2, 0, 1)[None]
+    with torch.no_grad():  # fast TAESD encode (same latent space); the full VAE still does the final decode
+        latents = _tiny().encode(x).latents  # TAESD latents are already in the scaled SD space
+    i2i = StableDiffusionImg2ImgPipeline(**pipe.components)
+    i2i.set_progress_bar_config(disable=True)
+    t1 = time.time()
+    lat = i2i(**_prompt_args(i2i, prompt + ", detailed skin texture, sharp eyes", None), image=latents,
+              strength=HIRES_STRENGTH, num_inference_steps=HIRES_STEPS, guidance_scale=1.0, generator=gen,
+              output_type="latent").images
+    logger.info("Luchii hi-res denoise %.1fs", time.time() - t1)
+    out = _decode(pipe, lat, full=HIRES_FULL_DECODE)
+    logger.info("Luchii hi-res pass %.1fs -> %dx%d", time.time() - t0, *out.size)
+    return out
 
 
 _cutout = None

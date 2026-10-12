@@ -1,0 +1,515 @@
+{
+ "frasberg-ex-prime": {
+  "generation_id": "c7e8cade-c079-4c9a-aee1-516ab127572e",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1750741921,
+  "prompt": "A majestic snow leopard on a misty mountain ridge at sunrise, ultra detailed fur, epic landscape",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T01:55:54Z"
+ },
+ "frasberg-titan-core": {
+  "generation_id": "3afc7e6a-0c2e-446c-b791-034b72fbdbcf",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1284884299,
+  "prompt": "Macro photo of an ornate antique pocket watch with brass gears and engraved details, rich texture",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T01:56:54Z"
+ },
+ "frasberg-apex-sphere": {
+  "generation_id": "aaae77a9-89ac-4096-adf1-1e99ff3cb8a9",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 37394542,
+  "prompt": "Portrait of a smiling young man in a denim jacket, natural window light, detailed face",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T01:58:12Z"
+ },
+ "frasberg-celestial-reactor": {
+  "generation_id": "c68ceb48-cc7a-4f09-ba70-c6306b097c71",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1475674137,
+  "prompt": "A lone astronaut walking through a neon-lit rainy city street at night",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T01:59:13Z"
+ },
+ "frasberg-nebula-x": {
+  "generation_id": "bd3e3dcc-ff53-4215-a285-38854d8b55ef",
+  "engine": "luchii-local",
+  "model": "Luchii Vision",
+  "seed": 1890714658,
+  "prompt": "Sleek futuristic concept car parked in a glass showroom, dramatic reflections",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:00:13Z"
+ },
+ "frasberg-motion-free": {
+  "generation_id": "a0849c7c-e685-4e38-bb4a-6954522e1416",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1606951655,
+  "prompt": "A surfer riding a huge turquoise wave, spray in the air, golden sunlight, action shot",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:01:13Z"
+ },
+ "frasberg-motion-fast": {
+  "generation_id": "41b106a0-9236-4124-9cdf-ff89430ac20e",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 937393029,
+  "prompt": "A red sports car speeding along a coastal highway at sunset, motion blur",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:02:14Z"
+ },
+ "frasberg-motion-pro": {
+  "generation_id": "ece082ee-8601-48f0-bfeb-94c4a3bc003d",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1794650605,
+  "prompt": "A woman in a flowing red dress dancing in a sunlit wheat field, detailed face",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:03:32Z"
+ },
+ "frasberg-motion-ultra": {
+  "generation_id": "0b6748f5-8a3b-485c-89f2-081becf118d4",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 61985844,
+  "prompt": "A massive spaceship rising above a desert canyon at dusk, dust clouds, epic scale",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:04:33Z"
+ },
+ "luchii-nova-muse": {
+  "generation_id": "644a82b0-a2d5-41d5-85ee-ec5c9767fb9d",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 2010440868,
+  "prompt": "Portrait of a woman with curly red hair and freckles wearing a green knit sweater, soft daylight, detailed face",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:05:57Z"
+ },
+ "luchii-dreamline": {
+  "generation_id": "22fb3990-844b-4cb0-9691-f5fa28aaa07a",
+  "engine": "luchii-local",
+  "model": "Luchii Dreamline",
+  "seed": 556758520,
+  "prompt": "Fantasy castle floating among pink clouds at sunset, vivid colors, dreamy illustration",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:06:57Z"
+ },
+ "luchii-vision": {
+  "generation_id": "f5a8bf9e-b696-403b-85b1-b042c11cd22a",
+  "engine": "luchii-local",
+  "model": "Luchii Vision",
+  "seed": 2054622937,
+  "prompt": "Colossal ancient temple in a jungle with glowing blue runes, dramatic composition",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:07:58Z"
+ },
+ "luchii-cinematica": {
+  "generation_id": "85a754f7-7157-4d03-8013-a00b777fdd72",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1484074450,
+  "prompt": "Wide shot of a vintage train crossing a stone bridge over a misty valley at dawn",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:08:58Z"
+ },
+ "luchii-animus": {
+  "generation_id": "1467f552-58ba-4dab-8130-a68cfa5b5e0e",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1751106159,
+  "prompt": "Close portrait of a woman with long dark hair blowing in the wind on a beach, golden hour, detailed face",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:10:17Z"
+ },
+ "luchii-harmonia": {
+  "generation_id": "3d65a280-ead6-4e43-becf-941e7850432f",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 750922037,
+  "prompt": "A glowing electric guitar on a concert stage with purple and blue spotlights and haze",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:11:17Z"
+ },
+ "luchii-sculpt-3d": {
+  "generation_id": "ce675257-919b-4e82-8681-856ad7d53316",
+  "engine": "luchii-local",
+  "model": "Luchii Vision",
+  "seed": 2041171628,
+  "prompt": "A cute ceramic robot figurine on a pastel studio backdrop, glossy materials",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:12:17Z"
+ },
+ "luchii-vocalist-prime": {
+  "generation_id": "a3a1992f-5cca-47ac-b056-11f11a6b1893",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 258613765,
+  "prompt": "A studio microphone with a pop filter in a recording booth, warm moody lighting",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:13:18Z"
+ },
+ "luchii-prime": {
+  "generation_id": "456dc4cf-7f94-4012-8ff6-3465e6184d95",
+  "engine": "luchii-local",
+  "model": "Luchii Prime",
+  "seed": null,
+  "prompt": "Upscaled",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:16:19Z"
+ },
+ "frasberg-ex-prime-2": {
+  "generation_id": "117deadf-91ef-4781-95f5-651b1c9fda43",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1131085974,
+  "prompt": "A red fox in a snowy birch forest, soft morning light, ultra detailed",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:17:19Z"
+ },
+ "frasberg-ex-prime-3": {
+  "generation_id": "0f07e2a3-0451-4e2b-b0ad-c397a717ee38",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1820182347,
+  "prompt": "Aerial view of turquoise lagoons and white sand islands, ultra detailed",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:18:20Z"
+ },
+ "frasberg-titan-core-2": {
+  "generation_id": "58660c89-2229-496a-a58e-42a0194be34d",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 817102053,
+  "prompt": "Macro photo of dew drops on a green leaf with intricate veins",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:19:20Z"
+ },
+ "frasberg-titan-core-3": {
+  "generation_id": "463d157a-b6e3-4d92-b9ed-d4a4a6e82102",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1977345886,
+  "prompt": "Close-up of a hand-carved wooden violin scroll, rich wood grain",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:20:20Z"
+ },
+ "frasberg-apex-sphere-2": {
+  "generation_id": "d89c4ba3-a10d-488e-9556-e8ed88946b22",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 799840407,
+  "prompt": "Portrait of an elderly man with a grey beard and kind eyes, window light, detailed face",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:21:39Z"
+ },
+ "frasberg-apex-sphere-3": {
+  "generation_id": "73d93331-f40d-45f8-9135-a4de43a42254",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1196250737,
+  "prompt": "Luxury perfume bottle on black marble, studio product shot",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:22:39Z"
+ },
+ "frasberg-celestial-reactor-2": {
+  "generation_id": "25e9aae0-4f29-4920-bb71-2692a2d06d19",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1308465614,
+  "prompt": "A detective in a trench coat under a street lamp in fog, film noir",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:23:58Z"
+ },
+ "frasberg-celestial-reactor-3": {
+  "generation_id": "684f6a3b-7f2f-49fc-a1b7-325496df9872",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 80462330,
+  "prompt": "A lighthouse on a cliff during a violent storm, crashing waves",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:25:04Z"
+ },
+ "frasberg-nebula-x-2": {
+  "generation_id": "5db2d868-29a8-49e8-a058-a80d040373e7",
+  "engine": "luchii-local",
+  "model": "Luchii Vision",
+  "seed": 1442749562,
+  "prompt": "Floating sci-fi city platform above clouds, glowing lights",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:26:04Z"
+ },
+ "frasberg-nebula-x-3": {
+  "generation_id": "15ea125d-b202-4047-b188-94188137a9e5",
+  "engine": "luchii-local",
+  "model": "Luchii Vision",
+  "seed": 1998500167,
+  "prompt": "Isometric cozy coffee shop interior, warm lights",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:27:05Z"
+ },
+ "frasberg-motion-free-2": {
+  "generation_id": "a4c16f50-cd87-41a2-8209-97c27b6b4114",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 295473334,
+  "prompt": "A hot air balloon drifting over green hills at sunrise",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:28:05Z"
+ },
+ "frasberg-motion-free-3": {
+  "generation_id": "23dffc69-4381-42cc-a75a-55d16146cda8",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 742056072,
+  "prompt": "A golden retriever running on a beach, splashing water",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:29:24Z"
+ },
+ "frasberg-motion-fast-2": {
+  "generation_id": "02d8a1d6-4d16-4927-98bc-fd7872630366",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 772911096,
+  "prompt": "A skateboarder mid-jump at a city skatepark at sunset",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:30:42Z"
+ },
+ "frasberg-motion-fast-3": {
+  "generation_id": "6eabe3d2-6239-46d6-b379-0551188cb4fc",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 415359542,
+  "prompt": "A waterfall in a lush rainforest, mist and sunbeams",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:31:42Z"
+ },
+ "frasberg-motion-pro-2": {
+  "generation_id": "40857b96-bee8-483a-a7aa-3741ad0c055a",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1769018405,
+  "prompt": "A man in a suit walking through a crowded Tokyo crossing at night, detailed face",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:33:13Z"
+ },
+ "frasberg-motion-pro-3": {
+  "generation_id": "52405526-353e-4f8b-8ee8-a211b3a39c52",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1726979311,
+  "prompt": "Horses galloping across a misty meadow at dawn",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:34:13Z"
+ },
+ "frasberg-motion-ultra-2": {
+  "generation_id": "de4eb7dc-63c1-4a97-b86e-c47015088930",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1883294919,
+  "prompt": "A giant whale swimming through clouds above a city at sunset",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:35:14Z"
+ },
+ "frasberg-motion-ultra-3": {
+  "generation_id": "dc2f867e-4d98-4286-9b88-10a03a427da7",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 572336790,
+  "prompt": "A volcano erupting at night with glowing lava rivers",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:36:14Z"
+ },
+ "luchii-nova-muse-2": {
+  "generation_id": "d8803cd6-b18c-4ef4-9f51-da0b8d749cf3",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 159828607,
+  "prompt": "Portrait of a young Black woman with braids wearing gold earrings, studio light, detailed face",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:37:32Z"
+ },
+ "luchii-nova-muse-3": {
+  "generation_id": "62e2084f-0175-4cf1-94e2-7493549d9b53",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1016585769,
+  "prompt": "A cozy cabin in a snowy pine forest at dusk, warm glowing windows",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:38:33Z"
+ },
+ "luchii-dreamline-2": {
+  "generation_id": "0263db4f-bd4a-4c2a-8401-0a61045651c3",
+  "engine": "luchii-local",
+  "model": "Luchii Dreamline",
+  "seed": 597234143,
+  "prompt": "Anime girl with blue hair standing in a field of sunflowers, vibrant colors",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:39:51Z"
+ },
+ "luchii-dreamline-3": {
+  "generation_id": "73d01801-182c-4fc0-988d-8580e0c9c2da",
+  "engine": "luchii-local",
+  "model": "Luchii Dreamline",
+  "seed": 892770947,
+  "prompt": "Watercolor painting of a Venice canal with gondolas",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:40:52Z"
+ },
+ "luchii-vision-2": {
+  "generation_id": "77df9d6d-5a27-477b-b1a2-790542122b3b",
+  "engine": "luchii-local",
+  "model": "Luchii Vision",
+  "seed": 1893776523,
+  "prompt": "Concept art of a steampunk airship port in the sky",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:41:52Z"
+ },
+ "luchii-vision-3": {
+  "generation_id": "1af5251f-dddb-4f9c-b966-d0723cfeadae",
+  "engine": "luchii-local",
+  "model": "Luchii Vision",
+  "seed": 1411364771,
+  "prompt": "Concept art of a crystal cave with a glowing underground lake",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:42:52Z"
+ },
+ "luchii-cinematica-2": {
+  "generation_id": "a4ca3899-3cf1-41eb-b6ba-4f9bbcf0c3cd",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 598476527,
+  "prompt": "A cowboy riding through a desert canyon at golden hour",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:44:17Z"
+ },
+ "luchii-cinematica-3": {
+  "generation_id": "2a24f2d2-cc9d-4681-8d03-69a30529f555",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 93211125,
+  "prompt": "A neon-lit night market in Hong Kong, rain reflections",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:45:41Z"
+ },
+ "luchii-animus-2": {
+  "generation_id": "591f565d-31e6-4a7d-8e87-03772fa78b16",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 893639635,
+  "prompt": "Portrait of a man with wind-blown hair on a mountain top, detailed face",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:47:00Z"
+ },
+ "luchii-animus-3": {
+  "generation_id": "54cb1385-1272-409e-bde0-da294b4b646f",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1121425600,
+  "prompt": "A cat sitting on a windowsill with rain outside, soft light",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:48:00Z"
+ },
+ "luchii-harmonia-2": {
+  "generation_id": "22977c9d-c8d7-44fb-99dd-5e2a8cbda404",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 720542123,
+  "prompt": "A grand piano in an empty concert hall with a single spotlight",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:49:00Z"
+ },
+ "luchii-harmonia-3": {
+  "generation_id": "d760aa33-b1b9-42e3-ac39-84ad8050e742",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 38653673,
+  "prompt": "A DJ booth with glowing vinyl turntables and crowd lights",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T02:50:13Z"
+ },
+ "luchii-painter-x": {
+  "generation_id": "38a392b3-0a07-4b41-a614-54046df95550",
+  "engine": "luchii-local",
+  "model": "Luchii Painter-X",
+  "seed": null,
+  "prompt": "change the background to a snowy winter forest and give her a red wool coat",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T03:02:02Z"
+ },
+ "luchii-sculpt-3d-2": {
+  "generation_id": "0558f6c5-e498-403e-a358-5577dd0855e2",
+  "engine": "luchii-local",
+  "model": "Luchii Vision",
+  "seed": 859104345,
+  "prompt": "A low poly fox figurine on a white pedestal",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T03:03:21Z"
+ },
+ "luchii-sculpt-3d-3": {
+  "generation_id": "dcd27ef5-23b0-4fb7-8b5d-d3ffa3110ac6",
+  "engine": "luchii-local",
+  "model": "Luchii Vision",
+  "seed": 1403200984,
+  "prompt": "A glossy toy spaceship model on a blue backdrop",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T03:04:21Z"
+ },
+ "luchii-vocalist-prime-2": {
+  "generation_id": "4462721f-7529-49ff-8b3b-a9dff77e32b0",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 1180579852,
+  "prompt": "A singer with headphones in a recording studio, warm light, detailed face",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T03:05:52Z"
+ },
+ "luchii-vocalist-prime-3": {
+  "generation_id": "50a9e2ef-39d1-4192-95b1-049bf67c991c",
+  "engine": "luchii-local",
+  "model": "Luchii Nova-Muse",
+  "seed": 424423419,
+  "prompt": "Vintage radio on a wooden table, warm nostalgic light",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T03:06:52Z"
+ },
+ "luchii-painter-x-2": {
+  "generation_id": "83e9d885-fc77-4b06-a59a-5af5293b6b18",
+  "engine": "luchii-local",
+  "model": "Luchii Painter-X",
+  "seed": null,
+  "prompt": "Turn it into a watercolor painting",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T03:06:58Z"
+ },
+ "luchii-painter-x-3": {
+  "generation_id": "7223d062-717a-4a29-b96e-a0c11b2c81e1",
+  "engine": "luchii-local",
+  "model": "Luchii Painter-X",
+  "seed": null,
+  "prompt": "Make it a snowy winter night",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T03:07:41Z"
+ },
+ "luchii-prime-2": {
+  "generation_id": "04f89796-5030-46b7-aff8-67f10fae2a2a",
+  "engine": "luchii-local",
+  "model": "Luchii Prime",
+  "seed": null,
+  "prompt": "Upscaled",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T03:09:29Z"
+ },
+ "luchii-prime-3": {
+  "generation_id": "bace0b5e-8ca5-400d-9a67-30b7915d1292",
+  "engine": "luchii-local",
+  "model": "Luchii Prime",
+  "seed": null,
+  "prompt": "Upscaled",
+  "account": "admin.tester@luchiiapp.com",
+  "created_at": "2026-10-12T03:11:18Z"
+ }
+}

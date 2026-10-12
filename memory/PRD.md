@@ -233,3 +233,12 @@ Hardware reality of this pod: **2 CPU cores, no AVX2/bf16 hardware, ~6GB effecti
 - Backlog: S3 media storage (needs a valid AWS key). GridFS is still the media store.
 
 - 2026-10-12: Header wordmark changed from "Frasberg Creator" to "Frasberg" (Navbar plus the Gallery, Share, Generator and AuthModal headers). Page copy, hero and title unchanged.
+- 2026-10-12: **Natural faces (photo engine).** Faces used to look waxy and airbrushed. The cause was TAESD decode + Real-ESRGAN at 0.8 + GFPGAN at 0.85 on a 512 render. Changes in local_engines.generate_photo:
+  - Latents are decoded with TAESD for a preview (safety check and face detection).
+  - Full-quality renders with a face of 40px or more get a hi-res pass (`_hires_pass`): 1.25x (640px) img2img, strength 0.35, 2 real steps, TAESD encode/decode, ~35s. It generates real pores, freckles and lashes.
+  - Renders without faces are decoded with the full sd-vae-ft-mse (`_full_vae`, ~20s).
+  - Photo SR blend is 0.5 (PHOTO_SR_BLEND), plus fine sensor grain (GRAIN 2.2).
+  - luchii_face blend now depends on face size: 0.7 for small faces, down to 0.25 for close-ups (`_blend`). Added `largest_face()`.
+  - Drafts and edits still use TAESD (pipe.vae). Timings: full people shots ~90s, drafts ~34s, region edits ~60s.
+- 2026-10-12: Models page images were re-created through the live job API while signed in as the admin (scripts/gen_model_images_admin.py, resumable, needs ADMIN_EMAIL/ADMIN_PASSWORD). Each image is a real generation in the admin's gallery. The proof is in frontend/public/models/manifest.json (generation_id, engine, seed, prompt, account, time).
+- Image routing is unchanged: Frasberg keys are tried first, and the in-house Luchii engine runs when Frasberg returns 502. Frasberg is then skipped for 10 min.
