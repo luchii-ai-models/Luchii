@@ -1,0 +1,30 @@
+{
+  "summary": "Iteration 60 — Frasberg Engine Runtime (/api/engines/*), engine rule enforcement, AWS GPU admin + spend tracker. Backend: 24/24 pytest green against the preview URL (TestEngineRuntime 10/10 incl. 44-engine execute-with-empty-and-sample loop + chain limits; TestEngineRules 1/1; TestEnforcement 5/5 incl. image-key denied for music 403 with 'music_generation' sentence, music-key default duration 15 verified on resulting job, bundle include=[] -> 422, image-only bundle -> 1 task; TestAwsAdmin 8/8 incl. non-admin 403, invalid idle 7 -> 422, invalid mode -> 422, usage month=2026-13 -> 422, future month projected_usd null, settings restored to {mode:always_on, idle_min:20}). Frontend /engines (signed-out): 44 engine-card-rt-* cards render, search 'struct' filters to 2, engine-open-structure -> engine-run-panel, engine-run-sample + engine-run-btn -> engine-run-result with engine-run-coverage '100%', chain motion+travel -> engine-chain-result (note: engine-chain-run button only mounts after at least one add — expected), 7 engine-rules-* cards present, footer-engines-link present, /developers signed-out gate shows api-docs-gate-engines-link. Frontend /status as admin: aws-panel loads, aws-mode-always_on and aws-mode-on_demand both present; clicking on_demand reveals aws-idle-choices with aws-idle-10 et al; aws-spend-hours/compute/storage/total all render; aws-spend-month-previous toggles; engine-runtime cards also render on /status; always_on restored at end; mobile 390px shows no horizontal overflow (docW=390, viewW=390).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter60_engines_aws.py",
+    "/app/test_reports/pytest/iter60.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "backend/server.py is 1965 lines — exceeds the 700-line guideline. Consider splitting agent-tasks, engine-runtime proxy, gpu-admin and media-job routes into separate routers for maintainability.",
+    "AgentTaskIn.duration defaults to None at the task layer; the 5s/15s engine-rule defaults are only applied downstream in create_media_job via engine_rules.default_duration. The agent_tasks row therefore stores duration=None, which is correct per spec but could surprise an API consumer polling /api/chat/agents/tasks/{id} before dispatch; consider echoing the resolved duration on the task row too.",
+    "GET /api/engines/rules shape differs from a conventional list: top-level has {summary:[...], engines:{id:{...}}} (dict keyed by id). This is fine but should be documented in the /developers page so API consumers don't key off engines[0].",
+    "Chain state size limit 64KB is enforced correctly (413), but the error body is a short detail — consider including the observed size so callers can trim programmatically."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter60_engines_aws.py"
+  ],
+  "success_rate": { "backend": "100% (24/24)", "frontend": "100% — engines public page, status aws panel + spend + engine runtime, developers gate link, mobile no-overflow all green" },
+  "test_credentials": "admin.tester@luchiiapp.com / AdminTest123! (admin); plain.user@luchiiapp.com / Plain1234! (non-admin, created on-demand by test); X-Frasberg-Key image=frb_live_be3354..., music=frb_live_a0e8a8...",
+  "seed_data_creation": "Tests created 1 image agent-task (TEST tiny image), 1 music agent-task (TEST tiny loop) which spawned a music job (duration=15), and 1 image-only bundle (TEST tiny) with 1 image task. No cleanup — jobs are small and owner-scoped to the API-key platform account. AWS settings were restored to {mode: always_on, idle_min: 20} at the end of TestAwsAdmin.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All iteration-60 features (engine runtime, engine rules, rule enforcement on /api/chat/agents/tasks + bundle, AWS GPU admin settings + usage endpoints, /engines public page, /status aws-panel + spend tracker + engine-runtime embed) are 100% functional end-to-end. The preview backend has cold-start latency (~8s first request, occasional 502) — tests use urllib3 Retry(total=3, status_forcelist=[502,503,504]) + 60s timeout to tolerate it. engine-chain-run button only mounts after >=1 add — not a bug. engine-rules endpoint returns engines as a dict keyed by id (not a list). Music agent-task row stores duration=None; the 15s default is applied downstream when the music job is created (verified via /api/jobs/{job_id}). AWS quota is 0 (expected — not a bug). Do NOT call /api/gpu-admin/aws/start or /terminate.",
+  "rca of the issue": "N/A — no bugs found this iteration."
+}

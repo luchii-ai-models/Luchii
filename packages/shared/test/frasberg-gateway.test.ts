@@ -1,0 +1,410 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  FrasbergClient,
+  FrasbergGateway,
+  type FrasbergGatewayKeys,
+  resolveFrasbergEndpoints,
+  resolveFrasbergGatewayKeys,
+} from '../src/frasberg';
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+describe('FrasbergClient', () => {
+  it('uses the unified base URL and bearer authorization', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ ok: true }));
+    const client = new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch });
+
+    await client.request('POST', '/music', 'music-key', { prompt: 'hello' });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://frasberg.com/api/music',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          authorization: ['Bearer', 'music-key'].join(' '),
+        }),
+      }),
+    );
+  });
+
+  it('uses configured absolute endpoint URLs', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ ok: true }));
+    const client = new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch });
+
+    await client.request(
+      'POST',
+      'https://frasberg.com/api/generate/music',
+      'music-key',
+      { prompt: 'hello' },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://frasberg.com/api/generate/music',
+      expect.any(Object),
+    );
+  });
+
+  it('preserves multipart bodies and lets fetch set the boundary', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ text: 'test' }));
+    const client = new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch });
+    const form = new FormData();
+    form.append('file', new Blob(['audio'], { type: 'audio/wav' }), 'test.wav');
+
+    await client.request(
+      'POST',
+      'https://frasberg.com/api/voice/transcribe',
+      'stt-key',
+      form,
+    );
+
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe('https://frasberg.com/api/voice/transcribe');
+    expect(init.body).toBe(form);
+    const headers = new Headers(init.headers);
+    expect(headers.get('authorization')).toBe('Bearer stt-key');
+    expect(headers.has('content-type')).toBe(false);
+  });
+
+  it('retries transient edge errors on GET and then succeeds', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(
+        async () => new Response('<html>520</html>', { status: 520 }),
+      )
+      .mockImplementationOnce(async () =>
+        jsonResponse({ id: 'j', state: 'completed' }),
+      );
+    const sleepImpl = vi.fn(async () => undefined);
+    const client = new FrasbergClient({
+      fetchImpl: fetchImpl as typeof fetch,
+      sleepImpl,
+    });
+
+    await expect(client.request('GET', '/jobs/j', 'k')).resolves.toEqual({
+      id: 'j',
+      state: 'completed',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(sleepImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry POST on edge errors and reports status for non-JSON bodies', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('<html>520</html>', { status: 520 }),
+    );
+    const client = new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch });
+
+    await expect(
+      client.request('POST', '/tts', 'k', { text: 'hi' }),
+    ).rejects.toThrow(
+      'Frasberg request failed (520): non-JSON response from provider edge',
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops retrying GET after the bounded attempts', async () => {
+    const fetchImpl = vi.fn(async () => new Response('x', { status: 520 }));
+    const client = new FrasbergClient({
+      fetchImpl: fetchImpl as typeof fetch,
+      sleepImpl: async () => undefined,
+    });
+
+    await expect(client.request('GET', '/jobs/j', 'k')).rejects.toThrow(
+      '(520)',
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('FrasbergGateway', () => {
+  it('tracks job domain and uses domain-specific key for polling', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(async () =>
+        jsonResponse({ job_id: 'job-1', state: 'queued' }),
+      )
+      .mockImplementationOnce(async () =>
+        jsonResponse({ id: 'job-1', state: 'running' }),
+      );
+
+    const keys: FrasbergGatewayKeys = {
+      FRASBERG_MUSIC_KEY: 'music-key',
+      FRASBERG_MUSIC_ENGINE_KEY: 'music-engine-key',
+      FRASBERG_VIDEO_KEY: 'video-key',
+      FRASBERG_VIDEO_ENGINE_KEY: 'video-engine-key',
+      FRASBERG_IMAGE_KEY: 'image-key',
+      FRASBERG_VOICE_KEY: 'voice-key',
+      FRASBERG_STT_KEY: 'stt-key',
+      FRASBERG_TTS_KEY: 'tts-key',
+      FRASBERG_AUDIO_KEY: 'audio-key',
+    };
+    const gateway = new FrasbergGateway(
+      new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch }),
+      keys,
+    );
+
+    await gateway.music({ prompt: 'generate song' });
+    await gateway.job('job-1');
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://frasberg.com/api/music',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: ['Bearer', 'music-key'].join(' '),
+        }),
+      }),
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      'https://frasberg.com/api/jobs/job-1',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: ['Bearer', 'music-engine-key'].join(' '),
+        }),
+      }),
+    );
+  });
+
+  it('uses the video engine key for video job polling', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockImplementationOnce(async () =>
+        jsonResponse({ job_id: 'video-job', state: 'queued' }),
+      )
+      .mockImplementationOnce(async () =>
+        jsonResponse({ id: 'video-job', state: 'running' }),
+      );
+    const gateway = new FrasbergGateway(
+      new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch }),
+      {
+        FRASBERG_VIDEO_KEY: 'video-generation-key',
+        FRASBERG_VIDEO_ENGINE_KEY: 'video-engine-key',
+      },
+    );
+
+    await gateway.video({ prompt: 'generate video' });
+    await gateway.job('video-job');
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://frasberg.com/api/video',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: ['Bearer', 'video-generation-key'].join(' '),
+        }),
+      }),
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      'https://frasberg.com/api/jobs/video-job',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: ['Bearer', 'video-engine-key'].join(' '),
+        }),
+      }),
+    );
+  });
+
+  it('throws when a required domain key is missing', async () => {
+    const gateway = new FrasbergGateway(
+      new FrasbergClient({ fetchImpl: vi.fn() as unknown as typeof fetch }),
+      {},
+    );
+
+    await expect(gateway.video({ prompt: 'clip' })).rejects.toThrow(
+      'FRASBERG_VIDEO_KEY',
+    );
+  });
+
+  it('routes image and voice jobs through their domain-specific credentials', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ job_id: 'job-1', state: 'queued' }),
+    );
+    const gateway = new FrasbergGateway(
+      new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch }),
+      {
+        FRASBERG_IMAGE_KEY: 'image-key',
+        FRASBERG_VOICE_KEY: 'voice-key',
+      },
+    );
+
+    await gateway.image({ prompt: 'image' });
+    await gateway.voice({ prompt: 'voice' });
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://frasberg.com/api/image',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: 'Bearer image-key',
+        }),
+      }),
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      'https://frasberg.com/api/voice',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: 'Bearer voice-key',
+        }),
+      }),
+    );
+  });
+
+  it('forwards a Supabase user token for website-authenticated image jobs', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ job_id: 'image-user-job' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'image-user-job' }));
+    const gateway = new FrasbergGateway(
+      new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch }),
+      { FRASBERG_IMAGE_KEY: 'service-image-key' },
+      { image: 'https://frasberg.com/api/generate/image' },
+    );
+
+    await gateway.imageForUser(
+      { prompt: 'a track at sunset' },
+      'supabase-user-token',
+    );
+    await gateway.job('image-user-job', {
+      domain: 'image',
+      accessToken: 'supabase-user-token',
+    });
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://frasberg.com/api/generate/image',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: 'Bearer supabase-user-token',
+        }),
+      }),
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      'https://frasberg.com/api/jobs/image-user-job',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: 'Bearer supabase-user-token',
+        }),
+      }),
+    );
+  });
+
+  it('routes provider requests to configured domain endpoints', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ job_id: 'job-1', state: 'queued' }),
+    );
+    const gateway = new FrasbergGateway(
+      new FrasbergClient({ fetchImpl: fetchImpl as typeof fetch }),
+      {
+        FRASBERG_MUSIC_KEY: 'music-key',
+        FRASBERG_VIDEO_KEY: 'video-key',
+      },
+      {
+        music: 'https://frasberg.com/api/generate/music',
+        video: 'https://frasberg.com/api/generate/video',
+      },
+    );
+
+    await gateway.music({ prompt: 'music' });
+    await gateway.video({ prompt: 'video' });
+
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      1,
+      'https://frasberg.com/api/generate/music',
+      expect.any(Object),
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      'https://frasberg.com/api/generate/video',
+      expect.any(Object),
+    );
+  });
+
+  it('maps each consolidated provider key to its domain', () => {
+    const resolved = resolveFrasbergGatewayKeys({
+      FRASBERG_ENGINE_KEYS_JSON: JSON.stringify({
+        FRB_MUSIC_GENERATION_KEY: 'music-from-secret',
+        FRB_MUSIC_ENGINE_KEY: 'music-engine-from-secret',
+        FRB_IMAGE_VIDEO_GENERATION_KEY: 'image-video-from-secret',
+        FRB_VIDEO_ENGINE_KEY: 'video-engine-from-secret',
+        FRB_VOICE_CLONING_KEY: 'voice-from-secret',
+        FRB_GATEWAY_STT_KEY: 'stt-field',
+        FRB_GATEWAY_TTS_KEY: 'tts-field',
+        FRB_AUDIO_TOOLS_KEY: 'audio-tools-from-secret',
+      }),
+    } as NodeJS.ProcessEnv);
+
+    expect(resolved).toMatchObject({
+      FRASBERG_MUSIC_KEY: 'music-from-secret',
+      FRASBERG_MUSIC_ENGINE_KEY: 'music-engine-from-secret',
+      FRASBERG_VIDEO_KEY: 'image-video-from-secret',
+      FRASBERG_VIDEO_ENGINE_KEY: 'video-engine-from-secret',
+      FRASBERG_IMAGE_KEY: 'image-video-from-secret',
+      FRASBERG_VOICE_KEY: 'voice-from-secret',
+      FRASBERG_STT_KEY: 'stt-field',
+      FRASBERG_TTS_KEY: 'tts-field',
+      FRASBERG_AUDIO_KEY: 'audio-tools-from-secret',
+    });
+
+    expect(
+      resolveFrasbergGatewayKeys({
+        FRASBERG_ENGINE_KEYS_JSON: JSON.stringify({
+          FRB_MUSIC_GENERATION_KEY: 'music-from-secret',
+        }),
+        FRASBERG_MUSIC_KEY: 'music-override',
+      } as NodeJS.ProcessEnv).FRASBERG_MUSIC_KEY,
+    ).toBe('music-override');
+
+    const sharedImageVideo = resolveFrasbergGatewayKeys({
+      FRASBERG_ENGINE_KEYS_JSON: JSON.stringify({
+        FRB_IMAGE_VIDEO_GENERATION_KEY: 'shared-image-video-key',
+        FRB_VIDEO_ENGINE_KEY: 'video-polling-key',
+      }),
+    } as NodeJS.ProcessEnv);
+    expect(sharedImageVideo.FRASBERG_IMAGE_KEY).toBe('shared-image-video-key');
+    expect(sharedImageVideo.FRASBERG_VIDEO_KEY).toBe('shared-image-video-key');
+    expect(sharedImageVideo.FRASBERG_VIDEO_ENGINE_KEY).toBe('video-polling-key');
+  });
+
+  it('fails startup for malformed consolidated engine-key JSON', () => {
+    expect(() =>
+      resolveFrasbergGatewayKeys({
+        FRASBERG_ENGINE_KEYS_JSON: 'not-json',
+      } as NodeJS.ProcessEnv),
+    ).toThrow('FRASBERG_ENGINE_KEYS_JSON must contain valid JSON.');
+  });
+
+  it('maps configured route URLs to engine domains', () => {
+    expect(
+      resolveFrasbergEndpoints({
+        FRASBERG_VIDEO_URL: 'https://frasberg.com/api/generate/video',
+        FRASBERG_IMAGE_URL: 'https://frasberg.com/api/generate/image',
+        FRASBERG_MUSIC_URL: 'https://frasberg.com/api/generate/music',
+        FRASBERG_AUDIO_TOOLS_URL:
+          'https://frasberg.com/api/audio/tools/enhance',
+        FRASBERG_VOICE_CLONE_URL: 'https://frasberg.com/api/voice/clone',
+        FRASBERG_STT_URL: 'https://frasberg.com/api/voice/transcribe',
+        FRASBERG_TTS_URL: 'https://frasberg.com/api/voice/speak',
+      } as NodeJS.ProcessEnv),
+    ).toEqual({
+      music: 'https://frasberg.com/api/generate/music',
+      video: 'https://frasberg.com/api/generate/video',
+      image: 'https://frasberg.com/api/generate/image',
+      audio: 'https://frasberg.com/api/audio/tools/enhance',
+      voice: 'https://frasberg.com/api/voice/clone',
+      stt: 'https://frasberg.com/api/voice/transcribe',
+      tts: 'https://frasberg.com/api/voice/speak',
+    });
+  });
+});
