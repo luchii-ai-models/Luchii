@@ -85,3 +85,9 @@ android-sdk/
 **/.emergent/recordings/
 frontend/node_modules/.cache/default-development/1.pack
 backend/models/face/gfpgan_1.4.onnx
+.env
+.env.*
+*.env
+credentials.json
+*.key
+.credentials
