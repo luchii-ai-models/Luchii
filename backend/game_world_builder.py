@@ -10,6 +10,7 @@ The world is stored in the WorldGraph collection (same record shape, policy, con
 spaceshooter, carjack). The engine HTML is served with window.FRASBERG_WORLD injected + /api/games/assets/world.js,
 which exposes window.FWC (engine config) that each engine reads.
 """
+import asyncio
 import json
 import logging
 import os
@@ -47,6 +48,8 @@ ENGINES: Dict[str, Dict[str, Any]] = {
             "accel": ("Acceleration", 0.2, 1.5, 0.05, (0.4, 0.55, 0.85)),
             "trafficDensity": ("Traffic density", 0.1, 0.95, 0.05, (0.35, 0.55, 0.8)),
             "fogDensity": ("Fog", 0.0, 0.05, 0.001, (0.008, 0.012, 0.02)),
+            "laps": ("Race laps (0 = endless)", 0, 20, 1, (0, 0, 0)),
+            "lapLength": ("Lap length (m)", 1000, 10000, 250, (2500, 3000, 4000)),
         },
     },
     "streets": {
@@ -58,6 +61,7 @@ ENGINES: Dict[str, Dict[str, Any]] = {
             "startCash": ("Starting cash", 0, 10000, 50, (800, 0, 0)),
             "debtDue": ("Mob cut ($)", 500, 10000, 50, (1500, 2500, 4500)),
             "debtTimer": ("Cut timer (s)", 60, 600, 10, (320, 240, 150)),
+            "policeAggression": ("Police aggression", 0.25, 2.5, 0.05, (0.6, 1.0, 1.6)),
         },
     },
     "carjack": {
@@ -71,6 +75,7 @@ ENGINES: Dict[str, Dict[str, Any]] = {
             "maxSpeed": ("Car top speed", 120, 360, 5, (200, 220, 260)),
             "trafficCount": ("Traffic cars", 5, 80, 1, (20, 30, 45)),
             "npcCount": ("Pedestrians", 0, 80, 1, (20, 25, 35)),
+            "policeAggression": ("Police aggression", 0.25, 2.5, 0.05, (0.6, 1.0, 1.6)),
         },
     },
     "dungeon3d": {
@@ -110,9 +115,32 @@ ENGINES: Dict[str, Dict[str, Any]] = {
             "startSize": ("Maze size", 5, 19, 2, (7, 9, 13)),
             "timeMul": ("Time allowance", 0.4, 2.5, 0.05, (1.4, 1.0, 0.7)),
         },
+        "choices": {
+            "mazeTheme": ("Maze theme", ["neon", "ice", "lava", "jungle", "crypt", "desert", "gold"],
+                          ("neon", "neon", "neon")),
+        },
     },
 }
 ENGINE_ORDER = ["racer3d", "streets", "carjack", "dungeon3d", "spaceshooter", "maze3d"]
+# Words that name the engine itself outweigh setting words ("a maze in a crypt" is a maze, not a dungeon).
+CORE_WORDS = {
+    "racer3d": ["race", "racing", "racer", "laps"], "streets": ["mafia", "mob", "gang", "streets"],
+    "carjack": ["carjack", "gta", "heist"], "dungeon3d": ["dungeon", "fps"],
+    "spaceshooter": ["space shooter", "spaceship", "shmup", "invaders"], "maze3d": ["maze", "labyrinth"],
+}
+MAZE_THEME_WORDS = [
+    ("ice", ["ice", "icy", "frozen", "snow", "snowy", "winter", "glacier", "arctic"]),
+    ("lava", ["lava", "volcano", "volcanic", "fire", "inferno", "hell", "magma"]),
+    ("jungle", ["jungle", "forest", "vines", "garden", "overgrown", "hedge", "rainforest"]),
+    ("crypt", ["crypt", "tomb", "catacomb", "catacombs", "haunted", "spooky", "graveyard", "stone"]),
+    ("desert", ["desert", "sand", "sandy", "pyramid", "egypt", "egyptian", "dune", "dunes"]),
+    ("gold", ["gold", "golden", "treasure", "temple", "palace"]),
+    ("neon", ["neon", "cyber", "cyberpunk", "synth", "synthwave", "retro"]),
+]
+POLICE_WORDS = r"(?:police|cops?|lvmpd|swat|feds|sheriffs?|patrols?)"
+POLICE_HIGH = ["aggressive", "relentless", "ruthless", "brutal", "angry", "hardcore", "insane", "merciless",
+               "heavy", "swarming", "lots of", "tons of", "many", "crazy", "intense", "tough"]
+POLICE_LOW = ["lazy", "chill", "relaxed", "slow", "few", "weak", "sleepy", "passive", "light", "easy", "gentle"]
 DIFFICULTY_IDX = {"easy": 0, "normal": 1, "hard": 2}
 TIMES = ["dawn", "day", "dusk", "night"]
 WEATHERS = ["clear", "rain", "fog", "stormy", "heat_haze"]
@@ -133,7 +161,11 @@ NPC_ROLES = {
 }
 
 
-def _clamp(engine: str, key: str, value: Any) -> Optional[float]:
+def _clamp(engine: str, key: str, value: Any) -> Optional[Any]:
+    choice = ENGINES[engine].get("choices", {}).get(key)
+    if choice is not None:
+        v = str(value).strip().lower() if value is not None else ""
+        return v if v in choice[1] else None
     spec = ENGINES[engine]["tunables"].get(key)
     if spec is None:
         return None
@@ -161,7 +193,7 @@ def _score(text: str, words: List[str]) -> int:
 
 
 def pick_engine(text: str) -> str:
-    scores = {e: _score(text, ENGINES[e]["keywords"]) for e in ENGINE_ORDER}
+    scores = {e: _score(text, ENGINES[e]["keywords"]) + 2 * _hits(text, CORE_WORDS.get(e, [])) for e in ENGINE_ORDER}
     best = max(ENGINE_ORDER, key=lambda e: (scores[e], -ENGINE_ORDER.index(e)))
     if scores[best] == 0:
         if _hits(text, ["car", "cars", "drive", "driving", "vehicle"]):
@@ -223,6 +255,28 @@ def _money(text: str) -> Optional[int]:
     return int(m.group(1).replace(",", "")) if m else None
 
 
+def _maze_theme(text: str) -> Optional[str]:
+    for theme, words in MAZE_THEME_WORDS:
+        if _hits(text, words):
+            return theme
+    return None
+
+
+def _police_aggression(text: str) -> Optional[float]:
+    """Reads e.g. "aggressive cops", "relentless police", "lazy cops", "no police", "police aggression 1.8"."""
+    m = re.search(rf"{POLICE_WORDS}\s*aggression\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)", text)
+    if m:
+        return float(m.group(1))
+    if re.search(rf"\b(?:no|zero|without)\s+{POLICE_WORDS}\b", text):
+        return 0.25
+    for words, value in ((POLICE_HIGH, 1.9), (POLICE_LOW, 0.5)):
+        alt = "|".join(re.escape(w) for w in words)
+        if re.search(rf"\b(?:{alt})\s+(?:\w+\s+)?{POLICE_WORDS}\b", text) or \
+                re.search(rf"\b{POLICE_WORDS}\s+(?:are|is|that are|who are)?\s*(?:very\s+|super\s+|really\s+)?(?:{alt})\b", text):
+            return value
+    return None
+
+
 def _title(prompt: str, engine: str, tod: Optional[str]) -> str:
     m = re.search(r"[\"“']([^\"”']{3,48})[\"”']", prompt) or \
         re.search(r"\b(?:called|named|titled)\s+([A-Z0-9][\w' \-]{2,40}?)(?:[.,;!]|\s+(?:where|with|that|in|on)\b|$)", prompt)
@@ -239,9 +293,15 @@ def plan_from_rules(prompt: str, engine_hint: Optional[str] = None) -> Dict[str,
     tod, weather = _time_of_day(text), _weather(text)
     idx = DIFFICULTY_IDX[diff]
     cfg: Dict[str, Any] = {k: spec[4][idx] for k, spec in ENGINES[engine]["tunables"].items()}
+    cfg.update({k: spec[2][idx] for k, spec in ENGINES[engine].get("choices", {}).items()})
     colors = _colors(text)
     laps = _number_before(text, ["laps?"])
     if engine == "racer3d":
+        if laps:
+            cfg["laps"] = laps
+        km = re.search(r"(\d+(?:\.\d+)?)\s*(?:km|kilometers?|kilometres?)\s*(?:laps?|track|circuit)", text)
+        if km:
+            cfg["lapLength"] = float(km.group(1)) * 1000
         if colors:
             cfg["trafficColors"] = colors
         if weather == "fog":
@@ -269,10 +329,16 @@ def plan_from_rules(prompt: str, engine_hint: Optional[str] = None) -> Dict[str,
         mins = _number_before(text, ["minutes?", "mins?"])
         if mins:
             cfg["timeMul"] = max(0.4, min(2.5, (mins * 60) / 96))
+        theme = _maze_theme(text)
+        if theme:
+            cfg["mazeTheme"] = theme
     elif engine == "streets":
         cash = _money(text)
         if cash is not None:
             cfg["startCash"] = cash
+        agg = _police_aggression(text)
+        if agg is not None:
+            cfg["policeAggression"] = agg
     elif engine == "carjack":
         cash = _money(text)
         if cash is not None:
@@ -284,8 +350,11 @@ def plan_from_rules(prompt: str, engine_hint: Optional[str] = None) -> Dict[str,
         n = _number_before(text, ["cars", "traffic"])
         if n:
             cfg["trafficCount"] = n
+        agg = _police_aggression(text)
+        if agg is not None:
+            cfg["policeAggression"] = agg
     for k in list(cfg):
-        if k in ENGINES[engine]["tunables"]:
+        if k in ENGINES[engine]["tunables"] or k in ENGINES[engine].get("choices", {}):
             cfg[k] = _clamp(engine, k, cfg[k])
     return {"engine": engine, "difficulty": diff, "time_of_day": tod, "weather": weather, "config": cfg,
             "title": _title(prompt, engine, tod), "tagline": ENGINES[engine]["description"], "laps": laps,
@@ -297,14 +366,24 @@ FRASBERG_SYSTEM = (
     "You are the Frasberg Game Builder planner. You never write code. Given a game idea and the rule-based plan, "
     "return ONLY a JSON object with optional keys: title (<=40 chars), tagline (<=110 chars), engine (one of "
     + ", ".join(ENGINE_ORDER) + "), difficulty (easy|normal|hard), time_of_day (dawn|day|dusk|night), "
-    "weather (clear|rain|fog|stormy|heat_haze), config (object of numeric engine settings from the plan's keys)."
+    "weather (clear|rain|fog|stormy|heat_haze), config (object of engine settings using ONLY the plan's config keys; "
+    "numbers for numeric settings, mazeTheme one of neon|ice|lava|jungle|crypt|desert|gold)."
 )
+
+
+# Last result of a call to the owner's Frasberg server (shown on the Game Builder status pill).
+UPSTREAM_STATE: Dict[str, Any] = {"reachable": None, "status": None, "detail": "not checked yet", "checked_at": None}
+
+
+def _mark_upstream(reachable: bool, status: Optional[int], detail: str) -> None:
+    UPSTREAM_STATE.update({"reachable": reachable, "status": status, "detail": detail[:200], "checked_at": _now_ms()})
 
 
 async def frasberg_complete(system: str, user_text: str, timeout: float = 12.0, max_tokens: int = 600) -> Optional[str]:
     url = os.environ.get("LUCHII_UPSTREAM_URL", "").strip()
     key = os.environ.get("LUCHII_UPSTREAM_API_KEY", "").strip()
     if not url or not key:
+        _mark_upstream(False, None, "LUCHII_UPSTREAM_URL / LUCHII_UPSTREAM_API_KEY not set")
         return None
     if url.rstrip("/").endswith("/v1/chat"):
         url = url.rstrip("/") + "/completions"
@@ -317,10 +396,15 @@ async def frasberg_complete(system: str, user_text: str, timeout: float = 12.0, 
                                                 {"role": "user", "content": user_text}]})
         if r.status_code >= 400:
             logger.info("Frasberg server returned %s for game builder", r.status_code)
+            hint = " (blocked by Cloudflare)" if r.status_code == 403 and "cloudflare" in r.text.lower() else ""
+            _mark_upstream(False, r.status_code, f"HTTP {r.status_code}{hint}")
             return None
-        return r.json()["choices"][0]["message"]["content"]
+        content = r.json()["choices"][0]["message"]["content"]
+        _mark_upstream(True, r.status_code, "online")
+        return content
     except Exception as e:  # noqa: BLE001
         logger.info("Frasberg server unreachable for game builder: %s", str(e)[:160])
+        _mark_upstream(False, None, f"unreachable: {type(e).__name__}")
         return None
 
 
@@ -379,7 +463,9 @@ def build_world(prompt: str, plan: Dict[str, Any]) -> Dict[str, Any]:
          "children": [], "actions": []},
     ] + [
         {"id": f"npc-{role}", "type": "npc.group", "props": {"role": role, "label": label,
-                                                             **({"count": npc_counts[role]} if npc_counts.get(role) else {})},
+                                                             **({"count": npc_counts[role]} if npc_counts.get(role) else {}),
+                                                             **({"aggression": cfg["policeAggression"]}
+                                                                if role == "police" and "policeAggression" in cfg else {})},
          "children": [], "actions": []}
         for role, label in NPC_ROLES.get(engine, [])
     ]
@@ -397,11 +483,14 @@ def build_world(prompt: str, plan: Dict[str, Any]) -> Dict[str, Any]:
         "vehicleClasses": [], "nodes": [], "status": "active",
     }
     if engine == "racer3d":
-        world["track"] = {"id": "track-main", "name": f"{plan['title']} Circuit", "lengthMeters": 4800,
+        world["track"] = {"id": "track-main", "name": f"{plan['title']} Circuit",
+                          "lengthMeters": int(cfg.get("lapLength") or 3000),
                           "surface": "asphalt", "sectors": 3}
         world["vehicleClasses"] = [{"id": "vc-hyper", "name": "Hyper EV", "horsepower": int(cfg["maxSpeed"] * 9),
                                     "drivetrain": "awd", "tags": ["player"]}]
-        world["raceRuleset"] = {"id": "rules-main", "name": "Endless overtake", "lapCount": plan.get("laps") or 1,
+        n_laps = int(cfg.get("laps") or 0)
+        world["raceRuleset"] = {"id": "rules-main", "name": f"{n_laps}-lap race" if n_laps else "Endless overtake",
+                                "lapCount": n_laps or 1,
                                 "rollingStart": True, "allowedVehicleClassIds": ["vc-hyper"]}
     elif engine == "carjack":
         world["vehicleClasses"] = [{"id": "vc-player", "name": cfg.get("carName") or "Frasberg GT",
@@ -432,8 +521,15 @@ def _engine_public(eid: str) -> dict:
     e = ENGINES[eid]
     return {"id": eid, "title": e["title"], "genre": e["genre"], "description": e["description"],
             "thumbnail": f"/games-thumbs/{eid}.jpg" if eid != "carjack" else "/api/games/assets/backdrop-streets.jpg",
-            "tunables": [{"key": k, "label": s[0], "min": s[1], "max": s[2], "step": s[3],
-                          "default": s[4][1]} for k, s in e["tunables"].items()]}
+            "tunables": [{"key": k, "type": "range", "label": s[0], "min": s[1], "max": s[2], "step": s[3],
+                          "default": s[4][1]} for k, s in e["tunables"].items()] +
+                        [{"key": k, "type": "select", "label": s[0], "options": s[1], "default": s[2][1]}
+                         for k, s in e.get("choices", {}).items()]}
+
+
+def _cover(engine: Optional[str]) -> str:
+    name = "streets" if engine in ("carjack", None) or engine not in ENGINES else engine
+    return f"/api/games/assets/backdrop-{name}.jpg"
 
 
 def _record_out(doc: dict) -> dict:
@@ -443,8 +539,45 @@ def _record_out(doc: dict) -> dict:
             "engine_title": ENGINES.get(m.get("engine"), {}).get("title"), "tagline": m.get("tagline"),
             "difficulty": m.get("difficulty"), "enriched_by": m.get("enrichedBy"), "config": m.get("engineConfig") or {},
             "environment": m.get("environment") or {}, "prompt": m.get("prompt"), "world": w,
-            "play_url": f"/api/game-builder/worlds/{w['id']}/play",
+            "play_url": f"/api/game-builder/worlds/{w['id']}/play", "share_path": f"/g/{w['id']}",
+            "cover_url": _cover(m.get("engine")), "plays": doc.get("plays", 0),
             "created_at": doc.get("created_at"), "updated_at": doc.get("updated_at")}
+
+
+@router.get("/frasberg-status")
+async def frasberg_status(refresh: bool = False):
+    """Is the owner's Frasberg server (LUCHII_UPSTREAM_URL) answering? Re-probes when stale (>60s) or refresh=1."""
+    stale = UPSTREAM_STATE["checked_at"] is None or _now_ms() - UPSTREAM_STATE["checked_at"] > 60_000
+    if refresh or stale:
+        await frasberg_complete("Reply with the single word: ok", "ping", timeout=8.0, max_tokens=5)
+    host = re.sub(r"^https?://([^/]+).*$", r"\1", os.environ.get("LUCHII_UPSTREAM_URL", "")) or None
+    return {**UPSTREAM_STATE, "host": host}
+
+
+@router.get("/public/{world_id}")
+async def public_world(world_id: str):
+    """Public share page data for one game world (no auth — the world id is the share secret)."""
+    doc = await db.worldgraph.find_one({"world.id": world_id, "world.kind": "game",
+                                        "world.metadata.createdWith": CREATED_WITH}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="World not found")
+    out = _record_out(doc)
+    engine = out["engine"]
+    spec = ENGINES.get(engine, {})
+    highlights = []
+    for k, v in (out["config"] or {}).items():
+        t = spec.get("tunables", {}).get(k) or spec.get("choices", {}).get(k)
+        if t:
+            highlights.append({"key": k, "label": t[0], "value": v})
+    owner = await db.users.find_one({"id": doc.get("owner_id")}, {"_id": 0, "name": 1})
+    creator = ((owner or {}).get("name") or "A Frasberg builder").split(" ")[0]
+    out.pop("world", None)
+    out.pop("prompt", None)
+    return {**out, "genre": spec.get("genre"), "highlights": highlights, "creator": creator,
+            "npc_groups": [c["props"].get("label") for c in doc["world"]["scenes"][0]["components"]
+                           if c.get("type") == "npc.group"],
+            "track": doc["world"].get("track"), "race_rules": doc["world"].get("raceRuleset"),
+            "vehicles": [v.get("name") for v in doc["world"].get("vehicleClasses") or []]}
 
 
 @router.get("/engines")
@@ -481,7 +614,26 @@ async def create_world(body: CreateWorldIn, user: dict = Depends(auth_module.get
     await _diagnostics_log(owner, "game-builder", {"op": "create", "world_id": world["id"], "engine": plan["engine"],
                                                    "enriched_by": plan.get("enriched_by")})
     await _audit(owner, "create", world["id"], {"key": None})
+    if plan.get("enriched_by") == "rules+frasberg":
+        # The Frasberg server is answering again: upgrade this owner's older rules-only worlds in the background.
+        task = asyncio.create_task(_refine_owner_backlog(owner))
+        _BG.add(task)
+        task.add_done_callback(_BG.discard)
     return _record_out(doc)
+
+
+_BG: set = set()
+
+
+async def _refine_owner_backlog(owner: str) -> None:
+    try:
+        docs = await db.worldgraph.find({"owner_id": owner, "world.metadata.createdWith": CREATED_WITH,
+                                         "world.metadata.enrichedBy": {"$ne": "rules+frasberg"}}, {"_id": 0}).to_list(20)
+        for d in docs:
+            if not await _refine_doc(owner, d) and UPSTREAM_STATE.get("reachable") is False:
+                break
+    except Exception:  # noqa: BLE001
+        logger.exception("background Frasberg refinement failed")
 
 
 @router.get("/worlds")
@@ -520,6 +672,9 @@ async def update_world(world_id: str, body: UpdateWorldIn, user: dict = Depends(
         for k, v in body.config.items():
             cv = _clamp(engine, k, v)
             if cv is None:
+                choice = ENGINES[engine].get("choices", {}).get(k)
+                if choice:
+                    raise HTTPException(status_code=400, detail=f"'{k}' must be one of: {', '.join(choice[1])}")
                 raise HTTPException(status_code=400, detail=f"Unknown setting '{k}' for {engine}")
             cfg[k] = cv
         sets["world.metadata.engineConfig"] = cfg
@@ -527,7 +682,16 @@ async def update_world(world_id: str, body: UpdateWorldIn, user: dict = Depends(
         for comp in comps:
             if comp["id"] == "engine":
                 comp["props"] = {**comp["props"], **cfg}
+            if comp["id"] == "npc-police" and "policeAggression" in cfg:
+                comp["props"] = {**comp["props"], "aggression": cfg["policeAggression"]}
         sets["world.scenes"] = w["scenes"]
+        if engine == "racer3d":
+            n_laps = int(cfg.get("laps") or 0)
+            if w.get("track"):
+                sets["world.track.lengthMeters"] = int(cfg.get("lapLength") or 3000)
+            if w.get("raceRuleset"):
+                sets["world.raceRuleset.lapCount"] = n_laps or 1
+                sets["world.raceRuleset.name"] = f"{n_laps}-lap race" if n_laps else "Endless overtake"
     if body.name and body.name.strip():
         sets["world.name"] = body.name.strip()[:60]
     if body.tagline is not None:
@@ -553,6 +717,58 @@ async def update_world(world_id: str, body: UpdateWorldIn, user: dict = Depends(
                                                    "fields": sorted(body.model_dump(exclude_none=True))})
     await _audit(owner, "update", world_id, {"key": None})
     return _record_out(await _owned(user, world_id))
+
+
+async def _refine_doc(owner: str, doc: dict) -> Optional[dict]:
+    """Re-run the Frasberg server refinement on a saved world, keeping the owner's current settings as the base."""
+    w = doc["world"]
+    m = w.get("metadata") or {}
+    prompt = m.get("prompt") or w.get("name") or ""
+    engine = m.get("engine")
+    plan = plan_from_rules(prompt, engine)
+    plan["config"] = {**plan["config"], **(m.get("engineConfig") or {})}
+    plan["title"], plan["tagline"] = w.get("name") or plan["title"], m.get("tagline") or plan["tagline"]
+    env = m.get("environment") or {}
+    plan["time_of_day"], plan["weather"] = env.get("time_of_day"), env.get("weather")
+    refined = await refine_with_frasberg(prompt, plan, engine_locked=True)
+    if refined.get("enriched_by") != "rules+frasberg":
+        return None
+    new_world = build_world(prompt, refined)
+    new_world["id"] = w["id"]
+    await db.worldgraph.update_one({"owner_id": owner, "world.id": w["id"]},
+                                   {"$set": {"world": new_world, "updated_at": _now_ms()}})
+    await _continuity_event(owner, "worldgraph.updated", w["id"])
+    await _diagnostics_log(owner, "game-builder", {"op": "refine", "world_id": w["id"], "enriched_by": "rules+frasberg"})
+    return await db.worldgraph.find_one({"owner_id": owner, "world.id": w["id"]}, {"_id": 0})
+
+
+@router.post("/worlds/refine-pending")
+async def refine_pending(user: dict = Depends(auth_module.get_current_user)):
+    """Re-check the Frasberg server for every world that was built from rules only."""
+    owner = user["id"]
+    await _policy_check(owner, "worldgraph.update")
+    docs = await db.worldgraph.find({"owner_id": owner, "world.metadata.createdWith": CREATED_WITH,
+                                     "world.metadata.enrichedBy": {"$ne": "rules+frasberg"}}, {"_id": 0}) \
+        .sort("updated_at", -1).to_list(20)
+    refined = 0
+    for d in docs:
+        if await _refine_doc(owner, d):
+            refined += 1
+        elif UPSTREAM_STATE.get("reachable") is False:
+            break  # server is down — stop instead of waiting on every world
+    return {"pending": len(docs), "refined": refined, "server": UPSTREAM_STATE}
+
+
+@router.post("/worlds/{world_id}/refine")
+async def refine_world(world_id: str, user: dict = Depends(auth_module.get_current_user)):
+    owner = user["id"]
+    await _policy_check(owner, "worldgraph.update")
+    doc = await _owned(user, world_id)
+    out = await _refine_doc(owner, doc)
+    if not out:
+        raise HTTPException(status_code=503, detail=f"Frasberg server is not answering yet ({UPSTREAM_STATE['detail']}) — "
+                                                    "your world keeps its rule-based settings.")
+    return _record_out(out)
 
 
 @router.delete("/worlds/{world_id}")

@@ -1,4 +1,6 @@
 // src/PoliceAI.js — Police chase system
+const aggression = () => ((typeof window !== 'undefined' && window.FWC) || {}).policeAggression ?? 1;
+
 export class PoliceAI {
   constructor() {
     this.units      = [];
@@ -17,7 +19,7 @@ export class PoliceAI {
     if (!this.active) { this.units = []; this.helicopter = null; return; }
     if (!player) return;
     // Spawn units based on wanted level
-    const targetCount = this.level * 2;
+    const targetCount = Math.max(1, Math.round(this.level * 2 * aggression()));
     while (this.units.length < targetCount) {
       this.units.push(this._spawnUnit(player));
     }
@@ -27,13 +29,13 @@ export class PoliceAI {
       const dy = player.y - unit.y;
       const dist = Math.hypot(dx, dy);
       if (dist > 5) {
-        unit.x += (dx / dist) * unit.speed * dt * 0.06;
-        unit.y += (dy / dist) * unit.speed * dt * 0.06;
+        unit.x += (dx / dist) * unit.speed * dt * 0.06 * aggression();
+        unit.y += (dy / dist) * unit.speed * dt * 0.06 * aggression();
         unit.angle = Math.atan2(dy, dx);
       }
       unit.sirenTimer += dt;
       // Close-range damage
-      if (dist < 28) this._emit('playerHit', 2 + this.level);
+      if (dist < 28) this._emit('playerHit', (2 + this.level) * aggression());
     }
     // Helicopter at wanted level 4+
     if (this.level >= 4 && !this.helicopter) {

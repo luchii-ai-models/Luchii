@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Loader2, Play, Trash2, Save, ExternalLink, Share2, Boxes, Wand2, ChevronDown } from "lucide-react";
+import { Loader2, Play, Trash2, Save, ExternalLink, Share2, Boxes, Wand2, ChevronDown, RefreshCw, Server, Link2 } from "lucide-react";
 import { toast } from "sonner";
 
 const BASE = process.env.REACT_APP_BACKEND_URL;
@@ -9,6 +9,9 @@ const TIMES = ["", "dawn", "day", "dusk", "night"];
 const WEATHERS = ["", "clear", "rain", "fog", "stormy", "heat_haze"];
 const EXAMPLES = [
   "A hard neon night street race with 3 laps and pink traffic",
+  "A 5-lap race on a 4 km circuit at sunset",
+  "Mob boss crime city with relentless cops",
+  "A frozen ice labyrinth in 2 minutes",
   "Steal cars and escape a police chase in the rain with $5000",
   "Alien invaders in deep space, boss every 3 waves, 7 lives",
   "A zombie dungeon with 12 enemies at midnight",
@@ -39,10 +42,43 @@ export default function GameEngineBuilder({ user, onSignIn }) {
   const [saving, setSaving] = useState(false);
   const [playKey, setPlayKey] = useState(0);
   const [showJson, setShowJson] = useState(false);
+  const [server, setServer] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const [refining, setRefining] = useState(false);
 
   useEffect(() => {
     api("/engines").then((d) => setEngines(d.engines || [])).catch(() => {});
+    api("/frasberg-status").then(setServer).catch(() => {});
   }, []);
+
+  async function recheck() {
+    setChecking(true);
+    try {
+      const st = await api("/frasberg-status?refresh=1");
+      setServer(st);
+      if (st.reachable && user) {
+        const r = await api("/worlds/refine-pending", { method: "POST" });
+        if (r.refined) { toast.success(`Frasberg server added detail to ${r.refined} world${r.refined > 1 ? "s" : ""}`); loadWorlds(); }
+        else toast.success("Frasberg server is online — new worlds get its detail");
+      } else if (!st.reachable) {
+        toast.error(`Frasberg server still offline (${st.detail})`);
+      }
+    } catch (e) { toast.error(e.message); } finally { setChecking(false); }
+  }
+
+  async function refine() {
+    if (!current) return;
+    setRefining(true);
+    try {
+      const w = await api(`/worlds/${current.id}/refine`, { method: "POST" });
+      toast.success("Frasberg server detail added");
+      open(w);
+      loadWorlds();
+    } catch (e) {
+      toast.error(e.message);
+      api("/frasberg-status").then(setServer).catch(() => {});
+    } finally { setRefining(false); }
+  }
 
   const loadWorlds = useCallback(async () => {
     if (!user) return;
@@ -79,7 +115,7 @@ export default function GameEngineBuilder({ user, onSignIn }) {
     setSaving(true);
     const numeric = {};
     const tun = engines.find((e) => e.id === current.engine)?.tunables || [];
-    tun.forEach((t) => { if (draft[t.key] !== undefined) numeric[t.key] = Number(draft[t.key]); });
+    tun.forEach((t) => { if (draft[t.key] !== undefined) numeric[t.key] = t.type === "select" ? draft[t.key] : Number(draft[t.key]); });
     try {
       const w = await api(`/worlds/${current.id}`, {
         method: "PATCH",
@@ -105,6 +141,7 @@ export default function GameEngineBuilder({ user, onSignIn }) {
   }
 
   const playSrc = current ? `${BASE}${current.play_url}` : "";
+  const sharePath = current ? current.share_path || `/g/${current.id}` : "";
   const tunables = current ? engines.find((e) => e.id === current.engine)?.tunables || [] : [];
 
   return (
@@ -168,6 +205,18 @@ export default function GameEngineBuilder({ user, onSignIn }) {
               {busy ? <Loader2 size={15} className="animate-spin" /> : <Boxes size={15} />} {busy ? "Building world…" : "Build world"}
             </button>
           </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px]" data-testid="frasberg-server-status">
+            <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 ${server?.reachable ? "border-emerald-500/50 text-emerald-400" : "border-amber-500/50 text-amber-400"}`}>
+              <Server size={12} />
+              <span data-testid="frasberg-server-state">
+                Frasberg server {server == null ? "…" : server.reachable ? "online — adds detail to plans" : `offline${server.detail ? ` (${server.detail})` : ""} — using keyword rules`}
+              </span>
+            </span>
+            <button type="button" onClick={recheck} disabled={checking} data-testid="frasberg-recheck-btn"
+              className="inline-flex items-center gap-1.5 rounded-full border border-lux-border px-3 py-1 text-lux-text2 hover:border-lux-accent hover:text-lux-text disabled:opacity-60">
+              <RefreshCw size={12} className={checking ? "animate-spin" : ""} /> Re-check
+            </button>
+          </div>
           <p className="mt-3 text-[13px] text-lux-text2">
             Your prompt becomes a WorldDefinition (scenes, NPC groups, track, vehicles, rules) saved to WorldGraph, then runs on a real Frasberg engine. No AI-written code.
           </p>
@@ -186,11 +235,20 @@ export default function GameEngineBuilder({ user, onSignIn }) {
                   <span className="rounded-full bg-lux-surface2 px-3 py-1 text-lux-text2">schema {current.world?.metadata?.schemaVersion}</span>
                 </div>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
+                {current.enriched_by !== "rules+frasberg" && (
+                  <button type="button" onClick={refine} disabled={refining} data-testid="engine-refine-btn"
+                    title="Ask the Frasberg server to add detail to this world"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-lux-border px-4 py-2 text-sm hover:border-lux-accent disabled:opacity-60">
+                    {refining ? <Loader2 size={14} className="animate-spin" /> : <Server size={14} />} Add server detail
+                  </button>
+                )}
+                <Link to={sharePath} data-testid="engine-share-page"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-lux-border px-4 py-2 text-sm hover:border-lux-accent"><Link2 size={14} /> Share page</Link>
                 <a href={playSrc} target="_blank" rel="noreferrer" data-testid="engine-open-full"
                   className="inline-flex items-center gap-1.5 rounded-full border border-lux-border px-4 py-2 text-sm hover:border-lux-accent"><ExternalLink size={14} /> Full screen</a>
                 <button type="button" data-testid="engine-share"
-                  onClick={() => { navigator.clipboard?.writeText(playSrc); toast.success("Play link copied"); }}
+                  onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}${sharePath}`); toast.success("Share link copied"); }}
                   className="inline-flex items-center gap-1.5 rounded-full border border-lux-border px-4 py-2 text-sm hover:border-lux-accent"><Share2 size={14} /> Share</button>
               </div>
             </div>
@@ -201,7 +259,15 @@ export default function GameEngineBuilder({ user, onSignIn }) {
             </div>
 
             <div className="mt-5 grid gap-4 sm:grid-cols-2" data-testid="engine-tunables">
-              {tunables.map((t) => (
+              {tunables.map((t) => t.type === "select" ? (
+                <label key={t.key} className="block text-[13px] text-lux-text2">{t.label}
+                  <select value={draft[t.key] ?? t.default} data-testid={`engine-tunable-${t.key}`}
+                    onChange={(e) => setDraft((d) => ({ ...d, [t.key]: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-lux-border bg-lux-surface px-3 py-2 text-sm capitalize text-lux-text">
+                    {t.options.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </label>
+              ) : (
                 <label key={t.key} className="block">
                   <span className="flex justify-between text-[13px] text-lux-text2">
                     <span>{t.label}</span><span className="font-mono text-lux-text" data-testid={`engine-tunable-value-${t.key}`}>{draft[t.key] ?? t.default}</span>

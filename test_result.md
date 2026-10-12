@@ -101,3 +101,28 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+user_problem_statement: "Frasberg Game Builder (engine-only). Iteration: (1) Frasberg server status + re-check/refine worlds, (2) public share page /g/:worldId with cover/title/Play, (3) more engine settings: racer laps/lapLength, police aggression (streets, carjack), maze themes."
+backend:
+  - task: "Game builder: frasberg-status, refine, refine-pending, public world, new tunables"
+    implemented: true
+    working: "NA"
+    file: "backend/game_world_builder.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "GET /api/game-builder/frasberg-status[?refresh=1]; POST /worlds/{id}/refine (503 while upstream offline); POST /worlds/refine-pending; GET /public/{id} (no auth); tunables laps/lapLength (racer3d), policeAggression (streets, carjack), mazeTheme select (maze3d)."
+frontend:
+  - task: "Share page /g/:worldId + builder status pill, refine, share page link, select tunables"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/pages/GameWorldShare.jsx, frontend/src/components/builder/GameEngineBuilder.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "new"

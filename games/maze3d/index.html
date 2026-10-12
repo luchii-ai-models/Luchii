@@ -46,8 +46,18 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
 <script>
+const MAZE_THEMES = {
+  neon:   { wall: 0x2a2a4e, floor: 0x1c1c30, fog: 0x0d0d1a, amb: 0x8888ff, lamp: 0x6c63ff, beacon: 0x44ffaa },
+  ice:    { wall: 0x9fd8ff, floor: 0xdff3ff, fog: 0xb8dcf0, amb: 0xcfe9ff, lamp: 0xffffff, beacon: 0x2266ff },
+  lava:   { wall: 0x3a1208, floor: 0x1a0603, fog: 0x2a0800, amb: 0xff6633, lamp: 0xff4400, beacon: 0xffd24a },
+  jungle: { wall: 0x2f5a24, floor: 0x3b2a16, fog: 0x0f2410, amb: 0x99ff88, lamp: 0xd8ff99, beacon: 0xff66cc },
+  crypt:  { wall: 0x4a4440, floor: 0x24201c, fog: 0x0a0806, amb: 0xaa9977, lamp: 0xffaa55, beacon: 0x66ffee },
+  desert: { wall: 0xc9a46a, floor: 0xe0c48c, fog: 0xd8b880, amb: 0xffe0b0, lamp: 0xffcc77, beacon: 0x22ccff },
+  gold:   { wall: 0xb8892a, floor: 0x2a1e08, fog: 0x1a1204, amb: 0xffe08a, lamp: 0xffd24a, beacon: 0xff2d78 },
+};
+const MT = MAZE_THEMES[FWC.mazeTheme] || MAZE_THEMES.neon;
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x0d0d1a, 0.09);
+scene.fog = new THREE.FogExp2(MT.fog, 0.09);
 scene.background = null;
 const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 100);
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -57,8 +67,8 @@ addEventListener("resize", () => {
   camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
-scene.add(new THREE.AmbientLight(0x8888ff, 0.35));
-const lamp = new THREE.PointLight(0x6c63ff, 2, 14);
+scene.add(new THREE.AmbientLight(MT.amb, 0.35));
+const lamp = new THREE.PointLight(MT.lamp, 2, 14);
 scene.add(lamp);
 
 const CELL = 4;
@@ -90,7 +100,7 @@ function buildMaze() {
   wallMeshes.forEach(m => scene.remove(m)); wallMeshes = [];
   if (beacon) { scene.remove(beacon); scene.remove(beaconLight); }
   grid = genMaze(SIZE);
-  const wallMat = new THREE.MeshStandardMaterial({ color: 0x2a2a4e, roughness: 0.85 });
+  const wallMat = new THREE.MeshStandardMaterial({ color: MT.wall, roughness: 0.85 });
   const wallGeo = new THREE.BoxGeometry(CELL, 4, CELL);
   for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) {
     if (grid[y][x] === 1) {
@@ -100,16 +110,16 @@ function buildMaze() {
     }
   }
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(SIZE * CELL + 8, SIZE * CELL + 8),
-    new THREE.MeshStandardMaterial({ color: 0x1c1c30, roughness: 0.95 }));
+    new THREE.MeshStandardMaterial({ color: MT.floor, roughness: 0.95 }));
   floor.rotation.x = -Math.PI/2;
   floor.position.set(SIZE * CELL / 2, 0, SIZE * CELL / 2);
   scene.add(floor); wallMeshes.push(floor);
   // beacon at far corner
   beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 8, 16),
-    new THREE.MeshBasicMaterial({ color: 0x44ffaa, transparent: true, opacity: 0.7 }));
+    new THREE.MeshBasicMaterial({ color: MT.beacon, transparent: true, opacity: 0.7 }));
   beacon.position.set((SIZE-2) * CELL, 4, (SIZE-2) * CELL);
   scene.add(beacon);
-  beaconLight = new THREE.PointLight(0x44ffaa, 3, 20);
+  beaconLight = new THREE.PointLight(MT.beacon, 3, 20);
   beaconLight.position.copy(beacon.position);
   scene.add(beaconLight);
 }

@@ -2334,15 +2334,18 @@ function animate() {
       }
     }
     // ── police
-    while (police.length < S.wanted) spawnPolice();
-    while (police.length > S.wanted) { const p = police.pop(); scene.remove(p.mesh); }
+    const AGG = FWC.policeAggression ?? 1;            // Game Builder: police aggression multiplier
+    const copCap = S.wanted > 0 ? Math.max(1, Math.min(10, Math.round(S.wanted * AGG))) : 0;
+    while (police.length < copCap) spawnPolice();
+    while (police.length > copCap) { const p = police.pop(); scene.remove(p.mesh); }
     let anyClose = false;
     for (const p of police) {
       const want = Math.atan2(S.x - p.x, S.z - p.z);
       let diff = want - p.h;
       while (diff > Math.PI) diff -= Math.PI*2; while (diff < -Math.PI) diff += Math.PI*2;
-      p.h += Math.max(-(2.2 + (S.wanted >= 3 ? 0.8 : 0))*dt, Math.min((2.2 + (S.wanted >= 3 ? 0.8 : 0))*dt, diff));
-      const target = (S.inCar ? 24 : 12) + (S.wanted >= 3 ? 2.5 + S.wanted : 0);
+      const turn = (2.2 + (S.wanted >= 3 ? 0.8 : 0)) * AGG;
+      p.h += Math.max(-turn*dt, Math.min(turn*dt, diff));
+      const target = ((S.inCar ? 24 : 12) + (S.wanted >= 3 ? 2.5 + S.wanted : 0)) * (0.6 + 0.4 * AGG);
       p.speed += (target - p.speed) * 0.6 * dt;
       const px = p.x + Math.sin(p.h) * p.speed * dt, pz = p.z + Math.cos(p.h) * p.speed * dt;
       if (!hitsBuilding(px, pz, 1.2)) { p.x = px; p.z = pz; } else p.h += 1.5*dt;
@@ -2358,14 +2361,14 @@ function animate() {
         const ux = (S.x - p.x) / (d || 1), uz = (S.z - p.z) / (d || 1);
         S.x = p.x + ux * 2.8; S.z = p.z + uz * 2.8;
         if (S.dmgCd <= 0) {
-          S.hp -= 9; S.speed *= 0.5; S.dmgCd = 0.7;
+          S.hp -= 9 * AGG; S.speed *= 0.5; S.dmgCd = 0.7;
           crashFx(0.35);
           toast("⚠ POLICE RAM — GET OUT OF THERE", "#ff5555");
           window.LuchiiAudio && LuchiiAudio.sfx("crash", 0.5);
         }
       }
     }
-    if (anyClose && Math.abs(S.speed) < 4) { S.bustT += dt; if (S.bustT > 1.6) gameOver("BUSTED"); }
+    if (anyClose && Math.abs(S.speed) < 4) { S.bustT += dt; if (S.bustT > 1.6 / AGG) gameOver("BUSTED"); }
     // LVMPD officers actually shout at you
     copVoiceT -= dt;
     if (anyClose && copVoiceT <= 0) {

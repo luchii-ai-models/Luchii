@@ -40,6 +40,7 @@ import PaymentCancel from "./pages/PaymentCancel";
 import Builder from "./pages/Builder";
 import Gallery from "./pages/Gallery";
 import PlayGame from "./pages/PlayGame";
+import GameWorldShare from "./pages/GameWorldShare";
 import Downloads from "./pages/Downloads";
 import Status from "./pages/Status";
 import Software from "./pages/Software";
@@ -150,6 +151,7 @@ function App() {
               <Route path="/builder" element={<Builder type="website" />} />
               <Route path="/gallery" element={<Gallery />} />
               <Route path="/play/:slug" element={<PlayGame />} />
+              <Route path="/g/:worldId" element={<GameWorldShare />} />
               <Route path="/downloads" element={<CourtGate><Downloads /></CourtGate>} />
               <Route path="/status" element={<Status />} />
               <Route path="/software" element={<Software />} />

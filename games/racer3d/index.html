@@ -25,6 +25,7 @@
 <script src="/api/games/assets/env.js"></script>
 <div id="hud">
   <span>⚡ SPEED <b id="speed">120</b> km/h</span>
+  <span id="lapPill" style="display:none">🏁 LAP <b id="lap">1</b>/<b id="lapTotal">1</b></span>
   <span>⭐ SCORE <b id="score">0</b></span>
 </div>
 <div id="start" class="screen">
@@ -265,6 +266,22 @@ let running = false, speed = FWC.startSpeed ?? 30, score = 0, px = 0;
 function hud() {
   document.getElementById("speed").textContent = Math.round((speed + (nitroT > 0 ? 26 : 0)) * 4);
   document.getElementById("score").textContent = Math.floor(score);
+  if (LAPS > 0) document.getElementById("lap").textContent = Math.min(LAPS, Math.floor(dist / LAP_LEN) + 1);
+}
+// Game Builder race mode: FWC.laps > 0 turns the endless run into an N-lap race with a finish line.
+const LAPS = Math.max(0, Math.round(FWC.laps ?? 0)), LAP_LEN = FWC.lapLength ?? 3000;
+let raceT = 0, lastLap = 1, raceDone = false;
+if (LAPS > 0) {
+  document.getElementById("lapPill").style.display = "";
+  document.getElementById("lapTotal").textContent = LAPS;
+}
+function finishRace() {
+  const t = raceT.toFixed(1);
+  score += Math.max(0, 600 - raceT * 2) * LAPS;      // time bonus
+  raceDone = true;
+  gameOver();                                         // stops the run, sound + leaderboard hooks
+  document.querySelector("#gameover h1").textContent = "🏁 FINISH";
+  document.getElementById("finalScore").textContent = `${LAPS} lap${LAPS > 1 ? "s" : ""} in ${t}s · Score ${Math.floor(score)}`;
 }
 function start() {
   traffic.forEach(t => scene.remove(t)); traffic = [];
@@ -272,6 +289,7 @@ function start() {
   for (let i = 1; i <= 6; i++) spawnWave(-40 - i * 36);
   for (let i = 0; i < 3; i++) spawnPickup(-90 - i * 110);
   speed = FWC.startSpeed ?? 30; score = 0; px = 0; dist = 0; curve = 0; curveTarget = 0; nitroT = 0; slowT = 0;
+  raceT = 0; lastLap = 1; raceDone = false; document.querySelector("#gameover h1").textContent = "WRECKED";
   player.position.x = 0;
   document.getElementById("start").style.display = "none";
   document.getElementById("gameover").style.display = "none";
@@ -307,6 +325,12 @@ function animate() {
     player.position.y = hillY(4);
     dist += eff * wdt;
     score += eff * wdt;
+    if (LAPS > 0) {
+      raceT += dt;
+      const lapNow = Math.floor(dist / LAP_LEN) + 1;
+      if (dist >= LAPS * LAP_LEN) { hud(); finishRace(); return; }
+      if (lapNow > lastLap) { lastLap = lapNow; score += 250; }
+    }
     // Nitro camera kick
     const targetFov = nitroT > 0 ? 82 : 70;
     if (Math.abs(camera.fov - targetFov) > 0.3) { camera.fov += (targetFov - camera.fov) * dt * 6; camera.updateProjectionMatrix(); }
@@ -544,7 +568,7 @@ const lbScore = () => Math.floor(score);
   document.getElementById("restartBtn").addEventListener("click", engineStart);
   setInterval(() => { if (running) window.SFX.setEngine(speed * 4); }, 150);
   const _goR = gameOver;
-  gameOver = function () { engineStop(); if (!muted) LuchiiAudio.sfx("crash", 0.7); _goR(); };
+  gameOver = function () { engineStop(); if (!muted) LuchiiAudio.sfx(raceDone ? "win" : "crash", 0.7); _goR(); };
 })();
 // Champion — score to beat
 (function () {
