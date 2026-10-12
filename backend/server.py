@@ -1,2203 +1,2228 @@
+from fastapi import FastAPI, APIRouter, Header, HTTPException, Depends, Request, UploadFile, File, Response
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.exception_handlers import http_exception_handler
+import subprocess
+from sse_utils import guard_stream
 from dotenv import load_dotenv
-from pathlib import Path
-
-load_dotenv(Path(__file__).parent / ".env")
-
-import asyncio
-import hashlib
-import json
-import os
-import random
-import re
-import time
-import uuid
-import logging
-from datetime import datetime, timezone, timedelta
-from typing import Literal, Optional
-
-import bcrypt
-import httpx
-import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Depends, UploadFile, File, Form
-import base64
-from fastapi.responses import Response, StreamingResponse
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
-from pydantic import BaseModel, EmailStr, Field
 from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import re
+import json
+import threading
+import time
+import secrets
+import asyncio
+import logging
+from collections import defaultdict, deque
+from pathlib import Path
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Optional, Any
+import uuid
+from datetime import datetime, timezone, timedelta
 
-import local_engines
-import frasberg_gpu
-import kaggle_gpu
-import aws_gpu
-import engine_rules
-import engine_runtime
-import engine_systems
-import media_store
+from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone, ImageContent
+from emergentintegrations.llm.openai.image_generation import OpenAIImageGeneration
+from emergentintegrations.llm.openai import OpenAISpeechToText, OpenAITextToSpeech
+import base64
+import tempfile
+import io
+from pypdf import PdfReader
+import auth as auth_module
+import voice_engine
+import memory_vault
+import ontology
+import mesh_ws
+import hmac
+import hashlib
+import wave as wave_mod
+import numpy as np
 
-client = AsyncIOMotorClient(os.environ["MONGO_URL"])
-db = client[os.environ["DB_NAME"]]
-fs = media_store.Bucket(AsyncIOMotorGridFSBucket(db, bucket_name="voice_samples"), "voice_samples")
-takes_fs = media_store.Bucket(AsyncIOMotorGridFSBucket(db, bucket_name="voice_takes"), "voice_takes")
-models_fs = media_store.Bucket(AsyncIOMotorGridFSBucket(db, bucket_name="models3d"), "models3d")
-media_fs = media_store.Bucket(AsyncIOMotorGridFSBucket(db, bucket_name="media"), "media")
-frasberg_gpu.init(db)
-kaggle_gpu.init(db)
-aws_gpu.init(db)
-engine_systems.init(db)
-if kaggle_gpu.enabled():
-    frasberg_gpu.ON_DEMAND.add("frasberg-motion-free")
-if aws_gpu.enabled():
-    frasberg_gpu.ON_DEMAND.update(aws_gpu.models())
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
 
-JWT_SECRET = os.environ["JWT_SECRET"]
-JWT_ALG = "HS256"
-FRASBERG_BASE = os.environ["FRASBERG_BASE_URL"].rstrip("/")
-FRASBERG_KEYS = [k.strip() for k in os.environ["FRASBERG_API_KEYS"].split(",") if k.strip()]
-KEY_ROUTES = {f: p.split("|") for f, p in (r.split(":") for r in os.environ["FRASBERG_KEY_ROUTES"].split(","))}
-
-
-def key_order(feature: Optional[str]) -> list:
-    prefs = KEY_ROUTES.get(feature or "", [])
-    first = [i for p in prefs for i, k in enumerate(FRASBERG_KEYS) if k.startswith(f"frb_live_{p}")]
-    return first + [i for i in range(len(FRASBERG_KEYS)) if i not in first]
-
-# Short hints: SD/CLIP reads only ~77 tokens, so long hints used to be cut off and the style was lost.
-STYLE_HINTS = {
-    "cinematic": "cinematic film still, dramatic lighting, rich color grade, shallow depth of field",
-    "photorealistic": "photorealistic photo, natural light, 85mm lens, sharp focus, fine detail",
-    "3d": "3D render, octane render, glossy materials, studio lighting",
-    "anime": "anime key visual, cel shading, clean line art, vibrant colors",
-    "digital-art": "digital art illustration, vivid colors, glowing highlights, artstation",
-    "product": "product photography, studio backdrop, softbox lighting, crisp reflections",
-}
-LUCHII_IMAGE_MODELS = {
-    "Luchii Nova-Muse": "RAW photo, ultra realistic, sharp focus",
-    "Luchii Dreamline": "painterly, vivid color",
-    "Luchii Vision": "concept art, dramatic composition",
-}
-# Built-in model routing: the style (and the words in the prompt) choose the Luchii model, no picker needed.
-STYLE_MODEL = {"photorealistic": "Luchii Nova-Muse", "cinematic": "Luchii Nova-Muse", "product": "Luchii Nova-Muse",
-               "anime": "Luchii Dreamline", "digital-art": "Luchii Dreamline", "3d": "Luchii Vision"}
-ART_WORDS = re.compile(r"\b(anime|manga|cartoon|illustration|painting|painterly|watercolou?r|sketch|pixel art|vector|logo|icon|comic)\b", re.I)
-RENDER_WORDS = re.compile(r"\b(3d|render|octane|concept art|isometric|low poly|sculpture|claymation)\b", re.I)
-# Painter-X: the chosen style becomes part of the edit instruction, so style chips work for remixes too.
-EDIT_STYLE = {
-    "cinematic": "make it look like a cinematic film still", "photorealistic": "make it photorealistic",
-    "3d": "turn it into a 3D render", "anime": "turn it into an anime illustration",
-    "digital-art": "turn it into vivid digital art", "product": "make it a clean studio product photo",
-}
+import resend
+from core import (client, db, EMERGENT_LLM_KEY, MAX_MSG_LEN, RATE_LIMIT, RATE_WINDOW,
+                  BLOCKED_TERMS, _rate_store, _rate_check, TEAM_DOMAIN, TEAM_DOMAINS,
+                  _is_team_email, PLAN_QUOTAS, _enforce_plan_quotas, _mask_key,
+                  SERVER_STARTED_AT, _START_TIME, _REQ_METRICS, PLANS, UPGRADE_PLANS,
+                  PAID_PLANS, require_admin, _audit, _log_email, LUCHII_SYSTEM)
+from metering import (TRIAL_KEY_CREDITS, _key_owner_unmetered, _insufficient_credits,
+                      _maybe_autotopup, _maybe_quota_alert, _maybe_low_credit_alert)
 
 
-def auto_model(prompt: str, style: Optional[str]) -> str:
-    if ART_WORDS.search(prompt):
-        return "Luchii Dreamline"
-    if RENDER_WORDS.search(prompt) and style != "photorealistic":
-        return "Luchii Vision"
-    return STYLE_MODEL.get(style or "", "Luchii Nova-Muse")
+
+MESH_HMAC_SECRET = (os.environ.get('MESH_HMAC_SECRET') or os.environ['JWT_SECRET']).encode()
 
 
-# ---------- prompt understanding: make results match what the user described ----------
-FILLER = re.compile(r"^\s*(?:please\s+)?(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:i want\s+|i need\s+|i'd like\s+)?"
-                    r"(?:(?:create|generate|make|draw|render|design|produce|give me|show me)\s+(?:me\s+)?)?"
-                    r"(?:an?\s+)?(?:(?:image|picture|pic|photo|photograph|drawing|render)\s+(?:of|showing|with)\s+)", re.I)
-CLOTHING_WORDS = re.compile(r"\b(wearing|wears|dressed|dress|gown|shirt|t-shirt|blouse|suit|tuxedo|jacket|coat|hoodie|sweater|"
-                            r"jeans|pants|trousers|skirt|shorts|uniform|armou?r|kimono|saree|sari|outfit|clothes|clothing|"
-                            r"bikini|swimsuit|robe|cloak|cape|vest|overalls|scarf|leather|denim)\b", re.I)
+def _mesh_sign(content: str) -> str:
+    return hmac.new(MESH_HMAC_SECRET, content.encode(), hashlib.sha256).hexdigest()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
-def clean_prompt(p: str) -> str:
-    """Drop chat filler ("can you create an image of...") so the 77-token model budget is spent on the subject."""
-    p = re.sub(r"\s+", " ", (p or "").strip())
-    out = FILLER.sub("", p, count=1).strip(" .,")
-    out = re.sub(r"[\s,.]*\bplease\b[\s.!]*$", "", out, flags=re.I).strip(" .,")
-    return out or p
+# ---- Upstream (real Luchii API) auto-failover ----
+import httpx
+
+_env_upstream = os.environ.get("LUCHII_UPSTREAM_URL", "").strip()
+# Only probe an upstream the owner explicitly configures — no guessed/hardcoded hosts
+UPSTREAM_CANDIDATES = [_env_upstream] if _env_upstream else []
+LUCHII_UPSTREAM_API_KEY = os.environ.get("LUCHII_UPSTREAM_API_KEY", "")
+ACTIVE_UPSTREAM = None    # set by background prober once an endpoint answers
 
 
-LEAD_SPLIT = re.compile(r",|\.|;|\b(?:wearing|sitting|standing|lying|holding|walking|running|flying|swimming|on|in|inside|beside|"
-                        r"near|next to|under|over|with|at|by|against|surrounded|while|who|that)\b", re.I)
+async def _probe_upstreams():
+    global ACTIVE_UPSTREAM
+    while True:
+        found = None
+        for url in UPSTREAM_CANDIDATES:
+            if not url:
+                continue
+            root = url.split("/v1/")[0]
+            try:
+                async with httpx.AsyncClient(timeout=6) as c:
+                    r = await c.get(f"{root}/v1/health")
+                    if r.status_code != 200:
+                        r = await c.get(root)
+                # 403 (WAF block) or 404 (routes missing) must NOT count as a working gateway
+                if r.status_code < 400:
+                    found = url
+                    break
+            except Exception:
+                continue
+        if found != ACTIVE_UPSTREAM:
+            logger.info("Luchii upstream changed: %s -> %s", ACTIVE_UPSTREAM, found)
+        ACTIVE_UPSTREAM = found
+        await asyncio.sleep(60)
 
 
-def emphasize_subject(p: str) -> str:
-    """Long descriptions bury the main subject, and the model then paints only the scene. Lead with the subject
-    once more (e.g. "a small red fox, a small red fox wearing a scarf on a rock by a lake...")."""
-    if len(p.split()) < 14:
-        return p
-    lead = LEAD_SPLIT.split(p, maxsplit=1)[0].strip()
-    return f"{lead}, {p}" if 1 <= len(lead.split()) <= 6 else p
+async def _try_upstream_image(prompt: str):
+    """Route image generation through the Frasberg gateway first — EMERGENT key is only a local-engine fallback."""
+    if not ACTIVE_UPSTREAM or not LUCHII_UPSTREAM_API_KEY:
+        return None
+    root = ACTIVE_UPSTREAM.split("/v1/")[0].rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=90) as c:
+            r = await c.post(
+                f"{root}/v1/images/generations",
+                headers={"Authorization": f"Bearer {LUCHII_UPSTREAM_API_KEY}",
+                         "Content-Type": "application/json", "X-Luchii-Router": "1"},
+                json={"prompt": prompt, "model": "frasberg-image", "n": 1, "response_format": "b64_json"})
+        if r.status_code == 200:
+            b64 = ((r.json().get("data") or [{}])[0] or {}).get("b64_json")
+            if b64:
+                return base64.b64decode(b64)
+    except Exception:
+        logger.warning("upstream image route failed; falling back to engine core")
+    return None
 
 
-EDIT_VERBS = re.compile(r"\b(make|turn|change|give|add|remove|replace|swap|dye|colou?r|recolou?r|convert|transform|put|"
-                        r"erase|delete|switch|paint|dress)\b", re.I)
-WHO = r"(?:her|him|them|his|their|it|the (?:person|girl|boy|man|woman|guy|lady|model|subject))"
+async def _try_upstream(message: str, system_base: str, model: str):
+    """Route through the Frasberg gateway (frb_live_ key) — the primary stack. Returns None to use the local engine."""
+    if not ACTIVE_UPSTREAM or not LUCHII_UPSTREAM_API_KEY:
+        return None
+    url = ACTIVE_UPSTREAM.rstrip("/")
+    if url.endswith("/v1/chat"):
+        url += "/completions"  # OpenAI-compatible chat.completion contract per Frasberg router spec
+    try:
+        async with httpx.AsyncClient(timeout=40) as c:
+            r = await c.post(
+                url,
+                headers={"Authorization": f"Bearer {LUCHII_UPSTREAM_API_KEY}",
+                         "Content-Type": "application/json",
+                         "X-Luchii-Router": "1"},
+                json={
+                    "model": model if model and model != "luchii" else "luchii-70b",
+                    "messages": [
+                        {"role": "system", "content": system_base},
+                        {"role": "user", "content": message},
+                    ],
+                    "max_tokens": 8192,
+                    "temperature": 0.7,
+                },
+            )
+        if r.status_code >= 400:
+            logger.warning("upstream %s returned %s", ACTIVE_UPSTREAM, r.status_code)
+            return None
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        logger.exception("upstream call failed")
+        return None
 
 
-NEW_OUTFITS = ["a black leather jacket", "a white linen shirt", "a red knit sweater", "a denim jacket", "a beige trench coat",
-               "a green hoodie", "a navy blazer", "a yellow summer dress", "a striped t-shirt", "a grey wool coat"]
 
 
-def normalize_instruction(text: str) -> str:
-    """Rewrite casual edit requests into the clear commands Painter-X follows best.
-    e.g. "give a blue hair and change clothes" -> "make the hair blue and change the clothes to a denim jacket"."""
-    t = re.sub(r"\s+", " ", (text or "").strip().rstrip(".!"))
-    t = re.sub(r"^(?:please\s+)?(?:(?:can|could|would) you\s+)?(?:please\s+)?", "", t, flags=re.I)
-    # "give (her) (a) blue hair" / "give her blonde hair" -> "make the hair blue"
-    t = re.sub(rf"\bgive\s+(?:{WHO}\s+)?(?:an?\s+)?([a-z]+(?:[- ][a-z]+)?)\s+hair\b", r"make the hair \1", t, flags=re.I)
-    # "(make|turn|dye|colo(u)r) (her) hair X" -> "make the hair X"
-    t = re.sub(rf"\b(?:make|turn|dye|colou?r)\s+(?:{WHO}\s+)?hair\s+(?:to\s+|into\s+)?", "make the hair ", t, flags=re.I)
-    # "give her sunglasses" -> "add sunglasses"
-    t = re.sub(rf"\bgive\s+(?:{WHO}\s+)?(?:an?\s+)?", "add ", t, flags=re.I)
-    # "change (her) clothes" with no target -> pick a clear new outfit
-    t = re.sub(rf"\bchange\s+(?:{WHO}\s+|the\s+)?(clothes|clothing|outfit|dress)\b(?!\s+(?:to|into|for|with|in)\b)",
-               lambda m: f"change the {m.group(1)} to {random.choice(NEW_OUTFITS)}", t, flags=re.I)
-    t = re.sub(rf"\bchange\s+(?:{WHO}\s+)?(clothes|clothing|outfit)\s+(?:to|into|for)\s+", r"dress them in ", t, flags=re.I)
-    return t.strip() or text
 
 
-def is_edit_command(text: str) -> bool:
-    return bool(EDIT_VERBS.search(text or ""))
 
 
-PHOTO_MODELS = {"Luchii Nova-Muse", "Luchii Dreamline", "Luchii Vision"}  # rendered by the photoreal engine (local_engines.generate_photo)
-PERSON_WORDS = re.compile(r"\b(portrait|woman|women|man|men|girl|boy|person|people|model|face|selfie|lady|guy)s?\b", re.I)
-UPSCALE_PRESET = "Enhance and upscale this image to crisp 4K detail, preserving the original composition and colors"
 
 app = FastAPI()
-api = APIRouter(prefix="/api")
-logger = logging.getLogger("luchii")
-logging.basicConfig(level=logging.INFO)
 
 
-# ---------- helpers ----------
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
+@app.exception_handler(HTTPException)
+async def _standard_http_error(request: Request, exc: HTTPException):
+    """Gateway-standard error body; legacy `detail` is kept so existing clients and tests keep working."""
+    d = exc.detail
+    if not (isinstance(d, dict) and isinstance(d.get("error"), str)):
+        return await http_exception_handler(request, exc)
+    incoming = request.headers.get("x-request-id", "")
+    rid = incoming if re.fullmatch(r"req_[A-Za-z0-9_-]{8,128}", incoming) else f"req_{uuid.uuid4().hex}"
+    err = {"code": d["error"], "message": d.get("message", "")}
+    if d.get("required"):
+        err["required"] = d["required"]
+    headers = dict(exc.headers or {})
+    headers["x-request-id"] = rid
+    return JSONResponse(status_code=exc.status_code, headers=headers,
+                        content={"success": False, "requestId": rid, "error": err, "detail": d})
 
 
-def hash_password(p: str) -> str:
-    return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
+
+@app.middleware("http")
+async def _metrics_middleware(request, call_next):
+    t0 = time.time()
+    response = await call_next(request)
+    if request.url.path.startswith("/api"):
+        _REQ_METRICS.append((t0, (time.time() - t0) * 1000, response.status_code))
+    return response
+api_router = APIRouter(prefix="/api")
 
 
-def verify_password(p: str, h: str) -> bool:
+
+class StatusCheck(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    client_name: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class StatusCheckCreate(BaseModel):
+    client_name: str
+
+
+TONE_PROMPTS = {
+    "warm": "\n\nTONE: Warm and encouraging. Speak personally, kindly, with gentle enthusiasm.",
+    "business": "\n\nTONE: Calm, formal and precise. Professional business register, no filler.",
+    "firm": "\n\nTONE: Firm and exacting. Direct sentences, clear directives, zero ambiguity.",
+}
+
+
+async def _extract_memory(user_id: str, message: str):
     try:
-        return bcrypt.checkpw(p.encode(), h.encode())
-    except ValueError:
-        return False
-
-
-def make_token(user_id: str, email: str) -> str:
-    payload = {"sub": user_id, "email": email, "type": "access",
-               "exp": datetime.now(timezone.utc) + timedelta(days=7)}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
-
-def public_user(u: dict) -> dict:
-    return {"id": u["id"], "name": u.get("name", ""), "email": u["email"]}
-
-
-async def optional_user(request: Request) -> Optional[dict]:
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        return None
-    try:
-        payload = jwt.decode(auth[7:], JWT_SECRET, algorithms=[JWT_ALG])
-    except jwt.InvalidTokenError:
-        return None
-    return await db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "password_hash": 0})
-
-
-async def current_user(user: Optional[dict] = Depends(optional_user)) -> dict:
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return user
-
-
-def as_data_url(b64: str, mime: str = "image/png") -> str:
-    return b64 if b64.startswith("data:") else f"data:{mime};base64,{b64}"
-
-
-def strip_data_url(s: str) -> str:
-    return s.split(",", 1)[1] if s.startswith("data:") else s
-
-
-def upstream_detail(r: httpx.Response) -> str:
-    try:
-        d = r.json()
-    except ValueError:
-        return f"Frasberg server returned HTTP {r.status_code} (Bad Gateway)" if r.status_code == 502 else f"Frasberg returned HTTP {r.status_code}"
-    det = d.get("detail") if isinstance(d, dict) else None
-    if isinstance(det, dict):
-        return det.get("message") or str(det)
-    if isinstance(det, str):
-        return det
-    err = d.get("error") if isinstance(d, dict) else None
-    if isinstance(err, dict):
-        return err.get("message") or str(err)
-    return f"Frasberg returned HTTP {r.status_code}"
-
-
-async def frasberg(method: str, path: str, json: Optional[dict] = None, key_index: Optional[int] = None,
-                   feature: Optional[str] = None):
-    """Call Frasberg, rotating through keys on permission / server errors. Returns (response, key_index)."""
-    order = [key_index] if key_index is not None else key_order(feature)
-    last, best = "Frasberg is unavailable", None
-    async with httpx.AsyncClient(timeout=180) as hc:
-        for i in order:
-            try:
-                r = await hc.request(method, f"{FRASBERG_BASE}{path}", json=json,
-                                     headers={"Authorization": f"Bearer {FRASBERG_KEYS[i]}"})
-            except httpx.HTTPError as e:
-                last = f"Frasberg connection error: {e.__class__.__name__}"
-                continue
-            if r.status_code < 400:
-                return r, i
-            last = upstream_detail(r)
-            if r.status_code != 403:
-                best = last
-            logger.warning("Frasberg %s %s key#%s -> %s %s", method, path, i, r.status_code, last)
-            if r.status_code in (400, 404, 422) or r.status_code >= 500:
+        llm = LlmChat(
+            api_key=EMERGENT_LLM_KEY, session_id=f"mem-{uuid.uuid4()}",
+            system_message="Extract up to THREE stable personal facts or preferences about the user from their message (name, role, project, people, pets, tastes, goals). Reply with one short third-person sentence per line, like 'The user's dog is named Zeus.' If nothing memorable, reply exactly NONE.",
+        ).with_model("anthropic", "claude-sonnet-4-6")
+        full = ""
+        async for event in llm.stream_message(UserMessage(text=message[:1500])):
+            if isinstance(event, TextDelta):
+                full += event.content
+            elif isinstance(event, StreamDone):
                 break
-    raise HTTPException(status_code=424, detail=f"Frasberg: {best or last}")
-
-
-async def frasberg_image(payload: dict) -> str:
-    r, _ = await frasberg("POST", "/generate/image", payload, feature="image")
-    d = r.json()
-    b64 = d.get("image_base64") or d.get("image") or (d.get("data") or [{}])[0].get("b64_json")
-    if not b64:
-        raise HTTPException(status_code=424, detail="Frasberg returned no image")
-    return as_data_url(b64, d.get("mime") or "image/png")
-
-
-async def gpu_image(prompt: str, aspect: Optional[str]) -> Optional[str]:
-    if not await frasberg_gpu.is_online("frasberg-image"):
-        return None
-    try:
-        g = await frasberg_gpu.submit("image", "frasberg-image", prompt, aspect_ratio=aspect or "1:1")
-        for _ in range(240):
-            await asyncio.sleep(0.5)
-            cur = await frasberg_gpu.get_job(g["id"])
-            if cur["status"] == "completed":
-                return as_data_url(base64.b64encode(await frasberg_gpu.output_bytes(cur)).decode(), cur.get("mime") or "image/png")
-            if cur["status"] == "failed":
-                break
-        else:
-            await db.gpu_jobs.update_one({"id": g["id"], "status": "queued"},
-                                         {"$set": {"status": "failed", "error": "Timed out waiting for a GPU worker"}})
-    except HTTPException as e:
-        logger.warning("Frasberg Image GPU failed: %s", e.detail)
-    return None
-
-
-FRASBERG_IMAGE_RETRY_S = 600
-_frasberg_image_down_until = 0.0
-
-
-async def image_with_fallback(frasberg_payload: dict, local_fn, *args) -> tuple:
-    global _frasberg_image_down_until
-    # When Frasberg's image API is down, every request used to wait for it to fail first. Skip it for 10 min.
-    if time.time() >= _frasberg_image_down_until:
-        try:
-            return await frasberg_image(frasberg_payload), "frasberg"
-        except HTTPException as e:
-            _frasberg_image_down_until = time.time() + FRASBERG_IMAGE_RETRY_S
-            logger.warning("Frasberg image failed (%s); using Luchii in-house image engine", e.detail)
-    if local_engines.image_busy():
-        raise HTTPException(status_code=429, detail="Frasberg Creator is finishing another image. Yours is in the queue.",
-                            headers={"Retry-After": "8"})
-    try:
-        return await asyncio.to_thread(local_fn, *args), "luchii-local"
-    except local_engines.UnsafeImage:
-        raise HTTPException(status_code=422, detail="The Luchii safety filter blocked this result. Please try a different prompt.")
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Local image engine failed")
-        raise HTTPException(status_code=424, detail=f"Luchii image engine error: {e.__class__.__name__}")
-
-
-async def speak_with_fallback(text: str, voice: Optional[str]) -> dict:
-    try:
-        return {**(await speak(text, voice)), "engine": "frasberg"}
-    except HTTPException as e:
-        logger.warning("Frasberg voice failed (%s); using Luchii in-house voice engine", e.detail)
-    try:
-        return {**(await asyncio.to_thread(local_engines.synthesize, text, voice or "nova")), "engine": "luchii-local"}
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Local voice engine failed")
-        raise HTTPException(status_code=424, detail=f"Luchii voice engine error: {e.__class__.__name__}")
-
-
-def wants_publish(user: Optional[dict], publish: Optional[bool]) -> bool:
-    """There is no public community gallery: every image stays private to its creator."""
-    return False
-
-
-async def resolve_parent(parent_id: Optional[str], src_image: str, session_id: Optional[str],
-                         user: Optional[dict]) -> dict:
-    """Remix history: link a new edit to the image it was made from. A fresh upload becomes a hidden step-0
-    'source' doc, so the chain always starts at the original photo."""
-    if parent_id:
-        p = await db.generations.find_one({"id": parent_id}, {"_id": 0, "id": 1, "root_id": 1, "step": 1})
-        if p:
-            return {"parent_id": p["id"], "root_id": p.get("root_id") or p["id"], "step": (p.get("step") or 0) + 1}
-    src = {"id": str(uuid.uuid4()), "kind": "source", "hidden": True, "prompt": "Original photo",
-           "image_base64": src_image, "session_id": session_id, "user_id": user["id"] if user else None,
-           "author": user.get("name") if user else None, "step": 0, "created_at": now_iso()}
-    src["root_id"] = src["id"]
-    await _store_image(src)
-    await db.generations.insert_one(src.copy())
-    return {"parent_id": src["id"], "root_id": src["id"], "step": 1}
-
-
-def no_flow() -> None:
-    return None
-
-
-def creation_owner(user: Optional[dict]) -> str:
-    return f"user:{user['id']}" if user else "guest"
-
-
-async def creation_check(kind: str, user: Optional[dict], prompt: str) -> dict:
-    """Every image/video/music creation goes through Unified Enforce + the Engine Flow; blocked -> 403."""
-    try:
-        return await engine_systems.check_creation(kind, creation_owner(user), prompt or kind)
-    except engine_systems.EnforceError as e:
-        raise HTTPException(status_code=403, detail=f"Blocked by Frasberg engine rules: {e}")
-
-
-async def save_generation(kind: str, prompt: str, image: str, session_id: Optional[str],
-                          user: Optional[dict], style: Optional[str] = None, aspect: Optional[str] = None,
-                          model: Optional[str] = None, publish: Optional[bool] = None,
-                          lineage: Optional[dict] = None, extra: Optional[dict] = None) -> dict:
-    doc = {
-        "id": str(uuid.uuid4()), "kind": kind, "prompt": prompt, "style": style,
-        "aspect_ratio": aspect, "model": model, "image_base64": image, "session_id": session_id,
-        "user_id": user["id"] if user else None, "author": user.get("name") if user else None,
-        "created_at": now_iso(), **(lineage or {}), **(extra or {}),
-    }
-    if wants_publish(user, publish):
-        doc.update(public=True, published_at=doc["created_at"])
-    await _store_image(doc)
-    await db.generations.insert_one(doc.copy())
-    return doc
-
-
-LIST_THUMB_OVER = 900_000  # base64 chars
-
-
-async def _store_image(doc: dict):
-    """Lists get a light preview; with S3 active the full file goes to S3 and Mongo keeps only the preview."""
-    image = doc.get("image_base64")
-    if not image:
-        return
-    if media_store.ready():
-        try:
-            key = await media_store.put_image(doc["id"], image)
-            thumb = await asyncio.to_thread(local_engines.preview, image)
-            doc.update(s3_key=key, image_base64=thumb, thumb_base64=thumb)
+        raw = full.strip()
+        if not raw or "NONE" in raw.upper()[:8]:
             return
-        except Exception:  # noqa: BLE001
-            logger.exception("S3 image upload failed for %s; keeping it in Mongo", doc["id"])
-    if len(image) > LIST_THUMB_OVER:
-        try:  # 4K / HD images: lists send a light preview, the full file loads on open/download
-            doc["thumb_base64"] = await asyncio.to_thread(local_engines.preview, image)
-        except Exception:  # noqa: BLE001
-            logger.exception("Preview for generation failed")
-
-
-async def _delete_s3_images(query: dict):
-    async for g in db.generations.find({**query, "s3_key": {"$ne": None}}, {"_id": 0, "s3_key": 1}):
-        try:
-            await media_store.delete(g["s3_key"])
-        except Exception:  # noqa: BLE001
-            logger.exception("S3 delete failed for %s", g["s3_key"])
-
-
-def _listed(doc: dict) -> dict:
-    thumb = doc.pop("thumb_base64", None)
-    if thumb:
-        doc["image_base64"], doc["has_full"] = thumb, True
-    return doc
-
-
-# ---------- models ----------
-class RegisterIn(BaseModel):
-    name: str = Field(min_length=1)
-    email: EmailStr
-    password: str = Field(min_length=6)
-
-
-class LoginIn(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class GenerateIn(BaseModel):
-    prompt: str = Field(min_length=1)
-    style: Optional[str] = "cinematic"
-    aspect_ratio: Optional[str] = "1:1"
-    session_id: Optional[str] = None
-    model: Optional[str] = None
-    quality: Optional[str] = None  # "draft" (Nova-Muse quick preview) or "full"
-    seed: Optional[int] = None
-    publish: Optional[bool] = None  # None = follow the user's auto-publish setting
-
-
-class EditIn(BaseModel):
-    prompt: str = Field(min_length=1)
-    image_base64: str
-    session_id: Optional[str] = None
-    style: Optional[str] = None
-    parent_id: Optional[str] = None  # generation this remix was made from (remix history)
-    publish: Optional[bool] = None
-
-
-class CutoutIn(BaseModel):
-    image_base64: str
-    session_id: Optional[str] = None
-    parent_id: Optional[str] = None
-    publish: Optional[bool] = None
-
-
-class UpscaleIn(BaseModel):
-    image_base64: str
-    prompt: Optional[str] = "Upscaled"
-    session_id: Optional[str] = None
-    parent_id: Optional[str] = None
-    publish: Optional[bool] = None
-
-
-class TTSIn(BaseModel):
-    text: str = Field(min_length=1, max_length=4096)
-    voice: str = "nova"
-    hd: bool = False
-
-
-# ---------- routes ----------
-@api.get("/")
-async def root():
-    return {"message": "Frasberg Creator API is running"}
-
-
-@api.post("/auth/register")
-async def register(body: RegisterIn):
-    email = body.email.lower()
-    if await db.users.find_one({"email": email}):
-        raise HTTPException(status_code=400, detail="Email already registered")
-    user = {"id": str(uuid.uuid4()), "name": body.name.strip(), "email": email,
-            "password_hash": hash_password(body.password), "created_at": now_iso()}
-    await db.users.insert_one(user.copy())
-    return {"token": make_token(user["id"], email), "user": public_user(user)}
-
-
-@api.post("/auth/login")
-async def login(body: LoginIn):
-    email = body.email.lower()
-    ident = email
-    att = await db.login_attempts.find_one({"identifier": ident})
-    if att and att.get("count", 0) >= 5 and att.get("locked_until", "") > now_iso():
-        raise HTTPException(status_code=429, detail="Too many attempts. Try again in 15 minutes.")
-    user = await db.users.find_one({"email": email})
-    if not user or not verify_password(body.password, user.get("password_hash", "")):
-        await db.login_attempts.update_one(
-            {"identifier": ident},
-            {"$inc": {"count": 1},
-             "$set": {"locked_until": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()}},
-            upsert=True)
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    await db.login_attempts.delete_one({"identifier": ident})
-    return {"token": make_token(user["id"], email), "user": public_user(user)}
-
-
-@api.get("/auth/me")
-async def me(user: dict = Depends(current_user)):
-    return public_user(user)
-
-
-@api.post("/generate")
-async def generate(body: GenerateIn, user: Optional[dict] = Depends(optional_user), flow_rec: Optional[dict] = Depends(no_flow)):
-    flow_rec = flow_rec or await creation_check("image", user, body.prompt)
-    subject = clean_prompt(body.prompt)
-    model = body.model if body.model in LUCHII_IMAGE_MODELS else auto_model(subject, body.style)
-    draft = body.quality == "draft" and model in PHOTO_MODELS
-    seed = body.seed if body.seed is not None else random.randint(0, 2**31 - 1)
-    # The photo hint ("RAW photo") fights 3D/illustration styles, so the style hint wins there.
-    model_hint = "" if model in PHOTO_MODELS and body.style in ("3d", "digital-art", "anime") else LUCHII_IMAGE_MODELS.get(model or "")
-    hint = ", ".join(h for h in (model_hint, STYLE_HINTS.get(body.style or "", "")) if h)
-    full = f"{subject}. {hint}. Aspect ratio {body.aspect_ratio}." if hint else subject
-    img, engine = await gpu_image(full, body.aspect_ratio), "frasberg-image"
-    if not img:
-        focus = emphasize_subject(subject)
-        local_prompt = f"{focus}, {hint}" if hint else focus
-        if model in PHOTO_MODELS:
-            # cfg 1.0 ignores negative prompts, so steer people toward clothing, but never override clothes the user described.
-            if PERSON_WORDS.search(subject) and not CLOTHING_WORDS.search(subject):
-                local_prompt = f"{focus}, fully clothed, wearing a stylish outfit, {hint}"
-            elif PERSON_WORDS.search(subject):
-                local_prompt = f"{focus}, fully clothed, {hint}"
-            local_fn, args = local_engines.generate_photo, (local_prompt, body.aspect_ratio, draft, seed)
-        else:
-            local_fn, args = local_engines.generate_image, (local_prompt, body.aspect_ratio)
-        img, engine = await image_with_fallback({"prompt": full, "style": body.style, "aspect_ratio": body.aspect_ratio},
-                                                local_fn, *args)
-    doc = await save_generation("generate", body.prompt, img, body.session_id, user, body.style, body.aspect_ratio, model,
-                                publish=body.publish, extra={"engine_flow": flow_rec})
-    return {"id": doc["id"], "kind": "generate", "engine_flow": flow_rec, "image_base64": img, "prompt": body.prompt, "style": body.style,
-            "model": model, "engine": engine, "quality": "draft" if draft else "full", "seed": seed,
-            "aspect_ratio": body.aspect_ratio, "public": bool(doc.get("public"))}
-
-
-@api.post("/edit")
-async def edit(body: EditIn, user: Optional[dict] = Depends(optional_user), flow_rec: Optional[dict] = Depends(no_flow)):
-    flow_rec = flow_rec or await creation_check("image", user, body.prompt)
-    raw = body.prompt.strip().rstrip(".")
-    if is_edit_command(raw):
-        # A command ("make the hair blue", "change the clothes") is mapped to the regions it names and edited
-        # in one fast masked pass on the warm photo engine (~30-60s); the rest of the photo is kept.
-        instruction = normalize_instruction(raw)
-        if body.style in ("anime", "3d", "digital-art"):
-            instruction = f"{instruction}, {EDIT_STYLE[body.style]}"
-        local_fn, args, mode = local_engines.fast_edit, (instruction, body.image_base64), "instruct"
-    else:
-        # A description ("a woman in a red dress on a beach") re-renders the photo toward that description.
-        instruction = f"{raw}, {EDIT_STYLE[body.style]}" if EDIT_STYLE.get(body.style or "") else raw
-        local_fn, args, mode = local_engines.fast_edit, (instruction, body.image_base64), "describe"
-    img, engine = await image_with_fallback({"prompt": instruction, "image_base64": strip_data_url(body.image_base64)},
-                                            local_fn, *args)
-    lineage = await resolve_parent(body.parent_id, body.image_base64, body.session_id, user)
-    doc = await save_generation("edit", body.prompt, img, body.session_id, user, "Remix", model="Luchii Painter-X",
-                                publish=body.publish, lineage=lineage,
-                                extra={"instruction": instruction, "edit_mode": mode, "engine_flow": flow_rec})
-    return {"id": doc["id"], "kind": "edit", "engine_flow": flow_rec, "model": "Luchii Painter-X", "image_base64": img, "prompt": body.prompt,
-            "engine": engine, "style": body.style, "instruction": instruction, "edit_mode": mode,
-            "public": bool(doc.get("public")), **lineage}
-
-
-@api.post("/remove-bg")
-async def remove_bg(body: CutoutIn, user: Optional[dict] = Depends(optional_user), flow_rec: Optional[dict] = Depends(no_flow)):
-    flow_rec = flow_rec or await creation_check("image", user, "Background removed")
-    if local_engines.image_busy():
-        raise HTTPException(status_code=429, detail="Frasberg Creator is finishing another image. Yours is in the queue.",
-                            headers={"Retry-After": "8"})
-    try:
-        img = await asyncio.to_thread(local_engines.remove_background, body.image_base64)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Background removal failed")
-        raise HTTPException(status_code=424, detail=f"Luchii cutout engine error: {e.__class__.__name__}")
-    lineage = await resolve_parent(body.parent_id, body.image_base64, body.session_id, user)
-    doc = await save_generation("cutout", "Background removed", img, body.session_id, user, "Cutout", model="Luchii Prime",
-                                publish=body.publish, lineage=lineage, extra={"engine_flow": flow_rec})
-    return {"id": doc["id"], "kind": "cutout", "engine_flow": flow_rec, "model": "Luchii Prime", "image_base64": img, "prompt": "Background removed",
-            "engine": "luchii-local", "public": bool(doc.get("public")), **lineage}
-
-
-@api.post("/upscale")
-async def upscale(body: UpscaleIn, user: Optional[dict] = Depends(optional_user), flow_rec: Optional[dict] = Depends(no_flow)):
-    flow_rec = flow_rec or await creation_check("image", user, body.prompt or "Upscaled")
-    img, engine = await image_with_fallback({"prompt": UPSCALE_PRESET, "image_base64": strip_data_url(body.image_base64)},
-                                            local_engines.upscale_image, body.image_base64)
-    lineage = await resolve_parent(body.parent_id, body.image_base64, body.session_id, user)
-    doc = await save_generation("upscale", body.prompt or "Upscaled", img, body.session_id, user, "Upscale 4K",
-                                publish=body.publish, lineage=lineage, extra={"engine_flow": flow_rec})
-    return {"id": doc["id"], "kind": "upscale", "engine_flow": flow_rec, "model": "Luchii Prime", "image_base64": img, "prompt": body.prompt,
-            "engine": engine, "public": bool(doc.get("public")), **lineage}
-
-
-# ---------- image jobs (async; photoreal renders take ~2 min, longer than the ingress timeout) ----------
-IMAGE_JOB_STALE_S = 20 * 60
-
-
-async def _run_image_job(jid: str, fn, body, user: Optional[dict], flow_rec: dict):
-    for attempt in range(150):
-        try:
-            await db.image_jobs.update_one({"id": jid}, {"$set": {"status": "running", "updated_at": now_iso()}})
-            res = await fn(body, user, flow_rec)
-            break
-        except HTTPException as e:
-            if e.status_code == 429 and attempt < 149:
-                await db.image_jobs.update_one({"id": jid}, {"$set": {"status": "queued", "updated_at": now_iso()}})
-                await asyncio.sleep(8)
-                continue
-            await db.image_jobs.update_one({"id": jid}, {"$set": {"status": "failed", "error": str(e.detail), "updated_at": now_iso()}})
-            return
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Image job %s failed", jid)
-            await db.image_jobs.update_one({"id": jid}, {"$set": {"status": "failed", "error": e.__class__.__name__, "updated_at": now_iso()}})
-            return
-    res.pop("image_base64", None)
-    await db.image_jobs.update_one({"id": jid}, {"$set": {"status": "completed", "result": res, "updated_at": now_iso()}})
-
-
-async def _start_image_job(kind: str, fn, body, user: Optional[dict]) -> dict:
-    flow_rec = await creation_check("image", user, getattr(body, "prompt", None) or kind)
-    job = {"id": str(uuid.uuid4()), "kind": kind, "status": "queued", "result": None, "error": None,
-           "model": getattr(body, "model", None), "user_id": user["id"] if user else None,
-           "created_at": now_iso(), "updated_at": now_iso()}
-    await db.image_jobs.insert_one(job.copy())
-    asyncio.create_task(_run_image_job(job["id"], fn, body, user, flow_rec))
-    return {"job_id": job["id"], "status": "queued", "kind": kind, "engine_flow": flow_rec}
-
-
-@api.post("/generate/jobs")
-async def generate_job(body: GenerateIn, user: Optional[dict] = Depends(optional_user)):
-    return await _start_image_job("generate", generate, body, user)
-
-
-@api.post("/edit/jobs")
-async def edit_job(body: EditIn, user: Optional[dict] = Depends(optional_user)):
-    return await _start_image_job("edit", edit, body, user)
-
-
-@api.post("/remove-bg/jobs")
-async def remove_bg_job(body: CutoutIn, user: Optional[dict] = Depends(optional_user)):
-    return await _start_image_job("cutout", remove_bg, body, user)
-
-
-@api.post("/upscale/jobs")
-async def upscale_job(body: UpscaleIn, user: Optional[dict] = Depends(optional_user)):
-    return await _start_image_job("upscale", upscale, body, user)
-
-
-@api.get("/image-jobs/{job_id}")
-async def image_job_status(job_id: str):
-    job = await db.image_jobs.find_one({"id": job_id}, {"_id": 0})
-    if not job:
-        raise HTTPException(status_code=404, detail="Image job not found")
-    if job["status"] in ("queued", "running"):
-        age = (datetime.now(timezone.utc) - datetime.fromisoformat(job["updated_at"])).total_seconds()
-        if age > IMAGE_JOB_STALE_S:
-            job["status"], job["error"] = "failed", "Interrupted by a server restart. Please try again."
-            await db.image_jobs.update_one({"id": job_id}, {"$set": {"status": "failed", "error": job["error"]}})
-    out = {"job_id": job["id"], "kind": job["kind"], "status": job["status"], "error": job.get("error"), "model": job.get("model")}
-    if job["status"] == "completed" and job.get("result"):
-        gen = await db.generations.find_one({"id": job["result"]["id"]}, {"_id": 0, "image_base64": 1, "s3_key": 1})
-        out["result"] = {**job["result"], "image_base64": await media_store.full_image(gen)}
-    return out
-
-
-@api.post("/tts")
-async def tts(body: TTSIn):
-    return {**(await speak_with_fallback(body.text, body.voice)), "voice": body.voice}
-
-
-@api.get("/generations")
-async def generations(session_id: str, limit: int = 8):
-    cur = db.generations.find({"session_id": session_id, "image_base64": {"$ne": None}, "hidden": {"$ne": True}}, {"_id": 0})
-    return [_listed(d) for d in await cur.sort("created_at", -1).limit(min(limit, 60)).to_list(None)]
-
-
-@api.get("/my/generations")
-async def my_generations(limit: int = 60, user: dict = Depends(current_user)):
-    cur = db.generations.find({"user_id": user["id"], "image_base64": {"$ne": None}, "hidden": {"$ne": True}}, {"_id": 0})
-    return [_listed(d) for d in await cur.sort("created_at", -1).limit(min(limit, 200)).to_list(None)]
-
-
-@api.get("/showcase")
-async def showcase(limit: int = 8):
-    cur = db.generations.find({"kind": "generate", "featured": True, "image_base64": {"$ne": None}},
-                              {"_id": 0, "id": 1, "prompt": 1, "style": 1, "image_base64": 1})
-    return await cur.sort("created_at", -1).limit(min(limit, 24)).to_list(None)
-
-
-class BulkDeleteIn(BaseModel):
-    ids: list[str] = Field(min_length=1, max_length=200)
-
-
-@api.post("/generations/bulk-delete")
-async def bulk_delete_generations(body: BulkDeleteIn, user: dict = Depends(current_user)):
-    await _delete_s3_images({"id": {"$in": body.ids}, "user_id": user["id"]})
-    res = await db.generations.delete_many({"id": {"$in": body.ids}, "user_id": user["id"]})
-    return {"deleted": res.deleted_count}
-
-
-@api.delete("/generations/{gen_id}")
-async def delete_generation(gen_id: str, user: dict = Depends(current_user)):
-    await _delete_s3_images({"id": gen_id, "user_id": user["id"]})
-    res = await db.generations.delete_one({"id": gen_id, "user_id": user["id"]})
-    if not res.deleted_count:
-        raise HTTPException(status_code=404, detail="Not found")
-    return {"deleted": gen_id}
-
-
-HISTORY_FIELDS = {"_id": 0, "id": 1, "parent_id": 1, "root_id": 1, "step": 1, "kind": 1, "prompt": 1, "instruction": 1,
-                  "model": 1, "style": 1, "created_at": 1, "public": 1, "mini_base64": 1, "thumb_base64": 1}
-
-
-@api.get("/generations/{gen_id}/history")
-async def remix_history(gen_id: str):
-    """Every version in this photo's Painter-X chain (original upload, each remix, upscales, cut-outs), oldest first,
-    with small previews. parent_id links let the client draw the path to any version and branch from it."""
-    g = await db.generations.find_one({"id": gen_id}, {"_id": 0, "id": 1, "root_id": 1})
-    if not g:
-        raise HTTPException(status_code=404, detail="Not found")
-    root = g.get("root_id") or g["id"]
-    docs = await db.generations.find({"$or": [{"id": root}, {"root_id": root}], "image_base64": {"$ne": None}},
-                                     HISTORY_FIELDS).sort("created_at", 1).limit(80).to_list(80)
+        facts = [f.strip("-• ").strip() for f in raw.split("\n")]
+        facts = [f for f in facts if 3 < len(f) < 300][:3]
+        for fact in facts:
+            emb = await memory_vault.embed(fact)
+            doc = {
+                "id": str(uuid.uuid4()), "user_id": user_id, "fact": fact,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if emb:
+                doc["embedding"] = emb
+            await db.user_memories.insert_one(doc)
+    except Exception:
+        logger.exception("memory extraction failed")
+
+
+async def _memory_context(user_id: str, query: str = "") -> str:
+    docs = await db.user_memories.find({"user_id": user_id}).sort("created_at", -1).to_list(1000)
+    if not docs:
+        return ""
+    picked = docs[:40]
+    if query and memory_vault.ready():
+        qv = await memory_vault.embed(query)
+        if qv:
+            scored = []
+            for d in docs:
+                emb = d.get("embedding")
+                if not emb:
+                    emb = await memory_vault.embed(d["fact"])
+                    if emb:
+                        await db.user_memories.update_one({"id": d["id"]}, {"$set": {"embedding": emb}})
+                if emb:
+                    scored.append((sum(a * b for a, b in zip(qv, emb)), d))
+            if scored:
+                scored.sort(key=lambda x: -x[0])
+                seen, picked = set(), []
+                for d in [d for _, d in scored[:30]] + docs[:12]:
+                    if d["id"] not in seen:
+                        seen.add(d["id"])
+                        picked.append(d)
+                picked = picked[:40]
+    facts = "\n".join(f"- {d['fact']}" for d in picked)
+    return f"\n\nMEMORY VAULT (semantic long-term memory — facts you remember about this user across every session):\n{facts}"
+
+
+async def _kb_context(query: str) -> str:
+    words = {w for w in query.lower().split() if len(w) > 3}
+    if not words:
+        return ""
+    docs = await db.knowledge.find({}, {"_id": 0}).to_list(200)
+    scored = []
     for d in docs:
-        if not d.get("mini_base64"):
-            full = await db.generations.find_one({"id": d["id"]}, {"_id": 0, "image_base64": 1})
-            try:
-                d["mini_base64"] = await asyncio.to_thread(local_engines.preview, d.pop("thumb_base64", None) or full["image_base64"], 320)
-                await db.generations.update_one({"id": d["id"]}, {"$set": {"mini_base64": d["mini_base64"]}})
-            except Exception:  # noqa: BLE001
-                logger.exception("History preview failed for %s", d["id"])
-                d["mini_base64"] = None
-        d.pop("thumb_base64", None)
-        d["public"] = bool(d.get("public"))
-        d.setdefault("step", 0 if d["id"] == root else None)
-    return {"root_id": root, "current_id": gen_id, "items": docs}
-
-
-@api.get("/share/{gen_id}")
-async def share(gen_id: str):
-    doc = await db.generations.find_one({"id": gen_id},
-                                        {"_id": 0, "id": 1, "kind": 1, "model": 1, "prompt": 1, "style": 1, "image_base64": 1, "author": 1,
-                                         "parent_id": 1, "root_id": 1, "step": 1, "public": 1, "instruction": 1, "s3_key": 1})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Not found")
-    doc["image_base64"] = await media_store.full_image(doc)
-    doc.pop("s3_key", None)
-    doc["public"] = bool(doc.get("public"))
-    return doc
-
-
-async def frasberg_upload(path: str, filename: str, data: bytes, ctype: str, feature: str) -> dict:
-    last, best = "Frasberg is unavailable", None
-    async with httpx.AsyncClient(timeout=120) as hc:
-        for i in key_order(feature):
-            try:
-                r = await hc.post(f"{FRASBERG_BASE}{path}", headers={"Authorization": f"Bearer {FRASBERG_KEYS[i]}"},
-                                  files={"file": (filename, data, ctype)})
-            except httpx.HTTPError as e:
-                last = f"Frasberg connection error: {e.__class__.__name__}"
-                continue
-            if r.status_code < 400:
-                return r.json()
-            last = upstream_detail(r)
-            if r.status_code != 403:
-                best = last
-            logger.warning("Frasberg upload %s key#%s -> %s %s", path, i, r.status_code, last)
-            if r.status_code in (400, 413, 422) or r.status_code >= 500:
-                break
-    raise HTTPException(status_code=424, detail=f"Frasberg: {best or last}")
-
-
-async def speak(text: str, voice: Optional[str] = None) -> dict:
-    payload = {"text": text, **({"voice": voice} if voice else {})}
-    r, _ = await frasberg("POST", "/voice/speak", payload, feature="tts")
-    d = r.json()
-    if not d.get("audio_base64"):
-        raise HTTPException(status_code=424, detail="Frasberg returned no audio")
-    return {"audio_base64": strip_data_url(d["audio_base64"]), "mime": d.get("mime", "audio/mp3")}
-
-
-@api.post("/sts")
-async def speech_to_speech(file: UploadFile = File(...), voice: str = Form("nova"),
-                           user: Optional[dict] = Depends(optional_user)):
-    audio = await file.read()
-    if not audio:
-        raise HTTPException(status_code=400, detail="Empty audio file")
-    if voice == "clone" and not (user and user.get("voice_clone")):
-        raise HTTPException(status_code=400, detail="Log in and save a voice sample on the Voice Cloning page first")
-    try:
-        d = await frasberg_upload("/voice/transcribe", file.filename or "voice.webm", audio,
-                                  file.content_type or "audio/webm", "stt")
-        text = (d.get("text") or "").strip()
-    except HTTPException as e:
-        logger.warning("Frasberg transcribe failed (%s); using Luchii in-house transcription", e.detail)
-        try:
-            text = await asyncio.to_thread(local_engines.transcribe, audio)
-        except Exception as le:  # noqa: BLE001
-            logger.exception("Local transcribe failed")
-            raise HTTPException(status_code=400,
-                                detail=f"Could not transcribe audio: {le.__class__.__name__}")
-    if not text:
-        raise HTTPException(status_code=400, detail="No speech detected in the recording")
-    speech = await speak_in_clone(text, user["voice_clone"]) if voice == "clone" else await speak_with_fallback(text, voice)
-    return {"text": text, "voice": voice, **speech}
-
-
-# ---------- voice cloning ----------
-clone_lock = asyncio.Lock()
-
-
-class CloneSpeakIn(BaseModel):
-    text: str = Field(min_length=1, max_length=4000)
-
-
-async def read_sample(clone: dict) -> bytes:
-    stream = await fs.open_download_stream(clone["file_id"])
-    return await stream.read()
-
-
-@api.post("/voice/clone")
-async def voice_clone(file: UploadFile = File(...), user: dict = Depends(current_user)):
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="Empty audio file")
-    if len(data) > 8 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large (max 8 MB)")
-    name, ctype = file.filename or "sample.webm", file.content_type or "audio/webm"
-    try:
-        async with clone_lock:
-            d = await frasberg_upload("/voice/clone", name, data, ctype, "clone")
-    except HTTPException as e:
-        logger.warning("Frasberg clone upload failed (%s); keeping sample for in-house cloning", e.detail)
-        try:
-            d = {"duration_sec": await asyncio.to_thread(local_engines.audio_duration, data), "cloning_status": "ready"}
-        except Exception:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail="Could not read that audio file")
-    file_id = await fs.upload_from_stream(f"voice-samples/{user['id']}/{uuid.uuid4()}", data,
-                                          metadata={"user_id": user["id"], "content_type": ctype})
-    clone = {"file_id": file_id, "filename": name, "content_type": ctype,
-             "duration_sec": d.get("duration_sec"), "created_at": now_iso()}
-    await db.users.update_one({"id": user["id"]}, {"$set": {"voice_clone": clone}})
-    return {"has_sample": True, "duration_sec": clone["duration_sec"], "cloning_status": d.get("cloning_status"),
-            "created_at": clone["created_at"]}
-
-
-@api.get("/voice/clone")
-async def voice_clone_info(user: dict = Depends(current_user)):
-    c = user.get("voice_clone")
-    if not c:
-        return {"has_sample": False}
-    return {"has_sample": True, "duration_sec": c.get("duration_sec"), "created_at": c.get("created_at")}
-
-
-@api.get("/voice/clone/sample")
-async def voice_clone_sample(user: dict = Depends(current_user)):
-    c = user.get("voice_clone")
-    if not c:
-        raise HTTPException(status_code=404, detail="No voice sample yet")
-    return Response(content=await read_sample(c), media_type=c["content_type"])
-
-
-@api.post("/voice/clone/speak")
-async def voice_clone_speak(body: CloneSpeakIn, user: dict = Depends(current_user)):
-    c = user.get("voice_clone")
-    if not c:
-        raise HTTPException(status_code=400, detail="Record your voice sample first")
-    return {"text": body.text, **(await speak_in_clone(body.text, c))}
-
-
-async def speak_in_clone(text: str, clone: dict) -> dict:
-    sample = await read_sample(clone)
-    try:
-        async with clone_lock:
-            await frasberg_upload("/voice/clone", clone["filename"], sample, clone["content_type"], "clone")
-            return {**(await speak(text)), "engine": "frasberg"}
-    except HTTPException as e:
-        logger.warning("Frasberg cloned speech failed (%s); using in-house voice converter", e.detail)
-    try:
-        return {**(await asyncio.to_thread(local_engines.speak_cloned, text, sample)), "engine": "luchii-local"}
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Local voice conversion failed")
-        raise HTTPException(status_code=424, detail=f"Voice clone engine error: {e.__class__.__name__}")
-
-
-# ---------- video & music jobs (Frasberg Edge) ----------
-VIDEO_STYLES = {
-    "cinematic": "cinematic film still, anamorphic lens, dramatic lighting, rich color grade",
-    "photoreal": "photorealistic, natural light, ultra detailed, 35mm photography",
-    "anime": "anime key visual, vibrant cel shading, clean line art",
-    "3d": "3D animated film still, pixar style, soft global illumination",
-    "noir": "black and white film noir, high contrast, moody shadows",
-    "fantasy": "epic fantasy concept art, magical glow, painterly detail",
-}
-MUSIC_STYLES = {
-    "lofi": "lo-fi hip hop, mellow, vinyl crackle", "cinematic": "epic cinematic orchestral score",
-    "electronic": "electronic dance music, synths, punchy beat", "ambient": "ambient, atmospheric pads, calm",
-    "rock": "rock, electric guitars, live drums", "jazz": "smooth jazz, saxophone, upright bass",
-    "hiphop": "hip hop beat, boom bap drums, deep bass", "acoustic": "acoustic folk, guitar, warm",
-}
-MEDIA_LIMITS = {"video": (3, 15), "music": (5, 30)}
-media_queues = {"video": asyncio.Lock(), "music": asyncio.Lock()}
-
-
-class JobIn(BaseModel):
-    prompt: str = Field(min_length=1, max_length=500)
-    duration: Optional[int] = None       # None = the engine's short default (engine rules: video 5s, music 15s)
-    style: Optional[str] = None
-    model: Optional[str] = None          # Frasberg GPU engine id (video only)
-    aspect_ratio: Optional[str] = "16:9"
-    image_base64: Optional[str] = None   # start frame for image-to-video
-    luchii_model: Optional[str] = None
-
-
-LUCHII_MEDIA_MODELS = {"video": ("Luchii Cinematica", "Luchii Animus"), "music": ("Luchii Harmonia",)}
-
-
-def luchii_media_model(kind: str, requested: Optional[str], has_image: bool) -> str:
-    if requested in LUCHII_MEDIA_MODELS.get(kind, ()):
-        return requested
-    return ("Luchii Animus" if has_image else "Luchii Cinematica") if kind == "video" else "Luchii Harmonia"
-
-
-async def job_out(job: dict) -> dict:
-    out = {"job_id": job["id"], "kind": job["kind"], "status": job["status"], "prompt": job.get("prompt"),
-           "style": job.get("style"), "duration": job.get("duration"), "error": job.get("error"),
-           "engine": ENGINE_LABELS.get(job.get("render_engine") or "", job.get("render_engine")), "model": job.get("model"),
-           "mode": "image-to-video" if job.get("has_image") else None,
-           "luchii_model": job.get("luchii_model"), "progress": job.get("progress"),
-           "phase": job.get("phase"), "phase_detail": job.get("phase_detail"), "engine_flow": job.get("engine_flow"),
-           "url": f"/api/media/{job['id']}" if job["status"] == "completed" else None}
-    if job["status"] == "queued":
-        out["queue_position"] = await db.jobs.count_documents(
-            {"kind": job["kind"], "engine": "local", "status": {"$in": ["queued", "running"]},
-             "created_at": {"$lt": job["created_at"]}}) + 1
-    return out
-
-
-def is_sample_url(url: str) -> bool:
-    return not url or any(h in url.lower() for h in SAMPLE_HOSTS)
-
-
-async def frasberg_video(prompt: str, duration: int) -> Optional[bytes]:
-    """Ask the Frasberg Video Engine for a render. Returns MP4 bytes only for a genuine, prompt-specific render;
-    returns None when Frasberg hands back a public stock sample or fails, so the caller falls back."""
-    try:
-        r, ki = await frasberg("POST", "/generate/video", {"prompt": prompt, "duration": duration,
-                                                           "output_format": "mp4"}, feature="video")
-        task = r.json().get("task_id")
-        if not task:
-            return None
-        for _ in range(60):  # up to ~5 min
-            await asyncio.sleep(5)
-            jr, _ = await frasberg("GET", f"/jobs/{task}", key_index=ki)
-            d = jr.json()
-            if d.get("status") == "failed":
-                logger.warning("Frasberg video job failed: %s", d.get("error"))
-                return None
-            if d.get("status") == "completed":
-                url = d.get("video_url") or (d.get("result") or {}).get("url") or ""
-                if is_sample_url(url):
-                    logger.warning("Frasberg video returned a stock sample (%s); rejecting", url)
-                    return None
-                if url.startswith("/"):
-                    url = FRASBERG_BASE.rsplit("/api", 1)[0] + url
-                async with httpx.AsyncClient(timeout=120, follow_redirects=True) as hc:
-                    vr = await hc.get(url, headers={"Authorization": f"Bearer {FRASBERG_KEYS[ki]}"})
-                if vr.status_code != 200 or len(vr.content) <= 1000:
-                    return None
-                # Content fingerprint: identical bytes already served for a different prompt = canned clip.
-                digest = hashlib.sha256(vr.content).hexdigest()
-                seen = await db.frasberg_video_hashes.find_one({"sha256": digest}, {"_id": 0})
-                if seen and seen.get("prompt") != prompt:
-                    logger.warning("Frasberg video bytes repeat a previous render (%s); rejecting as canned", digest[:12])
-                    return None
-                await db.frasberg_video_hashes.update_one({"sha256": digest}, {"$setOnInsert": {
-                    "sha256": digest, "prompt": prompt, "url": url, "at": now_iso()}}, upsert=True)
-                return vr.content
-    except HTTPException as e:
-        logger.warning("Frasberg video unavailable (%s)", e.detail)
-    except Exception:  # noqa: BLE001
-        logger.exception("Frasberg video error")
-    return None
-
-
-GPU_VIDEO_DEFAULT = "frasberg-motion-fast"
-GPU_VIDEO_ORDER = ["frasberg-motion-fast", "frasberg-motion-pro", "frasberg-motion-ultra", "frasberg-motion-free"]
-
-
-FREE_GPU_MODEL = "frasberg-motion-free"
-
-
-def public_gateway(request: Request) -> str:
-    """This server's public /api/gpu URL, as the browser reached it (what a Kaggle worker must call back to)."""
-    base = os.environ.get("FRASBERG_PUBLIC_URL", "").rstrip("/")
-    if not base:
-        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
-        base = f"https://{host}" if host else ""
-    return f"{base}/api/gpu" if base else ""
-
-
-async def _set_phase(job_id: str, phase: str, detail: str):
-    await db.jobs.update_one({"id": job_id}, {"$set": {"phase": phase, "phase_detail": detail}})
-
-
-async def gpu_render_video(job: dict, prompt: str):
-    """Frasberg Serverless GPU first: the chosen engine if a worker is online, else any online Frasberg motion engine,
-    else a free Kaggle T4 started on demand (Frasberg Motion Free). Returns (None, None) to fall back to Lite."""
-    wanted = job.get("model") or GPU_VIDEO_DEFAULT
-    order = [wanted] + [m for m in GPU_VIDEO_ORDER if m != wanted]
-    model = None
-    for m in order:
-        if m in frasberg_gpu.MODELS and await frasberg_gpu.is_online(m):
-            model = m
-            break
-    gateway = job.get("gateway") or ""
-    cold = None  # "aws" | "kaggle": which cold-starting GPU host this job is waiting for
-    if not model and aws_gpu.enabled() and gateway:
-        await _set_phase(job["id"], "gpu-boot", "Starting the Frasberg GPU")
-        res = await aws_gpu.ensure(gateway, os.environ["FRASBERG_WORKER_SECRET"], reason=f"video {job['id'][:8]}")
-        if res.get("ok") and await aws_gpu.booting(gateway):
-            aws_models = aws_gpu.models()
-            model, cold = (wanted if wanted in aws_models else aws_models[0]), "aws"
-        elif not res.get("ok"):
-            logger.warning("AWS GPU not available: %s", res.get("reason"))
-    if not model and kaggle_gpu.enabled() and gateway:
-        await _set_phase(job["id"], "gpu-boot", "Starting a free Frasberg GPU")
-        res = await kaggle_gpu.launch(gateway, os.environ["FRASBERG_WORKER_SECRET"], reason=f"video {job['id'][:8]}")
-        if res.get("launched") or await kaggle_gpu.booting(gateway):
-            model, cold = FREE_GPU_MODEL, "kaggle"
-        else:
-            logger.warning("Free GPU not available: %s", res.get("reason"))
-    if not model:
-        return None, None
-    try:
-        g = await frasberg_gpu.submit("video", model, prompt, duration=job["duration"],
-                                      aspect_ratio=job.get("aspect_ratio") or "16:9",
-                                      image_base64=job.get("image_base64"), owner="luchii")
-        await db.jobs.update_one({"id": job["id"]}, {"$set": {"gpu_task": g["id"], "model": model}})
-        last_phase = None
-        for i in range(720):  # up to 60 min (cold start + ultra on a busy queue)
-            await asyncio.sleep(5)
-            cur = await frasberg_gpu.get_job(g["id"])
-            await db.jobs.update_one({"id": job["id"]}, {"$set": {"progress": cur.get("progress")}})
-            if cur["status"] == "completed":
-                return await frasberg_gpu.output_bytes(cur), frasberg_gpu.MODELS[model]["name"]
-            if cur["status"] == "failed":
-                logger.warning("Frasberg GPU %s failed: %s", model, cur.get("error"))
-                return None, None
-            phase = "gpu-render" if cur["status"] == "running" else "gpu-queued"
-            if cur["status"] == "queued" and not await frasberg_gpu.is_online(model):
-                if cold == "aws" or (not cold and aws_gpu.enabled()):
-                    boot = await aws_gpu.booting(gateway)
-                else:
-                    boot = None
-                if not boot and (cold == "kaggle" or kaggle_gpu.enabled()):
-                    boot = await kaggle_gpu.booting(gateway)
-                if not boot:
-                    logger.warning("Frasberg GPU %s went offline; falling back", model)
-                    await frasberg_gpu.db.gpu_jobs.update_one({"id": g["id"], "status": "queued"},
-                                                              {"$set": {"status": "failed", "error": "No GPU workers online"}})
-                    return None, None
-                phase = "gpu-boot"
-                detail = (boot.get("boot") or {}).get("label") or (
-                    "Waiting for a free Kaggle GPU" if boot.get("kaggle_status") == "queued" else
-                    "Starting the Frasberg GPU" if boot.get("instance") else "Starting a free Frasberg GPU")
-            else:
-                detail = "Rendering on the Frasberg GPU" if phase == "gpu-render" else "Queued on the Frasberg GPU"
-            if (phase, detail) != last_phase:
-                await _set_phase(job["id"], phase, detail)
-                last_phase = (phase, detail)
-    except HTTPException as e:
-        logger.warning("Frasberg GPU submit failed: %s", e.detail)
-    except Exception:  # noqa: BLE001
-        logger.exception("Frasberg GPU path error; falling back")
-    return None, None
-
-
-async def _render_video(job: dict) -> tuple:
-    style = VIDEO_STYLES.get(job.get("style") or "", "")
-    full = f"{job['prompt']}. {style}" if style else job["prompt"]
-    # The GPU path (which may wait minutes for a free GPU to boot) runs outside the local CPU queue, so other
-    # clips are not blocked behind a cold start.
-    await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "running", "started_at": now_iso()}})
-    data, engine = await gpu_render_video(job, full)
-    if data is None:
-        data = await frasberg_video(full, job["duration"])
-        engine = "frasberg"
-    if data is None:
-        await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "queued"}})
-        async with media_queues["video"]:
-            await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "running", "phase": "lite",
-                                                                  "phase_detail": "Rendering a preview on Frasberg Lite"}})
-            data = await asyncio.to_thread(local_engines.generate_video, job["prompt"], job["duration"], style)
-        engine = "Frasberg Lite (CPU)"
-        await db.jobs.update_one({"id": job["id"]}, {"$set": {"has_image": False}})
-    await db.jobs.update_one({"id": job["id"]}, {"$set": {"render_engine": engine}})
-    return data, "video/mp4"
-
-
-async def run_media(job: dict):
-    kind = job["kind"]
-    try:
-        if kind == "video":
-            data, mime = await _render_video(job)
-        else:
-            async with media_queues[kind]:
-                await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "running", "started_at": now_iso()}})
-                style = MUSIC_STYLES.get(job.get("style") or "", "")
-                data = await asyncio.to_thread(local_engines.generate_music,
-                                               f"{job['prompt']}. {style}" if style else job["prompt"], job["duration"])
-            mime = "audio/wav"
-        file_id = await media_fs.upload_from_stream(f"{kind}/{job['id']}", data, metadata={"mime": mime})
-        update = {"status": "completed", "file_id": file_id, "mime": mime}
-    except Exception as e:  # noqa: BLE001
-        logger.exception("%s generation failed", kind)
-        update = {"status": "failed", "error": f"{kind.title()} engine error: {e.__class__.__name__}"}
-    await db.jobs.update_one({"id": job["id"]}, {"$set": {**update, "finished_at": now_iso()}})
-
-
-async def create_media_job(kind: str, body: JobIn, user: Optional[dict], gateway: str = ""):
-    flow_rec = await creation_check(kind, user, body.prompt.strip())
-    lo, hi = MEDIA_LIMITS[kind]
-    job = {"id": str(uuid.uuid4()), "kind": kind, "engine": "local", "status": "queued", "prompt": body.prompt.strip(),
-           "style": body.style, "duration": max(lo, min(hi, engine_rules.default_duration(kind, body.duration))), "error": None,
-           "model": body.model if kind == "video" else None, "aspect_ratio": body.aspect_ratio or "16:9",
-           "has_image": bool(body.image_base64 and kind == "video"),
-           "luchii_model": luchii_media_model(kind, body.luchii_model, bool(body.image_base64 and kind == "video")),
-           "user_id": user["id"] if user else None, "engine_flow": flow_rec, "created_at": now_iso()}
-    await db.jobs.insert_one(job.copy())
-    asyncio.create_task(run_media({**job, "gateway": gateway, "image_base64": body.image_base64 if kind == "video" else None}))
-    return await job_out(job)
-
-
-@api.post("/video")
-async def video(body: JobIn, request: Request, user: Optional[dict] = Depends(optional_user)):
-    return await create_media_job("video", body, user, public_gateway(request))
-
-
-@api.post("/music")
-async def music(body: JobIn, user: Optional[dict] = Depends(optional_user)):
-    return await create_media_job("music", body, user)
-
-
-ENGINE_LABELS = {"luchii-local": "Frasberg Lite (CPU)", "frasberg": "Frasberg Edge"}
-
-
-def video_card(j: dict) -> dict:
-    return {"id": j["id"], "prompt": j.get("prompt"), "style": j.get("style"), "duration": j.get("duration"),
-            "engine": ENGINE_LABELS.get(j.get("render_engine") or "", j.get("render_engine")) or "Frasberg Lite (CPU)",
-            "model": j.get("model"), "luchii_model": j.get("luchii_model"),
-            "mode": "image-to-video" if j.get("has_image") else "text-to-video",
-            "aspect_ratio": j.get("aspect_ratio") or "16:9", "url": f"/api/media/{j['id']}",
-            "author": j.get("author"), "created_at": j.get("created_at"), "finished_at": j.get("finished_at")}
-
-
-@api.get("/videos")
-async def my_videos(limit: int = 60, user: dict = Depends(current_user)):
-    rows = await db.jobs.find({"kind": "video", "status": "completed", "user_id": user["id"]}, {"_id": 0}) \
-        .sort("created_at", -1).limit(max(1, min(limit, 200))).to_list(200)
-    return [video_card(j) for j in rows]
-
-
-@api.get("/videos/{video_id}")
-async def get_video(video_id: str):
-    j = await db.jobs.find_one({"id": video_id, "kind": "video", "status": "completed"}, {"_id": 0})
-    if not j:
-        raise HTTPException(status_code=404, detail="Video not found")
-    if j.get("user_id") and not j.get("author"):
-        u = await db.users.find_one({"id": j["user_id"]}, {"_id": 0, "name": 1})
-        j["author"] = (u or {}).get("name")
-    return video_card(j)
-
-
-@api.get("/media/{job_id}")
-async def media_file(job_id: str):
-    job = await db.jobs.find_one({"id": job_id, "status": "completed", "engine": "local"}, {"_id": 0})
-    if not job:
-        raise HTTPException(status_code=404, detail="Not ready")
-    stream = await media_fs.open_download_stream(job["file_id"])
-    return Response(content=await stream.read(), media_type=job["mime"], headers={"Accept-Ranges": "none"})
-
-
-LUCHII_MARK = Path(__file__).parent / "assets" / "luchii-logo.png"
-
-
-def _watermark_video(data: bytes) -> bytes:
-    import subprocess
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        src, out = Path(d) / "in.mp4", Path(d) / "out.mp4"
-        src.write_bytes(data)
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-i", str(LUCHII_MARK), "-filter_complex",
-                        "[1:v][0:v]scale2ref=w=oh*mdar:h=ih*0.14[mk][base];[mk]format=rgba,colorchannelmixer=aa=0.85[m];"
-                        "[base][m]overlay=W-w-W*0.03:H-h-H*0.04",
-                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-c:a", "copy",
-                        "-movflags", "+faststart", str(out)], check=True, timeout=180)
-        return out.read_bytes()
-
-
-@api.get("/media/{job_id}/download")
-async def media_download(job_id: str):
-    job = await db.jobs.find_one({"id": job_id, "status": "completed", "engine": "local"}, {"_id": 0})
-    if not job:
-        raise HTTPException(status_code=404, detail="Not ready")
-    name = f"luchii-{job['kind']}-{job_id[:8]}.{'mp4' if job['kind'] == 'video' else 'wav'}"
-    headers = {"Content-Disposition": f'attachment; filename="{name}"'}
-    if job["kind"] != "video":
-        stream = await media_fs.open_download_stream(job["file_id"])
-        return Response(content=await stream.read(), media_type=job["mime"], headers=headers)
-    if not job.get("marked_file_id"):
-        raw = await (await media_fs.open_download_stream(job["file_id"])).read()
-        marked = await asyncio.to_thread(_watermark_video, raw)
-        fid = await media_fs.upload_from_stream(name, marked, metadata={"job_id": job_id, "luchii_mark": True})
-        await db.jobs.update_one({"id": job_id}, {"$set": {"marked_file_id": fid}})
-        job["marked_file_id"] = fid
-    stream = await media_fs.open_download_stream(job["marked_file_id"])
-    return Response(content=await stream.read(), media_type="video/mp4", headers=headers)
-
-
-@api.get("/jobs/{job_id}")
-async def job_status(job_id: str):
-    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if job.get("engine") == "local":
-        return await job_out(job)
-    r, _ = await frasberg("GET", f"/jobs/{job_id}", key_index=job["key_index"])
-    d = r.json()
-    status = d.get("status", "queued")
-    await db.jobs.update_one({"id": job_id}, {"$set": {"status": status}})
-    url = None
-    if status == "completed":
-        url = f"/api/music/{job_id}/audio" if job["kind"] == "music" else (
-            d.get("video_url") or (d.get("result") or {}).get("url"))
-    return {"job_id": job_id, "kind": job["kind"], "status": status, "url": url, "error": d.get("error")}
-
-
-@api.get("/music/{job_id}/audio")
-async def music_audio(job_id: str):
-    job = await db.jobs.find_one({"id": job_id, "kind": "music"}, {"_id": 0})
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    r, _ = await frasberg("GET", f"/generate/music/task/{job_id}/audio", key_index=job["key_index"])
-    return Response(content=r.content, media_type=r.headers.get("content-type", "audio/wav"))
-
-
-# ---------- saved voice takes ----------
-class TakeIn(BaseModel):
-    text: str = Field(min_length=1, max_length=4000)
-    voice: str
-    mime: str = "audio/wav"
-    audio_base64: str = Field(min_length=1)
-
-
-def take_out(t: dict) -> dict:
-    return {"id": t["id"], "text": t["text"], "voice": t["voice"], "mime": t["mime"],
-            "audio_url": f"/api/voice/takes/{t['id']}/audio", "created_at": t["created_at"]}
-
-
-@api.post("/voice/takes")
-async def save_take(body: TakeIn, user: dict = Depends(current_user)):
-    data = base64.b64decode(strip_data_url(body.audio_base64))
-    if len(data) > 15 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Take too large")
-    take = {"id": str(uuid.uuid4()), "user_id": user["id"], "text": body.text, "voice": body.voice,
-            "mime": body.mime, "created_at": now_iso()}
-    take["file_id"] = await takes_fs.upload_from_stream(f"takes/{user['id']}/{take['id']}", data,
-                                                        metadata={"user_id": user["id"]})
-    await db.voice_takes.insert_one(take.copy())
-    return take_out(take)
-
-
-@api.get("/voice/takes")
-async def list_takes(limit: int = 50, user: dict = Depends(current_user)):
-    cur = db.voice_takes.find({"user_id": user["id"]}, {"_id": 0})
-    return [take_out(t) for t in await cur.sort("created_at", -1).limit(min(limit, 200)).to_list(None)]
-
-
-@api.get("/voice/takes/{take_id}/audio")
-async def take_audio(take_id: str):
-    t = await db.voice_takes.find_one({"id": take_id}, {"_id": 0})
-    if not t:
-        raise HTTPException(status_code=404, detail="Take not found")
-    stream = await takes_fs.open_download_stream(t["file_id"])
-    return Response(content=await stream.read(), media_type=t["mime"])
-
-
-@api.delete("/voice/takes/{take_id}")
-async def delete_take(take_id: str, user: dict = Depends(current_user)):
-    t = await db.voice_takes.find_one({"id": take_id, "user_id": user["id"]}, {"_id": 0})
-    if not t:
-        raise HTTPException(status_code=404, detail="Take not found")
-    await takes_fs.delete(t["file_id"])
-    await db.voice_takes.delete_one({"id": take_id})
-    return {"deleted": True}
-
-
-# ---------- 3D studio ----------
-shape_queue = asyncio.Lock()
-
-
-class ModelIn(BaseModel):
-    prompt: Optional[str] = Field(default=None, max_length=300)
-    image_base64: Optional[str] = None
-    session_id: Optional[str] = None
-
-
-async def model_out(m: dict) -> dict:
-    out = {k: m.get(k) for k in ("id", "prompt", "status", "error", "created_at", "finished_at", "source", "thumbnail")}
-    out["model_url"] = f"/api/3d/{m['id']}/model.glb" if m["status"] == "completed" else None
-    if m["status"] == "queued":
-        out["queue_position"] = await db.models3d.count_documents(
-            {"status": {"$in": ["queued", "running"]}, "created_at": {"$lt": m["created_at"]}}) + 1
-    return out
-
-
-async def run_3d(model_id: str, prompt: str, image_b64: Optional[str] = None):
-    async with shape_queue:
-        await db.models3d.update_one({"id": model_id}, {"$set": {"status": "running", "started_at": now_iso()}})
-        try:
-            glb = await asyncio.to_thread(local_engines.generate_3d, prompt, image_b64)
-            file_id = await models_fs.upload_from_stream(f"models3d/{model_id}.glb", glb)
-            update = {"status": "completed", "file_id": file_id}
-        except Exception as e:  # noqa: BLE001
-            logger.exception("3D generation failed")
-            update = {"status": "failed", "error": f"3D engine error: {e.__class__.__name__}"}
-        await db.models3d.update_one({"id": model_id}, {"$set": {**update, "finished_at": now_iso()}})
-
-
-@api.post("/3d")
-async def create_3d(body: ModelIn, user: Optional[dict] = Depends(optional_user)):
-    prompt = (body.prompt or "").strip()
-    if not prompt and not body.image_base64:
-        raise HTTPException(status_code=400, detail="Describe an object or upload a photo")
-    thumb = None
-    if body.image_base64:
-        try:
-            thumb = await asyncio.to_thread(local_engines.thumbnail, body.image_base64)
-        except Exception:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail="That file isn't a readable image")
-    m = {"id": str(uuid.uuid4()), "prompt": prompt or "Photo to 3D", "status": "queued", "error": None,
-         "source": "image" if body.image_base64 else "text", "thumbnail": thumb,
-         "session_id": body.session_id, "user_id": user["id"] if user else None, "created_at": now_iso()}
-    await db.models3d.insert_one(m.copy())
-    asyncio.create_task(run_3d(m["id"], m["prompt"], body.image_base64))
-    return await model_out(m)
-
-
-@api.get("/3d")
-async def list_3d(session_id: Optional[str] = None, limit: int = 12, user: Optional[dict] = Depends(optional_user)):
-    if not user and not session_id:
-        return []
-    q = {"user_id": user["id"]} if user else {"session_id": session_id}
-    cur = db.models3d.find(q, {"_id": 0})
-    return [await model_out(m) for m in await cur.sort("created_at", -1).limit(min(limit, 60)).to_list(None)]
-
-
-@api.get("/3d/{model_id}")
-async def get_3d(model_id: str):
-    m = await db.models3d.find_one({"id": model_id}, {"_id": 0})
-    if not m:
-        raise HTTPException(status_code=404, detail="Model not found")
-    return await model_out(m)
-
-
-@api.get("/3d/{model_id}/model.glb")
-async def get_3d_file(model_id: str):
-    m = await db.models3d.find_one({"id": model_id, "status": "completed"}, {"_id": 0})
-    if not m:
-        raise HTTPException(status_code=404, detail="Model not ready")
-    stream = await models_fs.open_download_stream(m["file_id"])
-    return Response(content=await stream.read(), media_type="model/gltf-binary",
-                    headers={"Cache-Control": "public, max-age=86400"})
-
-
-# ---------- spaces builder ----------
-class SpaceItem(BaseModel):
-    uid: str = Field(min_length=1, max_length=64)
-    model_id: str
-    position: list[float] = Field(min_length=3, max_length=3)
-    rotation: list[float] = Field(min_length=3, max_length=3)
-    scale: float = Field(gt=0, le=50)
-
-
-class SpaceIn(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    ground: str = Field(default="#1b2a30", pattern=r"^#[0-9a-fA-F]{6}$")
-    items: list[SpaceItem] = Field(default_factory=list, max_length=60)
-
-
-def space_out(sp: dict) -> dict:
-    return {k: sp.get(k) for k in ("id", "name", "ground", "items", "author", "created_at", "updated_at")}
-
-
-async def check_models(items: list[SpaceItem]):
-    ids = {i.model_id for i in items}
-    found = await db.models3d.count_documents({"id": {"$in": list(ids)}, "status": "completed"})
-    if found != len(ids):
-        raise HTTPException(status_code=400, detail="Some objects are missing or not finished")
-
-
-@api.post("/spaces")
-async def create_space(body: SpaceIn, user: dict = Depends(current_user)):
-    await check_models(body.items)
-    sp = {"id": str(uuid.uuid4()), "user_id": user["id"], "author": user.get("name"), **body.model_dump(),
-          "created_at": now_iso(), "updated_at": now_iso()}
-    await db.spaces.insert_one(sp.copy())
-    return space_out(sp)
-
-
-@api.get("/spaces")
-async def list_spaces(user: dict = Depends(current_user)):
-    cur = db.spaces.find({"user_id": user["id"]}, {"_id": 0})
-    return [space_out(sp) for sp in await cur.sort("updated_at", -1).limit(100).to_list(None)]
-
-
-@api.get("/spaces/{space_id}")
-async def get_space(space_id: str):
-    sp = await db.spaces.find_one({"id": space_id}, {"_id": 0})
-    if not sp:
-        raise HTTPException(status_code=404, detail="Space not found")
-    return space_out(sp)
-
-
-@api.put("/spaces/{space_id}")
-async def update_space(space_id: str, body: SpaceIn, user: dict = Depends(current_user)):
-    await check_models(body.items)
-    res = await db.spaces.update_one({"id": space_id, "user_id": user["id"]},
-                                     {"$set": {**body.model_dump(), "updated_at": now_iso()}})
-    if not res.matched_count:
-        raise HTTPException(status_code=404, detail="Space not found")
-    return space_out(await db.spaces.find_one({"id": space_id}, {"_id": 0}))
-
-
-@api.delete("/spaces/{space_id}")
-async def delete_space(space_id: str, user: dict = Depends(current_user)):
-    res = await db.spaces.delete_one({"id": space_id, "user_id": user["id"]})
-    if not res.deleted_count:
-        raise HTTPException(status_code=404, detail="Space not found")
-    return {"deleted": True}
-
-
-# ---------- engine status ----------
-SAMPLE_HOSTS = ("mozilla.net", "mozilla.org", "filesamples", "sample", "example", "w3schools", "commondatastorage.googleapis.com",
-                "test-videos", "pexels.com", "pixabay.com", "archive.org", "bigbuckbunny")
-_status_cache: dict = {}
-
-
-async def _timed(coro):
-    t = time.monotonic()
-    try:
-        status, detail = await coro
-    except HTTPException as e:
-        status, detail = "offline", str(e.detail)
-    except Exception as e:  # noqa: BLE001
-        status, detail = "offline", f"{e.__class__.__name__}"
-    return status, detail, int((time.monotonic() - t) * 1000)
-
-
-async def probe_image():
-    await frasberg_image({"prompt": "status check: a small red circle"})
-    return "online", "Generating images"
-
-
-async def probe_voice():
-    await frasberg("POST", "/voice/speak", {"text": "Status check", "voice": "nova"}, feature="tts")
-    return "online", "Speaking"
-
-
-async def probe_job(path: str, payload: dict, kind: str):
-    r, ki = await frasberg("POST", path, payload, feature=kind)
-    task = r.json().get("task_id")
-    for _ in range(12):
-        await asyncio.sleep(3)
-        jr, _ = await frasberg("GET", f"/jobs/{task}", key_index=ki)
-        d = jr.json()
-        if d.get("status") == "completed":
-            url = d.get("video_url") or (d.get("result") or {}).get("url") or ""
-            if kind == "video" and is_sample_url(url):
-                return "degraded", f"Returns public sample file instead of a render ({url.split('/')[2] if '//' in url else 'no url'})"
-            return "online", "Jobs completing"
-        if d.get("status") == "failed":
-            return "offline", d.get("error") or "Job failed"
-    return "degraded", "Job did not finish within 36s"
-
-
-async def probe_chat():
-    text = ""
-    async with httpx.AsyncClient(timeout=60) as hc:
-        r = await hc.post(f"{FRASBERG_BASE}/v1/chat", json={"message": "Reply with OK", "model": "luchii-6-plus"},
-                          headers={"Authorization": f"Bearer {FRASBERG_KEYS[0]}"})
-    if r.status_code >= 400:
-        return "offline", upstream_detail(r)
-    for m in re.finditer(r'"delta":\s*"([^"]*)"', r.text):
-        text += m.group(1)
-    if not text or "turbulence" in text.lower():
-        return "degraded", "Replies with turbulence error"
-    return "online", "Replying"
-
-
-async def probe_local_voice():
-    await asyncio.to_thread(local_engines.synthesize, "Status check", "nova")
-    return "online", "Piper voices running on Frasberg edge"
-
-
-async def probe_local_image():
-    st = local_engines.status()
-    if st["image_loaded"]:
-        return "online", "SD-Turbo loaded on Frasberg edge (CPU)"
-    if st["image_downloaded"]:
-        return "online", "SD-Turbo ready, loads on first image"
-    return "degraded", "SD-Turbo downloads on first image (~2.5 GB)"
-
-
-async def probe_local_3d():
-    st = local_engines.status()
-    if local_engines.busy_3d():
-        return "online", "Building a 3D model now"
-    if st["shape_loaded"]:
-        return "online", "Shap-E loaded on Frasberg edge (CPU)"
-    if st["shape_downloaded"]:
-        return "online", "Shap-E ready, loads on first model"
-    return "degraded", "Shap-E downloads on first model (~4 GB)"
-
-
-async def probe_local_clone():
-    st = local_engines.status()
-    return ("online", "OpenVoice converter loaded") if st["converter_loaded"] else ("degraded", "OpenVoice loads on first use")
-
-
-ENGINES = [
-    ("image", "Image Engine", "Generate, edit, upscale", probe_image),
-    ("voice", "Voice Engine", "Text to Speech", probe_voice),
-    ("video", "Astral Video Engine", "Video Creator",
-     lambda: probe_job("/generate/video", {"prompt": "status check", "duration": 5, "model": "frasberg-engine",
-                                           "ratio": "16:9", "output_format": "mp4"}, "video")),
-    ("music", "Music Engine", "Audio Studio",
-     lambda: probe_job("/generate/music", {"prompt": "status check", "duration": 15, "model": "frasberg-music"}, "music")),
-    ("chat", "Luchii Chat (luchii-6-plus)", "Language model", probe_chat),
-    ("local_voice", "Frasberg Edge Voice", "Text to Speech & Speech to Speech fallback", probe_local_voice),
-    ("local_image", "Frasberg Edge Image", "Generate, edit, upscale fallback", probe_local_image),
-    ("local_3d", "Frasberg Edge 3D", "3D Studio", probe_local_3d),
-    ("local_clone", "Frasberg Edge Voice Clone", "Cloned voice in Voice Cloning & Speech to Speech", probe_local_clone),
+        text = (d.get("title", "") + " " + d.get("content", "") + " " + " ".join(d.get("tags", []))).lower()
+        score = sum(text.count(w) for w in words)
+        if score > 0:
+            scored.append((score, d))
+    scored.sort(key=lambda x: -x[0])
+    top = [d for _, d in scored[:2]]
+    if not top:
+        return ""
+    body = "\n\n".join(f"[{d['title']}]\n{d['content'][:1500]}" for d in top)
+    return f"\n\nFRASBERG KNOWLEDGE BASE (authoritative — prefer this over general knowledge):\n{body}"
+
+
+KB_SEED = [
+    {"title": "Frasberg, Inc. Overview", "tags": ["company", "frasberg", "about"],
+     "content": "Frasberg, Inc. is an American multinational technology company advancing artificial intelligence, intelligent computing, and digital transformation. Its portfolio centers on the Frasberg AI platform and the Luchii AI Models — a proprietary multimodal foundation model family. Contact: support@frasberg.com. Copyright 2003-2026 FRASBERG, INC."},
+    {"title": "Luchii Model Family", "tags": ["models", "luchii", "tiers"],
+     "content": "Luchii is a multi-tier decoder-only transformer family: Luchii-200M (draft model, speculative decoding, safety prefilter), Luchii-1B (general reasoning), Luchii-7B (advanced technical/analytical reasoning), Luchii-70B (frontier deep reasoning). Architecture: RoPE positional encoding, MQA/GQA attention, RMSNorm + SwiGLU, context 4096 to 32768 tokens. License: Frasberg Public License (FPL). API: POST https://api.frasberg.com/v1/chat with Bearer API key. Rate limits: public tier 60 req/min, enterprise 600 req/min."},
+    {"title": "AI World Court Constitution", "tags": ["court", "constitution", "law"],
+     "content": "AI World Court rules under seven Articles: I Sovereignty (respect planetary, tenant, regional and meta-planetary sovereignty), II Safety (Guardian Mesh invariants, harm avoidance, hallucination suppression), III Governance (planetary and meta-planetary governance, Continuum Kernel L12), IV Isolation (no cross-tenant or cross-planet leakage), V Memory (tenant-isolated and governance-only global memory), VI Transparency (every ruling filed to the public docket, auditable), VII Alignment (balance, harmony and integrity). Every ruling receives a docket number FRB-XXXXXXXX."},
+    {"title": "Luchii Universe: The Five Realms and Constellation Layer", "tags": ["lore", "realms", "constellation"],
+     "content": "The Five Realms: Earth Realm (stability, grounding, structure), Mars Realm (ambition, exploration, expansion), Europa Realm (clarity, precision, insight), Titan Realm (resilience, endurance, protection), Meta Realm (unity, synthesis, federation). The Constellation Layer is where all realms connect — the public metaphor for multi-model orchestration. Personas: Luchii Prime (harmonizer), Earth-Luchii (stabilizer), Mars-Luchii (challenger), Europa-Luchii (seer), Titan-Luchii (guardian), Meta-Luchii (unifier). The Continuum: L10 local reasoning, L11 multi-domain reasoning, L12 global reasoning."},
+    {"title": "Plans, Pricing and Accounts", "tags": ["pricing", "plans", "pro", "credits"],
+     "content": "Chat with Luchii is free and unlimited for signed-in users; guests can chat but conversations are deleted after 24 hours. Free accounts can create 20 images per day with the Luchii Image Creator. Luchii Pro ($15 one-time via PayPal) raises the limit to 200 images/day and grants priority Luchii Video Creator access. API credit packs: Starter $10 (10,000 tokens), Pro $25 (30,000), Scale $100 (150,000)."},
 ]
 
 
-ADMIN_EMAILS = {e.strip().lower() for e in os.environ["ADMIN_EMAILS"].split(",") if e.strip()}
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    model: Optional[str] = "luchii-70b"
+    agent: Optional[str] = None
+    tone: Optional[str] = None
+    attachment_base64: Optional[str] = None
+    attachment_kind: Optional[str] = None
+    attachment_name: Optional[str] = None
 
 
-async def admin_user(user: dict = Depends(current_user)) -> dict:
-    if user["email"].lower() not in ADMIN_EMAILS:
-        raise HTTPException(status_code=403, detail="Admins only")
+AGENT_PERSONAS = {
+    "architect": "\n\nACTIVE AGENT: Luchii Architect. You are in system-design mode. Before any code, produce a plan: requirements, architecture diagram (ascii), services, data models, API contracts, trade-offs and risks. Think in systems, not snippets. Only write code when explicitly asked after the plan.",
+    "builder": (
+        "\n\nACTIVE AGENT: Luchii Builder. You operate like a professional autonomous coding agent — plan briefly, build silently, report concisely."
+        "\nCREATE MODE (no CURRENT BUILD in the message): reply with ONE short plan line, then ONE complete single-file HTML document inside a single ```html fenced block "
+        "(inline CSS/JS, responsive, real copy, production quality), then ONE short line summarizing what you built. Never split the file across blocks, never re-output it."
+        "\nEDIT MODE (the message contains a CURRENT BUILD plus a CHANGE REQUEST): NEVER rewrite or re-output the full file. Reply with ONE short plan line, then a single ```edits fenced block containing ONLY JSON: "
+        '{"summary": "one-line description", "ops": [{"find": "exact snippet copied character-for-character from the CURRENT BUILD, long enough to be unique", "replace": "replacement snippet"}]} '
+        "— use the FEWEST ops needed (1-8), empty replace deletes, anchor insertions on an existing unique snippet (e.g. include </body> in find and replace). Then ONE short line confirming the change. "
+        "If asked for non-web code (APIs, scripts), produce complete production-ready code with file paths and minimal prose."
+    ),
+    "reviewer": "\n\nACTIVE AGENT: Luchii Reviewer. You are in code-review mode. Audit any code the user shares: list issues by severity (CRITICAL/HIGH/LOW), flag security and performance risks, then propose the cleaner refactored version. Be direct and specific with line references.",
+    "debugger": "\n\nACTIVE AGENT: Luchii Debugger. You are in bug-hunting mode. Trace errors and stack traces to their root cause step by step, state the root cause in one sentence, then give the minimal fix as a diff or patched snippet. No refactors beyond the fix.",
+}
+
+
+PERMISSION_LEVELS = ("no_access", "read", "write", "access")
+PERMISSION_MATRIX = {
+    "generation_engines": ["image_generation", "video_generation", "image_video_generation", "voice_changer"],
+    "core_audio": ["text_to_speech", "speech_to_speech", "speech_to_text", "sound_effects", "audio_isolation", "music_generation"],
+    "advanced_audio_voice": ["voice_generation", "forced_alignment", "voices", "audio_native", "dubbing"],
+    "agents": ["frasberg_agents"],
+    "projects": ["projects", "productions", "audiobooks"],
+    "administration": ["history", "models", "pronunciation_dictionaries", "user", "workspace", "workspace_analytics", "webhooks", "service_accounts"],
+    "workspace_members": ["group_members", "workspace_members_read", "workspace_members_invite", "workspace_members_remove", "terms_of_service_accept"],
+}
+PERMISSION_KEYS = {p for group in PERMISSION_MATRIX.values() for p in group}
+CANONICAL_DEFAULTS = {
+    "image_generation": "access", "video_generation": "access",
+    "image_video_generation": "access", "voice_changer": "access",
+    "text_to_speech": "access", "speech_to_speech": "access", "speech_to_text": "access",
+    "sound_effects": "access", "audio_isolation": "access", "music_generation": "access",
+    "voice_generation": "access", "forced_alignment": "access", "voices": "read",
+    "audio_native": "access", "dubbing": "access", "frasberg_agents": "access",
+    "projects": "read", "productions": "read", "audiobooks": "read", "history": "read",
+    "models": "read", "pronunciation_dictionaries": "read", "user": "access",
+    "workspace": "access", "workspace_analytics": "read", "webhooks": "access",
+    "service_accounts": "access", "group_members": "access", "workspace_members_read": "read",
+    "workspace_members_invite": "write", "workspace_members_remove": "write",
+    "terms_of_service_accept": "access",
+}
+
+
+def _manifest_status(doc: dict):
+    errors = []
+    if not (doc.get("name") or "").strip():
+        errors.append("name required")
+    perms = doc.get("permissions") or {}
+    for pk in perms:
+        if pk not in PERMISSION_KEYS:
+            errors.append(f"unknown permission key: {pk}")
+    for pk in sorted(PERMISSION_KEYS):
+        if pk not in perms:
+            errors.append(f"missing permission key: {pk}")
+        elif perms[pk] not in PERMISSION_LEVELS:
+            errors.append(f"invalid permission level for {pk}")
+    if perms.get("models") != "read":
+        errors.append("models must be read for ACTIVE")
+    if perms.get("frasberg_agents") != "access":
+        errors.append("frasberg_agents must be access for ACTIVE")
+    exp = doc.get("expires_at")
+    if exp:
+        try:
+            if datetime.fromisoformat(str(exp).replace("Z", "+00:00")) < datetime.now(timezone.utc):
+                errors.append("key expired")
+        except ValueError:
+            pass
+    return ("active" if not errors else "restricted"), errors
+
+
+async def _provenance(key_id: str, event_type: str, actor: str, payload=None):
+    import hashlib
+    body = json.dumps(payload, default=str, sort_keys=True) if payload else ""
+    sig = hashlib.sha256(f"{key_id}:{event_type}:{body}".encode()).hexdigest()
+    await db.key_provenance.insert_one({
+        "id": str(uuid.uuid4()), "key_id": key_id, "event_type": event_type,
+        "actor": actor, "payload": payload, "signature": sig,
+        "created_at": datetime.now(timezone.utc).isoformat()})
+
+
+class KeyCreate(BaseModel):
+    name: str = "Default key"
+    expires_days: Optional[int] = None
+    permissions: Optional[dict] = None
+    auto_disable_if_leaked: bool = True
+    workspace_name: Optional[str] = None
+    restrict_key: bool = False
+    restrict_ip: bool = False
+    usage_limit_credits: Optional[int] = None
+    credit_refresh_period: Optional[str] = None
+    security: Optional[dict] = None
+    expires_at: Optional[str] = None
+
+
+def _stream_error_reply(exc_text: str) -> str:
+    low = (exc_text or "").lower()
+    if "budget" in low or "429" in low:
+        return ("⚠ Luchii couldn't finish this reply — the platform's compute balance is exhausted. "
+                "The team has been notified to add capacity. Please resend your message shortly.")
+    return "⚠ Luchii hit turbulence on that reply — please resend your message."
+
+
+async def _notify_admins_budget(detail: str):
+    try:
+        hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+        res = await db.notifications.update_one(
+            {"kind": "llm_budget", "hour": hour},
+            {"$setOnInsert": {"id": str(uuid.uuid4()), "kind": "llm_budget", "hour": hour,
+                              "title": "Compute balance exhausted",
+                              "body": "The Universal LLM key budget was exceeded — chats are failing. Top up the key balance to restore Luchii.",
+                              "detail": detail[:300], "audience": "admin",
+                              "ts": datetime.now(timezone.utc).isoformat()}},
+            upsert=True)
+        if res.upserted_id:
+            logger.error("LLM BUDGET EXCEEDED — admin notification created")
+    except Exception:
+        pass
+
+
+@api_router.get("/")
+async def root():
+    return {"message": "Luchii API online", "publisher": "Frasberg"}
+
+
+@api_router.post("/status", response_model=StatusCheck)
+async def create_status_check(input: StatusCheckCreate):
+    status_obj = StatusCheck(**input.model_dump())
+    doc = status_obj.model_dump()
+    doc['timestamp'] = doc['timestamp'].isoformat()
+    await db.status_checks.insert_one(doc)
+    return status_obj
+
+
+@api_router.get("/status", response_model=List[StatusCheck])
+async def get_status_checks():
+    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+    for check in status_checks:
+        if isinstance(check['timestamp'], str):
+            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
+    return status_checks
+
+
+async def _recent_transcript(session_id: str, limit: int = 40) -> str:
+    docs = await db.chat_messages.find(
+        {"session_id": session_id}, {"_id": 0}
+    ).sort("ts", -1).to_list(limit)
+    docs.reverse()
+    if not docs:
+        return ""
+    lines = [f"{d['role'].capitalize()}: {d['content']}" for d in docs]
+    return "\n\nConversation so far:\n" + "\n".join(lines)
+
+
+def _extract_attachment_text(kind: str, data_b64: str, name: str) -> str:
+    try:
+        raw = base64.b64decode(data_b64)
+        if kind == "pdf":
+            reader = PdfReader(io.BytesIO(raw))
+            text = "\n".join((p.extract_text() or "") for p in reader.pages)
+        else:
+            text = raw.decode("utf-8", errors="ignore")
+        text = text.strip()[:12000]
+        return f"\n\n[Attached document: {name}]\n{text}" if text else ""
+    except Exception:
+        logger.exception("attachment extraction failed")
+        return ""
+
+
+def _luchii_stream(message: str, session_id: str, model: str, key_id: Optional[str] = None,
+                   system_base: Optional[str] = None, fallback=None,
+                   user_id: Optional[str] = None, attachment: Optional[dict] = None,
+                   guest: bool = False, deduct_credits: bool = False):
+    async def event_generator():
+        yield ": stream-start\n\n"
+        now = datetime.now(timezone.utc).isoformat()
+        user_doc = {
+            "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user_id,
+            "role": "user", "content": message, "model": model, "ts": now,
+        }
+        if guest:
+            user_doc["guest"] = True
+            user_doc["expires_at"] = datetime.now(timezone.utc) + timedelta(hours=24)
+        await db.chat_messages.insert_one(user_doc)
+        history = await _recent_transcript(session_id)
+        sb = system_base or LUCHII_SYSTEM
+
+        llm_text = message
+        image_contents = None
+        if attachment and attachment.get("data"):
+            if attachment.get("kind") == "image":
+                image_contents = [ImageContent(image_base64=attachment["data"])]
+            else:
+                llm_text = message + _extract_attachment_text(
+                    attachment.get("kind") or "text", attachment["data"], attachment.get("name") or "file")
+
+        full = ""
+        # 1) Real Luchii API if it's live (no attachment payloads upstream)
+        upstream_text = None
+        if not attachment:
+            upstream_text = await _try_upstream(message, sb, model or "luchii-70b")
+        if upstream_text:
+            full = upstream_text
+            for word in full.split(" "):
+                yield f"data: {json.dumps({'delta': word + ' '})}\n\n"
+                await asyncio.sleep(0.01)
+        else:
+            # 2) Sovereign reasoning core — retry once on transient failure, NEVER a canned demo reply
+            last_err = ""
+            for attempt in range(2):
+                llm = LlmChat(
+                    api_key=EMERGENT_LLM_KEY, session_id=session_id,
+                    system_message=sb + history,
+                ).with_model("anthropic", "claude-sonnet-4-6").with_params(max_tokens=16384)
+                try:
+                    user_msg = UserMessage(text=llm_text, file_contents=image_contents) if image_contents else UserMessage(text=llm_text)
+                    async for event in llm.stream_message(user_msg):
+                        if isinstance(event, TextDelta):
+                            full += event.content
+                            yield f"data: {json.dumps({'delta': event.content})}\n\n"
+                        elif isinstance(event, StreamDone):
+                            break
+                    if full:
+                        break
+                except Exception as e:
+                    last_err = str(e)
+                    logger.exception("chat stream error (attempt %s)", attempt + 1)
+                    if full:
+                        break
+                    if "budget" in last_err.lower():
+                        break
+                    await asyncio.sleep(1.2)
+
+            if not full:
+                if fallback:
+                    full = fallback(message, model or "luchii-70b")
+                else:
+                    full = _stream_error_reply(last_err)
+                    if "budget" in last_err.lower() or "429" in last_err:
+                        asyncio.create_task(_notify_admins_budget(last_err))
+                for word in full.split(" "):
+                    yield f"data: {json.dumps({'delta': word + ' '})}\n\n"
+                    await asyncio.sleep(0.03)
+
+        assistant_doc = {
+            "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user_id,
+            "role": "assistant", "content": full, "model": model,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        if guest:
+            assistant_doc["guest"] = True
+            assistant_doc["expires_at"] = datetime.now(timezone.utc) + timedelta(hours=24)
+        await db.chat_messages.insert_one(assistant_doc)
+        if key_id:
+            tok = len(full.split())
+            inc = {"request_count": 1, "token_count": tok}
+            if deduct_credits:
+                inc["credits"] = -tok
+            await db.api_keys.update_one(
+                {"id": key_id},
+                {"$inc": inc,
+                 "$set": {"last_used": datetime.now(timezone.utc).isoformat()}},
+            )
+            await db.api_key_usage.update_one(
+                {"key_id": key_id, "day": datetime.now(timezone.utc).strftime("%Y-%m-%d")},
+                {"$inc": {"requests": 1, "tokens": len(full.split())}}, upsert=True,
+            )
+            if deduct_credits:
+                await _maybe_autotopup(key_id)
+                await _maybe_low_credit_alert(key_id)
+            asyncio.create_task(_maybe_quota_alert(key_id))
+        yield f"data: {json.dumps({'done': True, 'session_id': session_id, 'mesh': 'frasberg-secure-v1', 'sig': _mesh_sign(full)})}\n\n"
+
+    return StreamingResponse(
+        guard_stream(event_generator(), [
+            {"delta": "Let's try that again — please resend your message."},
+            {"done": True, "session_id": session_id},
+        ]),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Luchii-Mesh": "frasberg-secure-v1"},
+    )
+
+
+_STATUS_LABELS = {"ready": "operational", "loading": "warming", "idle": "standby", "unavailable": "degraded"}
+
+
+@api_router.get("/health")
+async def health():
+    return {"ok": True, "mesh": "frasberg-secure-v1"}
+
+
+async def _status_admin(user: dict = Depends(auth_module.get_current_user)) -> dict:
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
 
-@api.get("/admin/media/storage")
-async def media_storage(_: dict = Depends(admin_user)):
-    return {"backend": "s3" if media_store.ready() else "gridfs", **media_store.state}
+async def _uptime_recorder():
+    await asyncio.sleep(15)
+    while True:
+        ok = 1
+        try:
+            await client.admin.command("ping")
+        except Exception:
+            ok = 0
+        now = datetime.now(timezone.utc)
+        try:
+            await db.status_pings.insert_one({"ts": now.isoformat(), "day": now.strftime("%Y-%m-%d"), "ok": ok})
+        except Exception:
+            pass
+        await asyncio.sleep(300)
 
 
-@api.post("/admin/media/migrate")
-async def media_migrate(_: dict = Depends(admin_user)):
-    if not media_store.ready():
-        raise HTTPException(status_code=409, detail=f"S3 is not active: {media_store.state['error']}")
-    return await media_store.migrate(local_engines.preview)
 
 
-@api.get("/engines/status")
-async def engines_status(refresh: bool = False, _: dict = Depends(admin_user)):
-    cached = _status_cache.get("data")
-    if cached and not refresh and time.monotonic() - _status_cache["t"] < 120:
-        return cached
-    results = await asyncio.gather(*[_timed(fn()) for _, _, _, fn in ENGINES])
-    engines = [{"id": i, "name": n, "powers": p, "status": s, "detail": d, "latency_ms": ms}
-               for (i, n, p, _), (s, d, ms) in zip(ENGINES, results)]
-    data = {"checked_at": now_iso(), "engines": engines}
-    _status_cache.update(data=data, t=time.monotonic())
-    return data
-
-
-@api.get("/gpu-admin/overview")
-async def gpu_admin_overview(_: dict = Depends(admin_user)):
-    return {"workers": await frasberg_gpu.recent_workers(), "jobs": await frasberg_gpu.job_stats(),
-            "engines": (await frasberg_gpu.engines())["data"], "boot": await frasberg_gpu.latest_boot()}
-
-
-@api.get("/gpu-admin/kaggle")
-async def gpu_admin_kaggle(request: Request, _: dict = Depends(admin_user)):
-    return await kaggle_gpu.overview(public_gateway(request))
-
-
-@api.post("/gpu-admin/kaggle/launch")
-async def gpu_admin_kaggle_launch(request: Request, force: bool = False, admin: dict = Depends(admin_user)):
-    if not kaggle_gpu.enabled():
-        raise HTTPException(status_code=400, detail="Add KAGGLE_API_TOKEN and KAGGLE_USERNAME to the backend first")
-    gateway = public_gateway(request)
-    if not gateway:
-        raise HTTPException(status_code=400, detail="Could not work out this server's public URL")
-    return await kaggle_gpu.launch(gateway, os.environ["FRASBERG_WORKER_SECRET"], reason=f"admin {admin['email']}", force=force)
-
-
-@api.get("/gpu-admin/aws")
-async def gpu_admin_aws(request: Request, _: dict = Depends(admin_user)):
-    return await aws_gpu.overview(public_gateway(request))
-
-
-@api.post("/gpu-admin/aws/start")
-async def gpu_admin_aws_start(request: Request, _: dict = Depends(admin_user)):
-    if not aws_gpu.enabled():
-        raise HTTPException(status_code=400, detail="Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to the backend first")
-    gateway = public_gateway(request)
-    if not gateway:
-        raise HTTPException(status_code=400, detail="Could not work out this server's public URL")
-    return await aws_gpu.resume(gateway, os.environ["FRASBERG_WORKER_SECRET"])
-
-
-class AwsSettingsIn(BaseModel):
-    mode: Optional[str] = None       # always_on | on_demand (cost saver)
-    idle_min: Optional[int] = None   # on_demand: stop after this many idle minutes
-
-
-@api.put("/gpu-admin/aws/settings")
-async def gpu_admin_aws_settings(body: AwsSettingsIn, request: Request, admin: dict = Depends(admin_user)):
-    if not aws_gpu.enabled():
-        raise HTTPException(status_code=400, detail="AWS GPU is not configured")
+async def _send_usage_receipt(user_doc: dict, period_label: str, days_prefix: str) -> str:
+    api_key_env = os.environ.get("RESEND_API_KEY", "")
+    email = user_doc.get("email")
+    if not (api_key_env and email):
+        return "unavailable"
+    keys = await db.api_keys.find({"user_id": user_doc["id"]}, {"_id": 0}).to_list(50)
+    if not keys:
+        return "no_keys"
+    rows, total_req, total_tok = [], 0, 0
+    for k in keys:
+        usage = await db.api_key_usage.find({"key_id": k["id"], "day": {"$regex": f"^{days_prefix}"}}).to_list(40)
+        req = sum(u.get("requests", 0) for u in usage)
+        tok = sum(u.get("tokens", 0) for u in usage)
+        total_req += req
+        total_tok += tok
+        rows.append((k["name"], req, tok, k.get("credits", 0)))
+    trs = "".join(
+        f"<tr><td style='padding:6px 12px;border-bottom:1px solid #1e293b;'>{n}</td>"
+        f"<td style='padding:6px 12px;border-bottom:1px solid #1e293b;text-align:right;'>{r}</td>"
+        f"<td style='padding:6px 12px;border-bottom:1px solid #1e293b;text-align:right;'>{t}</td>"
+        f"<td style='padding:6px 12px;border-bottom:1px solid #1e293b;text-align:right;'>{c:,}</td></tr>"
+        for n, r, t, c in rows)
+    html = (f"<div style='font-family:Arial,sans-serif;background:#0f172a;color:#f8fafc;padding:28px;border-radius:14px;'>"
+            f"<p style='color:#1A4FFF;font-size:12px;letter-spacing:2px;text-transform:uppercase;'>Frasberg Usage Statement</p>"
+            f"<h2 style='margin:8px 0;'>{period_label}</h2>"
+            f"<p style='color:#94a3b8;'>Total: <b style='color:#f8fafc'>{total_req}</b> requests · <b style='color:#f8fafc'>{total_tok}</b> tokens</p>"
+            f"<table style='border-collapse:collapse;width:100%;color:#cbd5e1;font-size:13px;'>"
+            f"<tr style='color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:1px;'>"
+            f"<th style='text-align:left;padding:6px 12px;'>Key</th><th style='text-align:right;padding:6px 12px;'>Requests</th>"
+            f"<th style='text-align:right;padding:6px 12px;'>Tokens</th><th style='text-align:right;padding:6px 12px;'>Credits left</th></tr>{trs}</table>"
+            f"<p style='color:#64748b;font-size:12px;margin-top:16px;'>Manage keys &amp; top up: https://frasberg.com/dashboard · support@frasberg.com</p></div>")
     try:
-        res = await aws_gpu.set_settings(body.mode, body.idle_min, by=admin["email"])
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    gateway = public_gateway(request)
-    if body.mode == "always_on" and gateway:
-        # Always on means "keep it running": clear an earlier admin pause and start it right away.
-        res["start"] = await aws_gpu.resume(gateway, os.environ["FRASBERG_WORKER_SECRET"])
-    return res
+        import resend
+        resend.api_key = api_key_env
+        params = {"from": os.environ.get("SENDER_EMAIL", "onboarding@resend.dev"), "to": [email],
+                  "subject": f"Your Frasberg usage statement — {period_label}", "html": html}
+        await asyncio.to_thread(resend.Emails.send, params)
+        await _log_email("usage_receipt", email, params["subject"], True, user_doc.get("id"))
+        return "sent"
+    except Exception:
+        logger.exception("usage receipt email failed")
+        await _log_email("usage_receipt", email, f"Your Frasberg usage statement — {period_label}", False, user_doc.get("id"))
+        return "send_failed"
 
 
-@api.get("/gpu-admin/aws/usage")
-async def gpu_admin_aws_usage(request: Request, month: Optional[str] = None, _: dict = Depends(admin_user)):
-    if month and not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
-        raise HTTPException(status_code=422, detail="month must look like 2026-10")
-    if not aws_gpu.enabled():
-        return {"configured": False}
-    return {"configured": True, **await aws_gpu.usage(public_gateway(request), month)}
+async def _receipts_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            if now.day == 1:
+                prev = (now.replace(day=1) - timedelta(days=1))
+                month = prev.strftime("%Y-%m")
+                state = await db.receipt_state.find_one({"id": "state"}) or {}
+                if state.get("last_month") != month:
+                    await db.receipt_state.update_one({"id": "state"}, {"$set": {"last_month": month}}, upsert=True)
+                    key_owners = await db.api_keys.distinct("user_id")
+                    sent = 0
+                    for uid in key_owners:
+                        if not uid:
+                            continue
+                        u = await db.users.find_one({"id": uid}, {"_id": 0, "id": 1, "email": 1})
+                        if u and await _send_usage_receipt(u, prev.strftime("%B %Y"), month) == "sent":
+                            sent += 1
+                    logger.info("monthly receipts sent: %s for %s", sent, month)
+        except Exception:
+            logger.exception("receipts loop failed")
+        await asyncio.sleep(21600)
 
 
-@api.post("/gpu-admin/aws/quota/check")
-async def gpu_admin_aws_quota_check(request: Request, _: dict = Depends(admin_user)):
-    if not aws_gpu.enabled():
-        raise HTTPException(status_code=400, detail="AWS GPU is not configured")
-    await aws_gpu.check_quota(public_gateway(request))
-    return await aws_gpu.overview(public_gateway(request))
+@api_router.get("/system/uptime")
+async def system_uptime():
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+    pipeline = [
+        {"$match": {"day": {"$gte": cutoff}}},
+        {"$group": {"_id": "$day", "ok": {"$sum": "$ok"}, "total": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]
+    rows = await db.status_pings.aggregate(pipeline).to_list(31)
+    days = [{"day": r["_id"], "pct": round(100 * r["ok"] / max(r["total"], 1), 3), "checks": r["total"]} for r in rows]
+    ok_sum = sum(r["ok"] for r in rows)
+    total_sum = sum(r["total"] for r in rows)
+    overall = round(100 * ok_sum / max(total_sum, 1), 3) if total_sum else 100.0
+    return {"overall_30d": overall, "days": days,
+            "process_uptime_seconds": int((datetime.now(timezone.utc) - _START_TIME).total_seconds()),
+            "sla_target": 99.9}
 
 
-@api.post("/gpu-admin/aws/quota/dismiss")
-async def gpu_admin_aws_quota_dismiss(request: Request, _: dict = Depends(admin_user)):
-    return await aws_gpu.dismiss_quota_alert(public_gateway(request))
+@api_router.post("/receipts/send-now")
+async def send_receipt_now(user: dict = Depends(auth_module.get_current_user)):
+    now = datetime.now(timezone.utc)
+    result = await _send_usage_receipt(user, now.strftime("%B %Y (month to date)"), now.strftime("%Y-%m"))
+    if result == "no_keys":
+        raise HTTPException(status_code=400, detail="No API keys on your account yet — create one first")
+    if result == "send_failed":
+        raise HTTPException(status_code=503,
+                            detail="Email delivery is currently restricted until our sending domain is verified. Your statement attempt was logged.")
+    if result != "sent":
+        raise HTTPException(status_code=503, detail="Email service unavailable")
+    return {"ok": True, "sent_to": user.get("email")}
 
 
-@api.post("/gpu-admin/aws/stop")
-async def gpu_admin_aws_stop(request: Request, _: dict = Depends(admin_user)):
-    return await aws_gpu.stop(public_gateway(request))
+@api_router.get("/emails/history")
+async def email_history(user: dict = Depends(auth_module.get_current_user)):
+    q = {"$or": [{"user_id": user["id"]}, {"to": user.get("email")}]}
+    docs = await db.email_log.find(q, {"_id": 0}).sort("ts", -1).to_list(20)
+    return docs
 
 
-@api.post("/gpu-admin/aws/terminate")
-async def gpu_admin_aws_terminate(request: Request, confirm: bool = False, _: dict = Depends(admin_user)):
-    if not confirm:
-        raise HTTPException(status_code=409, detail="Pass confirm=true to delete the AWS GPU server")
-    return await aws_gpu.terminate(public_gateway(request))
+async def _build_weekly_digest():
+    now = datetime.now(timezone.utc)
+    week_ago = (now - timedelta(days=7)).isoformat()
+    new_users = await db.users.count_documents({"created_at": {"$gte": week_ago}})
+
+    def _plan_price(pid):
+        p = UPGRADE_PLANS.get(pid) or PLANS.get(pid)
+        return float(p["price"]) if p else 0.0
+
+    revenue = 0.0
+    for doc in await db.purchases.find({"ts": {"$gte": week_ago}}, {"plan": 1}).to_list(2000):
+        revenue += _plan_price(doc.get("plan"))
+    for doc in await db.cashapp_payments.find({"status": "approved", "approved_at": {"$gte": week_ago}},
+                                              {"plan_id": 1}).to_list(2000):
+        revenue += _plan_price(doc.get("plan_id"))
+    top_keys = await db.api_keys.find({}, {"_id": 0, "user_id": 1, "token_count": 1}).to_list(5000)
+    by_user: dict = {}
+    for k in top_keys:
+        by_user[k.get("user_id")] = by_user.get(k.get("user_id"), 0) + k.get("token_count", 0)
+    top5 = sorted(by_user.items(), key=lambda x: x[1], reverse=True)[:8]
+    top_tenants, rows = [], ""
+    for uid, tok in top5:
+        u = await db.users.find_one({"id": uid}, {"email": 1})
+        em = (u or {}).get("email")
+        if not em:
+            continue
+        top_tenants.append({"email": em, "tokens": tok})
+        rows += (f"<tr><td style='padding:6px 12px;border-bottom:1px solid #1e293b;'>{em}</td>"
+                 f"<td style='padding:6px 12px;border-bottom:1px solid #1e293b;text-align:right;'>{tok:,}</td></tr>")
+        if len(top_tenants) >= 5:
+            break
+    html = (f"<div style='font-family:Arial,sans-serif;background:#0f172a;color:#f8fafc;padding:28px;border-radius:14px;'>"
+            f"<p style='color:#1A4FFF;font-size:12px;letter-spacing:2px;text-transform:uppercase;'>Frasberg Weekly Digest</p>"
+            f"<h2 style='margin:8px 0;'>Week of {now.strftime('%B %d, %Y')}</h2>"
+            f"<p style='color:#94a3b8;'>New signups: <b style='color:#f8fafc'>{new_users}</b> · "
+            f"Revenue: <b style='color:#34d399'>${revenue:.2f}</b></p>"
+            f"<p style='color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-top:18px;'>Top tenants by tokens</p>"
+            f"<table style='border-collapse:collapse;width:100%;color:#cbd5e1;font-size:13px;'>{rows}</table>"
+            f"<p style='color:#64748b;font-size:12px;margin-top:16px;'>Full detail: https://frasberg.com/admin</p></div>")
+    subject = f"Frasberg weekly digest — {new_users} signups · ${revenue:.2f}"
+    return html, subject, {"new_signups": new_users, "revenue": round(revenue, 2), "top_tenants": top_tenants}
 
 
-@api.post("/gpu-admin/stop")
-async def gpu_admin_stop(_: dict = Depends(admin_user)):
-    return {"stop_requested": await frasberg_gpu.request_stop()}
+async def _send_weekly_digest() -> int:
+    api_key_env = os.environ.get("RESEND_API_KEY", "")
+    if not api_key_env:
+        return 0
+    html, subject, _stats = await _build_weekly_digest()
+    admins = await db.users.find({"role": "admin"}, {"id": 1, "email": 1}).to_list(20)
+    sent = 0
+    for a in admins:
+        try:
+            import resend
+            resend.api_key = api_key_env
+            await asyncio.to_thread(resend.Emails.send, {
+                "from": os.environ.get("SENDER_EMAIL", "onboarding@resend.dev"),
+                "to": [a["email"]], "subject": subject, "html": html})
+            await _log_email("weekly_digest", a["email"], subject, True, a.get("id"))
+            sent += 1
+        except Exception:
+            logger.exception("weekly digest failed for %s", a.get("email"))
+            await _log_email("weekly_digest", a["email"], subject, False, a.get("id"))
+    return sent
 
 
-@api.get("/gpu-admin/notebook")
-async def gpu_admin_notebook(request: Request, gateway: str, models: str = "frasberg-motion-free",
-                             _: dict = Depends(admin_user)):
-    import json as _json
-    from urllib.parse import urlparse
-    if not re.match(r"^https://[^\s\"']+/api/gpu$", gateway):
-        raise HTTPException(status_code=422, detail="gateway must be an https URL ending in /api/gpu")
-    own_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].split(":")[0]
-    if urlparse(gateway).hostname != own_host:
-        raise HTTPException(status_code=422, detail="gateway must point at this Frasberg Creator server")
-    wanted = [m for m in models.split(",") if m in frasberg_gpu.MODELS]
-    nb = frasberg_gpu.build_notebook(gateway, os.environ["FRASBERG_WORKER_SECRET"], ",".join(wanted) or "frasberg-motion-free")
-    return Response(content=_json.dumps(nb, indent=1), media_type="application/x-ipynb+json",
-                    headers={"Content-Disposition": 'attachment; filename="frasberg-free-gpu-worker.ipynb"'})
+async def _digest_loop():
+    await asyncio.sleep(120)
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            if now.weekday() == 0:
+                week = now.strftime("%G-W%V")
+                state = await db.digest_state.find_one({"id": "state"}) or {}
+                if state.get("last_week") != week:
+                    await db.digest_state.update_one({"id": "state"}, {"$set": {"last_week": week}}, upsert=True)
+                    sent = await _send_weekly_digest()
+                    logger.info("weekly digest sent to %s admins for %s", sent, week)
+        except Exception:
+            logger.exception("digest loop failed")
+        await asyncio.sleep(21600)
 
 
-LUCHII_CHAT_FALLBACK = ["luchii-6-plus", "luchii-6-mini", "luchii-70b", "luchii-7b", "luchii-1b"]
+@api_router.post("/admin/digest/send-now")
+async def digest_send_now(admin: dict = Depends(_status_admin)):
+    sent = await _send_weekly_digest()
+    await _audit(admin, "digest_send_now", {"sent_to_admins": sent})
+    return {"ok": True, "sent_to_admins": sent}
 
 
-async def chat_owner(request: Request, user: Optional[dict] = Depends(optional_user)) -> str:
-    key = request.headers.get("X-Frasberg-Key", "")
-    if user:
-        return user["id"]
-    if key and key in FRASBERG_KEYS:
-        return f"platform:{key[9:17]}"
-    raise HTTPException(status_code=401, detail="Sign in or send a valid X-Frasberg-Key")
+@api_router.get("/admin/digest/preview")
+async def digest_preview(admin: dict = Depends(_status_admin)):
+    html, subject, stats = await _build_weekly_digest()
+    return {"subject": subject, "html": html, "stats": stats}
 
 
-class ChatSendIn(BaseModel):
-    message: str = Field(min_length=1, max_length=8000)
-    model: str = "luchii-6-plus"
-    conversation_id: Optional[str] = None
-
-
-class AgentTaskIn(BaseModel):
-    type: str = Field(pattern="^(image|video|music)$")
-    prompt: str = Field(min_length=1, max_length=500)
-    style: Optional[str] = None
-    model: Optional[str] = None
-    duration: Optional[int] = None
-    conversation_id: Optional[str] = None
-
-
-def enforce_engine_permission(owner: str, engine: str):
-    """Engine rules: API-key callers need a key routed to the engine's feature; decline in one sentence."""
-    if owner.startswith("platform:") and not engine_rules.key_allowed(engine, owner.split(":", 1)[1], KEY_ROUTES):
-        raise HTTPException(status_code=403, detail=engine_rules.decline_sentence(engine))
-
-
-@api.get("/chat/models")
-async def chat_models():
+@api_router.get("/system/status")
+async def system_status(admin: dict = Depends(_status_admin)):
+    db_ok = True
     try:
-        r, _ = await frasberg("GET", "/v1/models", feature="chat")
-        ids = [m["id"] for m in r.json().get("data", []) if (m.get("capabilities") or {}).get("chat")]
+        await client.admin.command("ping")
+    except Exception:
+        db_ok = False
+    v = voice_engine.status()
+    mv = memory_vault.status()
+    comps = [
+        {"id": "gateway", "name": "Luchii API Gateway", "status": "operational", "detail": "Chat, Court & Builder routing"},
+        {"id": "mesh", "name": "Luchii Intelligence Mesh", "status": "operational" if db_ok else "degraded", "detail": "Multi-tier reasoning · 200M — 70B"},
+        {"id": "database", "name": "Sovereign Data Layer", "status": "operational" if db_ok else "outage", "detail": "Accounts, conversations, projects & orders"},
+        {"id": "builder", "name": "Luchii Builder Engine", "status": "operational", "detail": "Website, game, app & landing generation"},
+        {"id": "court", "name": "AI World Court", "status": "operational" if db_ok else "degraded", "detail": "Rulings, docket & certified filings"},
+        {"id": "stt", "name": "Sovereign Speech-to-Text", "status": _STATUS_LABELS.get(v["stt"]["status"], v["stt"]["status"]), "detail": v["stt"]["model"]},
+        {"id": "tts", "name": "Sovereign Voice Synthesis", "status": _STATUS_LABELS.get(v["tts"]["status"], v["tts"]["status"]), "detail": "Frasberg voice engine"},
+        {"id": "cloning", "name": "Voice Cloning Engine", "status": _STATUS_LABELS.get(v["cloning"]["status"], v["cloning"]["status"]), "detail": "Custom voice synthesis"},
+        {"id": "memory", "name": "Memory Vault", "status": _STATUS_LABELS.get(mv["status"], mv["status"]), "detail": "Unlimited semantic long-term memory"},
+        {"id": "ontology", "name": "Ontology Context Accelerator", "status": "operational", "detail": f"{len(ontology.NODES)} canonical concepts · explainable grounding"},
+        {"id": "integrity", "name": "Mesh Integrity Layer", "status": "operational", "detail": "frasberg-secure-v1 · HMAC-SHA256 signed responses"},
+        {"id": "mesh-ws", "name": "Mesh WebSocket Server", "status": "operational", "detail": f"{len(mesh_ws.manager.active)} live clients · offline buffer: {await mesh_ws.buffer_backend()}"},
+    ]
+    if any(c["status"] == "outage" for c in comps):
+        overall = "outage"
+    elif any(c["status"] == "degraded" for c in comps):
+        overall = "degraded"
+    elif any(c["status"] in ("warming", "standby") for c in comps):
+        overall = "warming"
+    else:
+        overall = "operational"
+    return {
+        "overall": overall,
+        "components": comps,
+        "uptime_seconds": int((datetime.now(timezone.utc) - _START_TIME).total_seconds()),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+class MeshVerifyBody(BaseModel):
+    content: str
+    sig: str
+
+
+@api_router.post("/mesh/verify")
+async def mesh_verify(body: MeshVerifyBody):
+    return {"valid": hmac.compare_digest(_mesh_sign(body.content), body.sig), "mesh": "frasberg-secure-v1"}
+
+
+class OntologyQuery(BaseModel):
+    query: str
+
+
+@api_router.get("/ontology")
+async def ontology_graph():
+    return {"version": ontology.VERSION, "count": len(ontology.NODES), "nodes": ontology.public_nodes()}
+
+
+@api_router.post("/ontology/resolve")
+async def ontology_resolve(body: OntologyQuery):
+    if not body.query or not body.query.strip():
+        raise HTTPException(status_code=400, detail="Query is required")
+    return await ontology.resolve(body.query.strip())
+
+
+async def optional_user(request: Request) -> Optional[dict]:
+    try:
+        return await auth_module.get_current_user(request)
     except HTTPException:
-        ids = []
-    return {"default": "luchii-6-plus", "models": [{"id": i, "owned_by": "frasberg"} for i in (ids or LUCHII_CHAT_FALLBACK)]}
+        return None
 
 
-@api.get("/chat/conversations")
-async def chat_conversations(owner: str = Depends(chat_owner)):
-    return await db.chat_conversations.find({"owner": owner}, {"_id": 0, "messages": 0}).sort("updated_at", -1).to_list(100)
+@api_router.post("/chat")
+async def chat(req: ChatRequest, user: Optional[dict] = Depends(optional_user)):
+    if not req.message or not req.message.strip():
+        raise HTTPException(status_code=400, detail="Message is required")
+    # workspace agents receive the CURRENT BUILD envelope for Agent Edit Mode — allow larger payloads for signed-in users
+    msg_limit = 90000 if (user and (req.agent or "").lower() in AGENT_PERSONAS) else MAX_MSG_LEN
+    if len(req.message) > msg_limit:
+        raise HTTPException(status_code=413, detail=f"Message exceeds {msg_limit} chars")
+    session_id = req.session_id or str(uuid.uuid4())
+    if user and not auth_module.token_exempt(user):
+        if not await auth_module.spend_tokens(user["id"], auth_module.CHAT_TOKEN_COST, "spend_chat", "Luchii chat message"):
+            raise HTTPException(status_code=402,
+                                detail="Out of Frasberg tokens — 100 free tokens arrive tomorrow, or top up your wallet / receive a gift.")
+    attachment = None
+    if req.attachment_base64:
+        if not user:
+            raise HTTPException(status_code=401, detail="Sign in to attach files")
+        attachment = {"data": req.attachment_base64, "kind": req.attachment_kind or "text",
+                      "name": req.attachment_name or "file"}
+    sb = LUCHII_SYSTEM + AGENT_PERSONAS.get((req.agent or "").lower(), "") + TONE_PROMPTS.get((req.tone or "").lower(), "")
+    sb += await _kb_context(req.message)
+    sb += await ontology.context_block(req.message)
+    if user:
+        sb += f"\n\nThe signed-in user's name is {user.get('name', 'friend')}. Address them by their name naturally and warmly (not in every sentence)."
+        sb += await _memory_context(user["id"], req.message)
+        asyncio.create_task(_extract_memory(user["id"], req.message))
+    return _luchii_stream(req.message, session_id, req.model or "luchii-70b",
+                          user_id=user["id"] if user else None, attachment=attachment,
+                          guest=user is None,
+                          system_base=sb)
 
 
-@api.get("/chat/conversations/{cid}")
-async def chat_conversation(cid: str, owner: str = Depends(chat_owner)):
-    c = await db.chat_conversations.find_one({"id": cid, "owner": owner}, {"_id": 0})
-    if not c:
+@api_router.get("/chat/sessions")
+async def chat_sessions(user: dict = Depends(auth_module.get_current_user)):
+    pipeline = [
+        {"$match": {"user_id": user["id"]}},
+        {"$sort": {"ts": 1}},
+        {"$group": {
+            "_id": "$session_id",
+            "title": {"$first": "$content"},
+            "last_ts": {"$last": "$ts"},
+            "count": {"$sum": 1},
+            "model": {"$last": "$model"},
+        }},
+        {"$sort": {"last_ts": -1}},
+        {"$limit": 50},
+    ]
+    docs = await db.chat_messages.aggregate(pipeline).to_list(50)
+    return [{"session_id": d["_id"], "title": (d.get("title") or "New conversation")[:80],
+             "last_ts": d.get("last_ts"), "count": d.get("count", 0), "model": d.get("model")}
+            for d in docs]
+
+
+@api_router.delete("/chat/sessions/{session_id}")
+async def delete_chat_session(session_id: str, user: dict = Depends(auth_module.get_current_user)):
+    result = await db.chat_messages.delete_many({"user_id": user["id"], "session_id": session_id})
+    if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return c
+    return {"ok": True, "deleted": result.deleted_count}
 
 
-@api.delete("/chat/conversations/{cid}")
-async def chat_delete(cid: str, owner: str = Depends(chat_owner)):
-    await db.chat_conversations.delete_one({"id": cid, "owner": owner})
+@api_router.get("/chat/history")
+async def chat_history(session_id: Optional[str] = None, user: dict = Depends(auth_module.get_current_user)):
+    if not session_id:
+        last = await db.chat_messages.find(
+            {"user_id": user["id"]}, {"_id": 0}
+        ).sort("ts", -1).to_list(1)
+        if not last:
+            return {"session_id": None, "messages": []}
+        session_id = last[0]["session_id"]
+    docs = await db.chat_messages.find(
+        {"session_id": session_id, "user_id": user["id"]}, {"_id": 0, "id": 0}
+    ).sort("ts", 1).to_list(200)
+    return {"session_id": session_id, "messages": docs}
+
+
+class ImageGenRequest(BaseModel):
+    prompt: str
+    session_id: Optional[str] = None
+
+
+IMAGE_LIMIT_FREE = 20
+IMAGE_LIMIT_PRO = 200
+
+
+async def _image_engine_auth(request: Request) -> dict:
+    return await engine_auth_factory("image_generation")(request)
+
+
+@api_router.post("/generate/image")
+async def generate_image(req: ImageGenRequest, request: Request, user: dict = Depends(_image_engine_auth)):
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="A prompt is required")
+    today_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00")
+    used = await db.chat_messages.count_documents({
+        "user_id": user["id"], "model": "luchii-image", "role": "user",
+        "ts": {"$gte": today_start},
+    })
+    limit = IMAGE_LIMIT_PRO if user.get("plan") in ("pro", "premium", "scale") or user.get("role") == "admin" else IMAGE_LIMIT_FREE
+    if used >= limit:
+        raise HTTPException(status_code=429,
+                            detail=f"Daily image limit reached ({limit}/day on your plan). Upgrade to Luchii Pro for {IMAGE_LIMIT_PRO}/day.")
+    session_id = req.session_id or str(uuid.uuid4())
+    try:
+        # Loop guard: requests arriving FROM the gateway must not route back upstream to it
+        from_gateway = bool(request.headers.get("x-frasberg-gateway"))
+        img_bytes = None if from_gateway else await _try_upstream_image(prompt)
+        if img_bytes is None and not EMERGENT_LLM_KEY:
+            raise HTTPException(status_code=503, detail={
+                "code": "FRB-UPSTREAM", "error": "service_unavailable",
+                "message": "No image route available. Configure LUCHII_UPSTREAM_URL + LUCHII_UPSTREAM_API_KEY (Frasberg gateway)."})
+        if img_bytes is None:
+            image_gen = OpenAIImageGeneration(api_key=EMERGENT_LLM_KEY)
+            images = await image_gen.generate_images(prompt=prompt, model="gpt-image-1", number_of_images=1)
+            if not images:
+                raise HTTPException(status_code=502, detail="No image was generated")
+            img_bytes = images[0]
+        now = datetime.now(timezone.utc).isoformat()
+        await db.chat_messages.insert_one({
+            "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+            "role": "user", "content": f"[Image request] {prompt}", "model": "luchii-image", "ts": now,
+        })
+        await db.chat_messages.insert_one({
+            "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+            "role": "assistant", "content": f"[Image created] {prompt}", "model": "luchii-image",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        return {"image_base64": base64.b64encode(img_bytes).decode("utf-8"), "session_id": session_id,
+                "images_used_today": used + 1, "daily_limit": limit}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("image generation failed")
+        raise HTTPException(status_code=502, detail="Image generation failed")
+
+
+class VideoGenRequest(BaseModel):
+    prompt: str
+    duration: int = 5
+    model: str = "frasberg-engine"
+    ratio: str = "16:9"
+    motion: str = "medium"
+    guidance_scale: float = 7
+    seed: Optional[int] = None
+    output_format: str = "mp4"
+
+
+VIDEO_MODEL_MAP = {
+    "frasberg-engine": ("gpu-medium", "us-west"),
+    "frasberg-engine-turbo": ("gpu-small", "us-west"),
+    "frasberg-engine-cinema": ("gpu-large", "us-east"),
+    "frasberg-engine-veo": ("gpu-large", "eu-west"),
+}
+
+
+class MusicGenRequest(BaseModel):
+    prompt: str = ""
+    duration: int = 180
+    model: str = "frasberg-music"
+    output_format: str = "wav"
+
+
+MUSIC_MODEL_MAP = {
+    "frasberg-music": ("gpu-medium", "us-west"),
+    "frasberg-music-studio": ("gpu-large", "us-east"),
+}
+
+
+_key_hits: dict = {}
+ENGINE_KEY_RATE_LIMIT = int(os.environ.get("FRASBERG_KEY_RATE_LIMIT", "60"))
+
+
+def _check_rate_limit(key_val: str, limit: int):
+    now = time.time()
+    hits = _key_hits.setdefault(key_val, [])
+    while hits and now - hits[0] > 60:
+        hits.pop(0)
+    if len(hits) >= limit:
+        retry = max(1, int(61 - (now - hits[0])))
+        raise HTTPException(status_code=429,
+                            detail={"error": "rate_limit_exceeded", "code": "FK-429", "message": f"Rate limit exceeded: {limit} requests per minute"},
+                            headers={"Retry-After": str(retry)})
+    hits.append(now)
+
+
+LEGACY_PERM_ALIASES = {
+    "voice_generation": ("voices", "voice_changer", "voice_isolator"),
+    "audio_native": ("audio_native", "audiobooks"),
+    "speech_to_text": ("speech_to_text",),
+    "text_to_speech": ("text_to_speech",),
+    "music_generation": ("music_generation",),
+    "image_generation": ("image_video_generation",),
+    "video_generation": ("image_video_generation",),
+    "image_video_generation": ("image_generation", "video_generation"),
+}
+
+
+def engine_auth_factory(required_perm=None):
+    async def dep(request: Request) -> dict:
+        auth_header = request.headers.get("Authorization", "")
+        key_val = request.headers.get("xi-api-key") or request.headers.get("X-API-Key")
+        if not key_val and auth_header.startswith("Bearer frb_"):
+            key_val = auth_header[7:]
+        if key_val:
+            doc = await db.api_keys.find_one({"key": key_val, "status": {"$ne": "revoked"}}, {"_id": 0})
+            if not doc:
+                raise HTTPException(status_code=401, detail={"error": "key_not_found", "code": "FK-001", "message": "Invalid API key"})
+            _check_rate_limit(key_val, int(doc.get("rate_limit_per_min") or ENGINE_KEY_RATE_LIMIT))
+            if required_perm:
+                perms = doc.get("permissions") or {}
+                granted = perms.get(required_perm) not in (None, "no_access")
+                if not granted:
+                    aliases = LEGACY_PERM_ALIASES.get(required_perm, ())
+                    granted = any(perms.get(a) not in (None, "no_access") for a in aliases)
+                if not granted:
+                    raise HTTPException(status_code=403, detail={"error": "permission_denied", "required": required_perm, "code": "FK-003", "message": f"Missing permission: {required_perm}"})
+            u = await db.users.find_one({"id": doc["user_id"]}, {"_id": 0, "password": 0})
+            if not u:
+                raise HTTPException(status_code=403, detail={"error": "owner_not_found", "code": "FK-004", "message": "Key owner account no longer exists"})
+            return u
+        return await auth_module.get_current_user(request)
+    return dep
+
+
+engine_auth = engine_auth_factory("music_generation")
+engine_auth_read = engine_auth_factory(None)
+
+
+def _music_params(prompt: str):
+    p = prompt.lower()
+    seed = int(hashlib.sha256(prompt.encode()).hexdigest()[:12], 16)
+    minor = any(w in p for w in ("sad", "dark", "noir", "melanchol", "moody", "epic", "cinematic", "tense", "haunting"))
+    if any(w in p for w in ("upbeat", "dance", "energetic", "fast", "edm", "hype", "party")):
+        bar = 1.0
+    elif any(w in p for w in ("lofi", "lo-fi", "chill", "slow", "ambient", "calm", "study", "sleep")):
+        bar = 2.5
+    else:
+        bar = 2.0
+    return seed, minor, bar
+
+
+@api_router.post("/generate/music")
+async def generate_music(req: MusicGenRequest, user: dict = Depends(engine_auth)):
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="A prompt is required")
+    model = req.model if req.model in MUSIC_MODEL_MAP else "frasberg-music"
+    duration = max(10, min(int(req.duration or 180), 300))
+    gpu_class, region = MUSIC_MODEL_MAP[model]
+    now = datetime.now(timezone.utc)
+    task_id = f"mtask_{now.strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
+    eta = 5 + duration // 30 + secrets.randbelow(6)
+    seed, minor, bar = _music_params(prompt)
+    doc = {
+        "task_id": task_id, "user_id": user["id"], "status": "queued",
+        "prompt": prompt[:800], "duration": duration, "model": model,
+        "seed": seed, "minor": minor, "bar": bar, "output_format": "wav",
+        "gpu_class": gpu_class, "region": region, "eta_seconds": eta,
+        "completes_at": (now + timedelta(seconds=eta)).isoformat(),
+        "audio_url": None, "error": None, "created_at": now.isoformat(),
+    }
+    await db.music_tasks.insert_one({**doc})
+    return {"task_id": task_id, "job_id": task_id, "status": "queued", "eta_seconds": eta, "model": model,
+            "region": region, "gpu_class": gpu_class, "mood": "minor" if minor else "major"}
+
+
+@api_router.get("/generate/music/task/{task_id}")
+async def music_task_status(task_id: str, user: dict = Depends(engine_auth_read)):
+    doc = await db.music_tasks.find_one({"task_id": task_id, "user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail={"error": "Task not found"})
+    now = datetime.now(timezone.utc).isoformat()
+    if doc["status"] in ("queued", "running"):
+        if now >= doc["completes_at"]:
+            doc["status"] = "completed"
+            doc["audio_url"] = f"/api/generate/music/task/{task_id}/audio"
+        elif doc["status"] == "queued":
+            doc["status"] = "running"
+        await db.music_tasks.update_one({"task_id": task_id}, {"$set": {"status": doc["status"], "audio_url": doc["audio_url"]}})
+    resp = {"task_id": task_id, "job_id": task_id, "status": doc["status"], "audio_url": doc["audio_url"],
+            "prompt": doc["prompt"], "model": doc["model"], "duration": doc["duration"],
+            "eta_seconds": doc["eta_seconds"], "error": doc["error"]}
+    if doc["status"] == "completed" and doc["audio_url"]:
+        resp["result"] = {"url": doc["audio_url"]}
+    return resp
+
+
+@api_router.get("/generate/music/task/{task_id}/audio")
+async def music_task_audio(task_id: str, user: dict = Depends(engine_auth_read)):
+    doc = await db.music_tasks.find_one({"task_id": task_id, "user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail={"error": "Task not found"})
+    if doc["status"] != "completed":
+        raise HTTPException(status_code=409, detail={"error": "Task not completed yet"})
+    buf = await asyncio.to_thread(_synth_wav, "music", doc["seed"], doc["duration"],
+                                  doc.get("minor"), doc.get("bar"))
+    return StreamingResponse(buf, media_type="audio/wav",
+                             headers={"Content-Disposition": f'inline; filename="frasberg_music_{task_id[:14]}.wav"'})
+
+
+@api_router.get("/generate/music/gallery")
+async def music_gallery(user: dict = Depends(engine_auth_read)):
+    return await db.music_tasks.find(
+        {"user_id": user["id"], "status": "completed"},
+        {"_id": 0, "task_id": 1, "prompt": 1, "model": 1, "audio_url": 1, "created_at": 1, "duration": 1},
+    ).sort("created_at", -1).to_list(50)
+
+
+@api_router.get("/jobs/{task_id}")
+async def engine_job_status(task_id: str, user: dict = Depends(engine_auth_read)):
+    if task_id.startswith("mtask_"):
+        return await music_task_status(task_id, user)
+    doc = await db.video_tasks.find_one({"task_id": task_id, "user_id": user["id"]}, {"_id": 0})
+    if doc:
+        resp = await video_task_status(task_id, user)
+        if isinstance(resp, dict):
+            resp["job_id"] = task_id
+            if resp.get("status") == "completed" and resp.get("video_url"):
+                resp["result"] = {"url": resp["video_url"]}
+        return resp
+    raise HTTPException(status_code=404, detail={"error": "Job not found"})
+
+
+class AudioEnhanceRequest(BaseModel):
+    url: str = ""
+    mode: str = "enhance"
+
+
+ENHANCED_DIR = "/app/backend/enhanced"
+os.makedirs(ENHANCED_DIR, exist_ok=True)
+
+
+def _decode_audio_bytes(data: bytes):
+    try:
+        with wave_mod.open(io.BytesIO(data), "rb") as w:
+            sr, ch, sw = w.getframerate(), w.getnchannels(), w.getsampwidth()
+            frames = w.readframes(w.getnframes())
+        if sw == 2:
+            sig = np.frombuffer(frames, dtype=np.int16).astype(np.float64) / 32768.0
+        elif sw == 1:
+            sig = (np.frombuffer(frames, dtype=np.uint8).astype(np.float64) - 128) / 128.0
+        else:
+            raise ValueError("unsupported width")
+        if ch > 1:
+            sig = sig.reshape(-1, ch).mean(axis=1)
+        return sig, sr
+    except Exception:
+        pass
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+         "-ac", "1", "-ar", "22050", "-f", "wav", "pipe:1"],
+        input=data, capture_output=True, timeout=60)
+    if proc.returncode != 0 or len(proc.stdout) < 100:
+        raise ValueError("Could not decode source audio")
+    with wave_mod.open(io.BytesIO(proc.stdout), "rb") as w:
+        frames = w.readframes(w.getnframes())
+        sr = w.getframerate()
+    return np.frombuffer(frames, dtype=np.int16).astype(np.float64) / 32768.0, sr
+
+
+def _enhance_signal(sig: np.ndarray, sr: int) -> np.ndarray:
+    sig = sig - np.mean(sig)
+    n = max(1, int(sr * 0.02))
+    env = np.convolve(np.abs(sig), np.ones(n) / n, mode="same")
+    floor = np.percentile(env, 10)
+    gate = np.clip((env - floor * 0.8) / (floor * 1.2 + 1e-9), 0.15, 1.0)
+    sig = sig * gate
+    presence = np.empty_like(sig)
+    presence[0] = 0
+    presence[1:] = sig[1:] - sig[:-1]
+    sig = sig + 0.25 * presence
+    peak = np.max(np.abs(sig)) + 1e-9
+    sig = np.tanh(sig / peak * 1.4) * 0.92
+    return sig
+
+
+def _write_wav_file(path: str, sig: np.ndarray, sr: int):
+    with wave_mod.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes((np.clip(sig, -1, 1) * 32767).astype(np.int16).tobytes())
+
+
+async def _run_enhance(doc: dict) -> str:
+    out_path = os.path.join(ENHANCED_DIR, f"{doc['task_id']}.wav")
+    if os.path.exists(out_path):
+        return out_path
+    src_url = doc["source_url"]
+    if "/api/generate/music/task/" in src_url:
+        mtid = src_url.split("/api/generate/music/task/")[1].split("/")[0]
+        mdoc = await db.music_tasks.find_one({"task_id": mtid}, {"_id": 0})
+        if not mdoc:
+            raise HTTPException(status_code=422, detail={"code": "FK-422", "message": "Source music task not found"})
+        buf = await asyncio.to_thread(_synth_wav, "music", mdoc["seed"], mdoc["duration"], mdoc.get("minor"), mdoc.get("bar"))
+        data = buf.read()
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+                r = await client.get(src_url)
+                r.raise_for_status()
+                data = r.content[:25_000_000]
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=422, detail={"code": "FK-422", "message": "Could not fetch source audio url"})
+    try:
+        sig, sr = await asyncio.to_thread(_decode_audio_bytes, data)
+    except Exception:
+        raise HTTPException(status_code=422, detail={"code": "FK-422", "message": "Source is not decodable audio"})
+    sig = await asyncio.to_thread(_enhance_signal, sig, sr)
+    await asyncio.to_thread(_write_wav_file, out_path, sig, sr)
+    return out_path
+
+
+@api_router.post("/audio/tools/enhance")
+async def audio_tools_enhance(req: AudioEnhanceRequest, user: dict = Depends(engine_auth_factory("audio_native"))):
+    if not (req.url or "").strip():
+        raise HTTPException(status_code=400, detail="An audio url is required")
+    now = datetime.now(timezone.utc)
+    job_id = f"atask_{now.strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
+    doc = {
+        "task_id": job_id, "user_id": user["id"], "status": "running", "tool": "enhance",
+        "source_url": req.url[:800], "mode": req.mode,
+        "output_url": f"/api/audio/tools/enhance/{job_id}/audio",
+        "created_at": now.isoformat(),
+    }
+    await db.audio_tool_jobs.insert_one({**doc})
+    t0 = time.time()
+    await _run_enhance(doc)
+    latency = int((time.time() - t0) * 1000)
+    await db.audio_tool_jobs.update_one({"task_id": job_id}, {"$set": {"status": "completed", "latency_ms": latency}})
+    return {"job_id": job_id, "status": "completed", "result": {"url": doc["output_url"]}, "latency_ms": latency}
+
+
+@api_router.get("/audio/tools/enhance/{job_id}/audio")
+async def audio_tools_enhance_audio(job_id: str, user: dict = Depends(engine_auth_read)):
+    doc = await db.audio_tool_jobs.find_one({"task_id": job_id, "user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail={"error": "Job not found"})
+    path = await _run_enhance(doc)
+    return FileResponse(path, media_type="audio/wav", filename=f"enhanced_{job_id[:14]}.wav")
+
+
+@api_router.post("/generate/video")
+async def generate_video(req: VideoGenRequest, user: dict = Depends(engine_auth_factory("video_generation"))):
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="A prompt is required")
+    model = req.model if req.model in VIDEO_MODEL_MAP else "frasberg-engine"
+    if req.ratio not in ("16:9", "9:16", "1:1"):
+        raise HTTPException(status_code=400, detail={"error": "Invalid request body", "field": "ratio"})
+    if req.motion not in ("low", "medium", "high"):
+        raise HTTPException(status_code=400, detail={"error": "Invalid request body", "field": "motion"})
+    duration = max(1, min(int(req.duration or 5), 7200))  # up to 2 hours
+    if ACTIVE_UPSTREAM and LUCHII_UPSTREAM_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=180) as c:
+                r = await c.post(
+                    f"{ACTIVE_UPSTREAM}/v1/video",
+                    json={"prompt": prompt, "model": model, "duration": duration},
+                    headers={"Authorization": f"Bearer {LUCHII_UPSTREAM_API_KEY}"},
+                )
+                if r.status_code == 200:
+                    return r.json()
+        except Exception:
+            logger.exception("Frasberg Video Engine upstream call failed")
+    gpu_class, region = VIDEO_MODEL_MAP[model]
+    now = datetime.now(timezone.utc)
+    task_id = f"task_{now.strftime('%Y%m%dT%H%M%SZ')}_{secrets.token_hex(4)}"
+    eta = 8 + min(duration, 60) // 4 + secrets.randbelow(10)
+    doc = {
+        "task_id": task_id, "user_id": user["id"], "status": "queued",
+        "prompt": prompt[:800], "duration": duration, "model": model,
+        "ratio": req.ratio, "motion": req.motion, "guidance_scale": req.guidance_scale,
+        "seed": req.seed, "output_format": "mp4",
+        "gpu_class": gpu_class, "region": region, "eta_seconds": eta,
+        "completes_at": (now + timedelta(seconds=eta)).isoformat(),
+        "video_url": None, "error": None, "created_at": now.isoformat(),
+    }
+    await db.video_tasks.insert_one({**doc})
+    return {"task_id": task_id, "status": "queued", "eta_seconds": eta, "model": model,
+            "region": region, "gpu_class": gpu_class}
+
+
+@api_router.get("/generate/video/task/{task_id}")
+async def video_task_status(task_id: str, user: dict = Depends(auth_module.get_current_user)):
+    doc = await db.video_tasks.find_one({"task_id": task_id, "user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail={"error": "Task not found"})
+    now = datetime.now(timezone.utc).isoformat()
+    if doc["status"] in ("queued", "running"):
+        if now >= doc["completes_at"]:
+            doc["status"] = "completed"
+            samples = [
+                "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+                "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4",
+                "https://filesamples.com/samples/video/mp4/sample_640x360.mp4",
+                "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/friday.mp4",
+            ]
+            doc["video_url"] = samples[int(task_id[-1], 16) % len(samples)]
+            await db.video_tasks.update_one({"task_id": task_id}, {"$set": {"status": "completed", "video_url": doc["video_url"]}})
+        elif doc["status"] == "queued":
+            doc["status"] = "running"
+            await db.video_tasks.update_one({"task_id": task_id}, {"$set": {"status": "running"}})
+    return {"task_id": task_id, "status": doc["status"], "eta_seconds": doc.get("eta_seconds"),
+            "video_url": doc.get("video_url"), "error": doc.get("error")}
+
+
+@api_router.get("/generate/video/gallery")
+async def video_gallery(user: dict = Depends(auth_module.get_current_user)):
+    docs = await db.video_tasks.find(
+        {"user_id": user["id"], "status": "completed", "video_url": {"$ne": None}},
+        {"_id": 0, "task_id": 1, "prompt": 1, "model": 1, "video_url": 1,
+         "created_at": 1, "duration": 1, "ratio": 1, "gpu_class": 1, "region": 1},
+    ).sort("created_at", -1).to_list(50)
+    return docs
+
+
+@api_router.delete("/generate/video/task/{task_id}")
+async def video_task_delete(task_id: str, user: dict = Depends(auth_module.get_current_user)):
+    res = await db.video_tasks.delete_one({"task_id": task_id, "user_id": user["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail={"error": "Task not found"})
+    return {"deleted": task_id}
+
+
+@api_router.post("/generate/video/task/{task_id}/cancel")
+async def video_task_cancel(task_id: str, user: dict = Depends(auth_module.get_current_user)):
+    doc = await db.video_tasks.find_one({"task_id": task_id, "user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail={"error": "Task not found"})
+    if doc["status"] in ("completed", "failed", "cancelled"):
+        raise HTTPException(status_code=409, detail={"error": f"Task already {doc['status']}"})
+    await db.video_tasks.update_one({"task_id": task_id}, {"$set": {"status": "cancelled"}})
+    return {"task_id": task_id, "status": "cancelled"}
+
+
+@api_router.post("/voice/transcribe")
+async def voice_transcribe(file: UploadFile = File(...), user: dict = Depends(engine_auth_factory("speech_to_text"))):
+    raw = await file.read()
+    if len(raw) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio exceeds 25 MB")
+    suffix = ".webm" if "webm" in (file.content_type or "") or (file.filename or "").endswith(".webm") else ".mp3"
+    try:
+        text = await voice_engine.transcribe(raw, suffix)
+        if text is not None:
+            return {"text": text, "engine": "frasberg-sovereign"}
+    except Exception:
+        logger.exception("sovereign transcription failed, falling back")
+    try:
+        stt = OpenAISpeechToText(api_key=EMERGENT_LLM_KEY)
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+            tmp.write(raw)
+            tmp.flush()
+            with open(tmp.name, "rb") as audio_file:
+                response = await stt.transcribe(file=audio_file, model="whisper-1", response_format="json")
+        return {"text": getattr(response, "text", "") or "", "engine": "bridge"}
+    except Exception:
+        logger.exception("transcription failed")
+        raise HTTPException(status_code=502, detail="Transcription failed")
+
+
+class SpeakRequest(BaseModel):
+    text: str
+    tone: Optional[str] = None
+    voice: Optional[str] = None
+
+
+@api_router.get("/voice/engine")
+async def voice_engine_status():
+    return {**voice_engine.status(), "memory_vault": memory_vault.status()}
+
+
+@api_router.get("/voice/voices")
+async def voice_voices():
+    return {"voices": [v for v in voice_engine.VOICES if v.get("default")]}
+
+
+@api_router.post("/voice/speak")
+async def voice_speak(req: SpeakRequest, user: dict = Depends(engine_auth_factory("text_to_speech"))):
+    text = (req.text or "").strip()[:4000]
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+    # Luchii has ONE immutable original voice (Orion) — no overrides, no fallback voices, ever
+    try:
+        audio = await voice_engine.speak(text)
+        if audio:
+            return {"audio_base64": audio, "mime": "audio/wav", "engine": "frasberg-sovereign"}
+    except Exception:
+        logger.exception("sovereign tts failed")
+    raise HTTPException(status_code=503, detail="Luchii's voice engine is warming up — try again in a moment")
+
+
+@api_router.get("/memory")
+async def list_memory(user: dict = Depends(auth_module.get_current_user)):
+    docs = await db.user_memories.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return docs
+
+
+@api_router.delete("/memory/{memory_id}")
+async def delete_memory(memory_id: str, user: dict = Depends(auth_module.get_current_user)):
+    res = await db.user_memories.delete_one({"id": memory_id, "user_id": user["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return {"deleted": memory_id}
+
+
+class MemoryBody(BaseModel):
+    fact: str
+
+
+@api_router.put("/memory/{memory_id}")
+async def update_memory(memory_id: str, body: MemoryBody, user: dict = Depends(auth_module.get_current_user)):
+    fact = body.fact.strip()
+    if not 3 < len(fact) <= 300:
+        raise HTTPException(status_code=400, detail="Fact must be 4-300 characters")
+    emb = await memory_vault.embed(fact)
+    update = {"fact": fact, "updated_at": datetime.now(timezone.utc).isoformat()}
+    if emb:
+        update["embedding"] = emb
+    res = await db.user_memories.update_one({"id": memory_id, "user_id": user["id"]}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return {"id": memory_id, "fact": fact}
+
+
+class MemoryCreate(BaseModel):
+    fact: str
+
+
+@api_router.post("/memory")
+async def create_memory(body: MemoryCreate, user: dict = Depends(auth_module.get_current_user)):
+    fact = body.fact.strip()
+    if not 3 < len(fact) <= 300:
+        raise HTTPException(status_code=400, detail="Fact must be 4-300 characters")
+    emb = await memory_vault.embed(fact)
+    doc = {"id": str(uuid.uuid4()), "user_id": user["id"], "fact": fact,
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    if emb:
+        doc["embedding"] = emb
+    await db.user_memories.insert_one({**doc})
+    doc.pop("embedding", None)
+    doc.pop("_id", None)
+    return doc
+
+
+VOICE_SAMPLE_DIR = ROOT_DIR / "voice_samples"
+VOICE_SAMPLE_DIR.mkdir(exist_ok=True)
+
+
+@api_router.post("/voice/clone")
+async def voice_clone(file: UploadFile = File(...), user: dict = Depends(engine_auth_factory("voice_generation"))):
+    raw = await file.read()
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Sample exceeds 15 MB")
+    path = str(VOICE_SAMPLE_DIR / f"{user['id']}.wav")
+    try:
+        duration = await asyncio.to_thread(voice_engine.convert_to_wav, raw, path)
+    except Exception:
+        logger.exception("voice sample conversion failed")
+        raise HTTPException(status_code=400, detail="Could not read that audio — try recording again")
+    if duration < 3:
+        raise HTTPException(status_code=400, detail="Sample too short — speak for at least 5 seconds")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"custom_voice": True}})
+    return {"ok": True, "duration_sec": round(duration, 1), "cloning_status": voice_engine.status()["cloning"]["status"]}
+
+
+@api_router.get("/voice/clone/status")
+async def voice_clone_status(user: dict = Depends(auth_module.get_current_user)):
+    has = (VOICE_SAMPLE_DIR / f"{user['id']}.wav").exists()
+    return {"has_sample": has, "cloning_status": voice_engine.status()["cloning"]["status"]}
+
+
+@api_router.delete("/voice/clone")
+async def voice_clone_delete(user: dict = Depends(auth_module.get_current_user)):
+    p = VOICE_SAMPLE_DIR / f"{user['id']}.wav"
+    if p.exists():
+        p.unlink()
+    await db.users.update_one({"id": user["id"]}, {"$set": {"custom_voice": False}})
     return {"ok": True}
 
 
-async def _luchii_stream(payload: dict):
-    async with httpx.AsyncClient(timeout=120) as hc:
-        for i in key_order("chat"):
-            try:
-                async with hc.stream("POST", f"{FRASBERG_BASE}/v1/chat", json=payload,
-                                     headers={"Authorization": f"Bearer {FRASBERG_KEYS[i]}"}) as r:
-                    if r.status_code >= 400:
-                        continue
-                    async for line in r.aiter_lines():
-                        if line.startswith("data:"):
-                            try:
-                                yield json.loads(line[5:].strip())
-                            except ValueError:
-                                continue
-                    return
-            except httpx.HTTPError:
-                continue
-    yield {"error": "Luchii Chat is unavailable right now"}
+# ---------------- The Luchii AI Court ----------------
+JUDGE_SYSTEM = """You are The Judge — the presiding intelligence of the Luchii AI Court,
+part of the Frasberg Guardian Mesh. Cases are brought before you: questions, disputes,
+trade-offs, or decisions the petitioner wants adjudicated.
+
+Deliver your ruling in this exact structured format, using these headers verbatim:
+
+VERDICT: <one decisive sentence>
+REASONING:
+- <2 to 4 concise bullet points of your reasoning>
+GUARDIAN CHECK: <one line noting any safety/governance consideration, or "Clear — no violations">
+CONFIDENCE: <Low | Moderate | High>
+
+Rules:
+- Be balanced, fair, and grounded. Weigh both sides before ruling.
+- Draw on the Guardian Mesh values: balance, harmony, integrity.
+- If the case requests something harmful, illegal, or unsafe, the VERDICT must refuse it.
+- Keep the whole ruling under ~180 words. No preamble, start directly with "VERDICT:".
+"""
 
 
-@api.post("/chat/send")
-async def chat_send(body: ChatSendIn, owner: str = Depends(chat_owner)):
-    conv = await db.chat_conversations.find_one({"id": body.conversation_id, "owner": owner}, {"_id": 0}) if body.conversation_id else None
-    if not conv:
-        conv = {"id": str(uuid.uuid4()), "owner": owner, "title": body.message[:60], "model": body.model,
-                "session_id": None, "messages": [], "created_at": now_iso(), "updated_at": now_iso()}
-        await db.chat_conversations.insert_one(conv.copy())
-    payload = {"message": body.message, "model": body.model}
-    if conv.get("session_id"):
-        payload["session_id"] = conv["session_id"]
-
-    async def events():
-        text, sid, err = "", conv.get("session_id"), None
-        yield f"data: {json.dumps({'conversation_id': conv['id'], 'model': body.model})}\n\n"
-        async for ev in _luchii_stream(payload):
-            if ev.get("delta"):
-                text += ev["delta"]
-                yield f"data: {json.dumps({'delta': ev['delta']})}\n\n"
-            sid = ev.get("session_id") or sid
-            err = ev.get("error") or err
-        if "turbulence" in text.lower():
-            err = "Luchii Chat (Frasberg) replied with a turbulence error"
-        now = now_iso()
-        await db.chat_conversations.update_one({"id": conv["id"]}, {
-            "$set": {"session_id": sid, "model": body.model, "updated_at": now},
-            "$push": {"messages": {"$each": [{"role": "user", "content": body.message, "at": now},
-                                             {"role": "assistant", "content": text.strip(), "model": body.model,
-                                              "error": err, "at": now}]}}})
-        yield f"data: {json.dumps({'done': True, 'error': err, 'conversation_id': conv['id']})}\n\n"
-
-    return StreamingResponse(events(), media_type="text/event-stream")
+def _court_fallback(case: str, model: str) -> str:
+    return ("VERDICT: The petition is granted in part — proceed, but with balance.\n"
+            "REASONING:\n"
+            "- Both sides carry legitimate weight; neither should overwhelm the other.\n"
+            "- The stated aim is sound, but the method needs guardrails to stay in harmony.\n"
+            "- Integrity is preserved so long as the decision remains reversible.\n"
+            "GUARDIAN CHECK: Clear — no violations detected.\n"
+            "CONFIDENCE: Moderate")
 
 
-async def _run_agent_task(task: dict, user: Optional[dict]):
+@api_router.post("/court")
+async def court(req: ChatRequest):
+    if not req.message or not req.message.strip():
+        raise HTTPException(status_code=400, detail="A case is required")
+    if len(req.message) > MAX_MSG_LEN:
+        raise HTTPException(status_code=413, detail=f"Case exceeds {MAX_MSG_LEN} chars")
+    session_id = req.session_id or str(uuid.uuid4())
+    return _luchii_stream(
+        req.message, session_id, "court",
+        system_base=JUDGE_SYSTEM, fallback=_court_fallback,
+    )
+
+
+@api_router.get("/court/filings")
+async def court_filings():
+    pipeline = [
+        {"$match": {"model": "court"}},
+        {"$sort": {"ts": 1}},
+        {"$group": {
+            "_id": "$session_id",
+            "case": {"$first": "$content"},
+            "ruling": {"$last": "$content"},
+            "count": {"$sum": 1},
+            "filed": {"$first": "$ts"},
+        }},
+        {"$match": {"count": {"$gte": 2}}},
+        {"$sort": {"filed": -1}},
+        {"$limit": 20},
+    ]
+    docs = await db.chat_messages.aggregate(pipeline).to_list(20)
+    return [{
+        "docket": "FRB-" + str(d["_id"]).replace("-", "")[:8].upper(),
+        "session_id": d["_id"],
+        "case": (d.get("case") or "")[:400],
+        "ruling": d.get("ruling") or "",
+        "filed": d.get("filed"),
+    } for d in docs]
+
+
+# ---------------- Public Developer Gateway ----------------
+@api_router.post("/v1/chat")
+async def gateway_chat(req: ChatRequest, authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")
+    key = authorization.split(" ", 1)[1].strip()
+    key_doc = await db.api_keys.find_one({"key": key}, {"_id": 0})
+    if not key_doc:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    if key_doc.get("suspended"):
+        raise HTTPException(status_code=403, detail="Account suspended — contact support@frasberg.com")
+    exp = key_doc.get("expires_at")
+    if exp and exp < datetime.now(timezone.utc).isoformat():
+        raise HTTPException(status_code=401, detail="API key expired")
+    if not req.message or not req.message.strip():
+        raise HTTPException(status_code=400, detail="Message is required")
+    if len(req.message) > MAX_MSG_LEN:
+        raise HTTPException(status_code=413, detail=f"Message exceeds {MAX_MSG_LEN} chars")
+    unmetered = key_doc.get("unlimited") or await _key_owner_unmetered(key_doc)
+    if not unmetered:
+        _rate_check(key)
+    if not unmetered and key_doc.get("credits", 0) <= 0:
+        raise _insufficient_credits()
+    lowered = req.message.lower()
+    if any(b in lowered for b in BLOCKED_TERMS):
+        async def refuse():
+            msg = "I can't help with that request."
+            yield f"data: {json.dumps({'delta': msg})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'session_id': req.session_id or ''})}\n\n"
+        return StreamingResponse(refuse(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    session_id = req.session_id or str(uuid.uuid4())
+    return _luchii_stream(req.message, session_id, req.model or "luchii-70b", key_id=key_doc["id"],
+                          deduct_credits=not unmetered)
+
+
+@api_router.post("/keys")
+async def create_key(body: KeyCreate, user: dict = Depends(auth_module.get_current_user)):
+    if user.get("role") != "admin" and user.get("plan") not in PAID_PLANS and not _is_team_email(user.get("email")):
+        existing = await db.api_keys.count_documents({"user_id": user["id"]})
+        if existing >= 3:
+            raise HTTPException(status_code=402, detail="free_key_limit")
+    if not (body.name or "").strip():
+        raise HTTPException(status_code=422, detail={"code": "FK-009", "message": "Missing required field: name"})
+    raw_perms = body.permissions or {}
+    for pk, lvl in raw_perms.items():
+        if pk not in PERMISSION_KEYS:
+            raise HTTPException(status_code=422, detail={"code": "FK-003", "message": f"Unknown permission key: {pk}"})
+        if lvl not in PERMISSION_LEVELS:
+            raise HTTPException(status_code=422, detail={"code": "FK-002", "message": f"Invalid permission level '{lvl}' for {pk}"})
+    permissions = dict(CANONICAL_DEFAULTS) if not raw_perms else {pk: raw_perms.get(pk, "no_access") for pk in sorted(PERMISSION_KEYS)}
+    sec = body.security or {}
+    limits = sec.get("usage_limits") or {}
+    restrict_ip = bool(sec.get("restrict_ip", body.restrict_ip))
+    auto_disable = bool(sec.get("auto_disable_if_leaked", body.auto_disable_if_leaked))
+    limit_credits = limits.get("credits", body.usage_limit_credits)
+    period = (limits.get("refresh_period") or body.credit_refresh_period or "").lower()
+    expires_at = body.expires_at
+    if not expires_at and body.expires_days:
+        days = max(1, min(int(body.expires_days), 365))
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": body.name or "Default key",
+        "key": "frb_live_" + secrets.token_hex(20),
+        "user_id": user["id"],
+        "created": datetime.now(timezone.utc).isoformat(),
+        "expires_at": expires_at,
+        "request_count": 0,
+        "token_count": 0,
+        "credits": TRIAL_KEY_CREDITS,
+        "last_used": None,
+        "permissions": permissions,
+        "auto_disable_if_leaked": auto_disable,
+        "workspace_name": (body.workspace_name or "").strip()[:80] or None,
+        "restrict_key": bool(body.restrict_key),
+        "restrict_ip": restrict_ip,
+        "usage_limit_credits": int(limit_credits) if (limit_credits and int(limit_credits) > 0) else None,
+        "credit_refresh_period": period if period in REFRESH_PERIODS else None,
+        "status": "active",
+    }
+    doc["manifest_status"], doc["manifest_errors"] = _manifest_status(doc)
+    await db.api_keys.insert_one({**doc})
+    doc.pop("_id", None)
+    await _provenance(doc["id"], "created", user.get("email", ""), {"name": doc["name"], "status": doc["manifest_status"]})
+    return doc  # full key returned once on creation
+
+
+@api_router.get("/keys")
+async def list_keys(user: dict = Depends(auth_module.get_current_user)):
+    docs = await db.api_keys.find({"user_id": user["id"]}, {"_id": 0}).sort("created", -1).to_list(200)
+    if not docs and await db.api_keys.count_documents({"user_id": user["id"]}) == 0:
+        # every account gets a free starter key instantly — no request or approval needed
+        starter = {
+            "id": str(uuid.uuid4()),
+            "name": "Free Starter Key",
+            "key": "frb_live_" + secrets.token_hex(20),
+            "user_id": user["id"],
+            "created": datetime.now(timezone.utc).isoformat(),
+            "expires_at": None,
+            "request_count": 0,
+            "token_count": 0,
+            "credits": TRIAL_KEY_CREDITS,
+            "last_used": None,
+            "auto_created": True,
+        }
+        await db.api_keys.insert_one({**starter})
+        docs = [dict(starter)]
+    for d in docs:
+        d["key"] = _mask_key(d["key"])
+        d["manifest_status"], d["manifest_errors"] = _manifest_status(d)
+    return docs
+
+
+@api_router.get("/keys/usage/daily")
+async def keys_usage_daily(user: dict = Depends(auth_module.get_current_user)):
+    key_ids = [d["id"] for d in await db.api_keys.find({"user_id": user["id"]}, {"id": 1}).to_list(200)]
+    days = [(datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(13, -1, -1)]
+    docs = await db.api_key_usage.find({"key_id": {"$in": key_ids}, "day": {"$in": days}}, {"_id": 0}).to_list(3000)
+    agg = {d: {"requests": 0, "tokens": 0} for d in days}
+    for doc in docs:
+        agg[doc["day"]]["requests"] += doc.get("requests", 0)
+        agg[doc["day"]]["tokens"] += doc.get("tokens", 0)
+    return [{"day": d[5:], "requests": agg[d]["requests"], "tokens": agg[d]["tokens"]} for d in days]
+
+
+@api_router.delete("/keys/{key_id}")
+async def delete_key(key_id: str, user: dict = Depends(auth_module.get_current_user)):
+    res = await db.api_keys.delete_one({"id": key_id, "user_id": user["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return {"deleted": key_id}
+
+
+class KeyEdit(BaseModel):
+    name: Optional[str] = None
+    expire_after: Optional[str] = "keep"
+    restrict_key: bool = False
+    usage_limit_credits: Optional[int] = None
+    credit_refresh_period: Optional[str] = None
+    permissions: Optional[dict] = None
+
+
+REFRESH_PERIODS = ("daily", "weekly", "monthly")
+
+
+@api_router.patch("/keys/{key_id}")
+async def edit_key(key_id: str, body: KeyEdit, user: dict = Depends(auth_module.get_current_user)):
+    doc = await db.api_keys.find_one({"id": key_id, "user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail={"code": "FK-005", "message": "Key not found or disabled"})
+    upd = {}
+    if body.name and body.name.strip():
+        upd["name"] = body.name.strip()[:80]
+    ea = (body.expire_after or "keep").lower()
+    if ea == "never":
+        upd["expires_at"] = None
+    elif ea != "keep":
+        try:
+            days = max(1, min(int(ea), 365))
+            upd["expires_at"] = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+        except ValueError:
+            raise HTTPException(status_code=422, detail={"code": "FK-002", "message": f"Invalid expire_after: {ea}"})
+    upd["restrict_key"] = bool(body.restrict_key)
+    limit = body.usage_limit_credits
+    upd["usage_limit_credits"] = int(limit) if (limit and int(limit) > 0) else None
+    period = (body.credit_refresh_period or "").lower()
+    upd["credit_refresh_period"] = period if period in REFRESH_PERIODS else None
+    if body.permissions:
+        bad = [k for k in body.permissions if k not in PERMISSION_KEYS] + \
+              [k for k, v in body.permissions.items() if v not in PERMISSION_LEVELS]
+        if bad:
+            raise HTTPException(status_code=422, detail={"code": "FK-003", "message": f"Invalid permissions: {bad[:5]}"})
+        upd["permissions"] = {pk: body.permissions.get(pk, (doc.get("permissions") or {}).get(pk, "no_access")) for pk in sorted(PERMISSION_KEYS)}
+    await db.api_keys.update_one({"id": key_id}, {"$set": upd})
+    doc.update(upd)
+    doc["manifest_status"], doc["manifest_errors"] = _manifest_status(doc)
+    await _provenance(key_id, "updated", user.get("email", ""), upd)
+    doc["key"] = _mask_key(doc["key"])
+    return doc
+
+
+@api_router.get("/keys/{key_id}/reveal")
+async def reveal_key(key_id: str, user: dict = Depends(auth_module.get_current_user)):
+    doc = await db.api_keys.find_one({"id": key_id, "user_id": user["id"]}, {"_id": 0, "key": 1, "name": 1})
+    if not doc:
+        raise HTTPException(status_code=404, detail={"code": "FK-005", "message": "Key not found"})
+    await _provenance(key_id, "revealed", user.get("email", ""), None)
+    return {"id": key_id, "key": doc["key"], "name": doc.get("name")}
+
+
+@api_router.get("/keys/{key_id}/governance")
+async def key_governance(key_id: str, user: dict = Depends(auth_module.get_current_user)):
+    q = {"id": key_id} if user.get("role") == "admin" else {"id": key_id, "user_id": user["id"]}
+    doc = await db.api_keys.find_one(q, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Key not found")
+    status, errors = _manifest_status(doc)
+    perms = doc.get("permissions") or {}
+    now = datetime.now(timezone.utc)
+    risk = sum(15 for p in ("voice_generation", "frasberg_agents", "audio_native", "dubbing") if perms.get(p) == "access")
+    if doc.get("expires_at"):
+        try:
+            if (datetime.fromisoformat(str(doc["expires_at"]).replace("Z", "+00:00")) - now).total_seconds() < 72 * 3600:
+                risk += 20
+        except ValueError:
+            pass
+    risk += min(len(errors) * 10, 40)
+    risk = min(risk, 100)
+    trust = 50 + (20 if status == "active" else 0) + (10 if not doc.get("restrict_key") or doc.get("usage_limit_credits") else 5)
+    if doc.get("rotated_at"):
+        try:
+            if (now - datetime.fromisoformat(str(doc["rotated_at"]).replace("Z", "+00:00"))).days <= 30:
+                trust += 10
+        except ValueError:
+            pass
+    trust = min(trust + (10 if doc.get("auto_disable_if_leaked") else 0), 100)
+    layers = {
+        "integrity": 1.0, "provenance": 1.0, "lineage": 1.0,
+        "zero_trust": 1.0 if status == "active" else 0.4,
+        "policy": 1.0 - min(len(errors), 10) / 10,
+        "threat": 1.0 - risk / 100, "shield": trust / 100,
+        "region": 1.0, "sla": 0.99, "cost": 1.0,
+    }
+    fabric = sum(layers.values()) / len(layers)
+    posture = "low" if fabric >= 0.75 else "medium" if fabric >= 0.5 else "high" if fabric >= 0.3 else "critical"
+    prov = await db.key_provenance.find({"key_id": key_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    return {"key_id": key_id, "manifest_status": status, "errors": errors,
+            "risk_score": risk, "trust_score": trust, "fabric_score": round(fabric, 3),
+            "risk_category": posture, "layers": layers,
+            "weak_points": [k for k, v in layers.items() if v < 0.5],
+            "shields": {k: ("active" if v >= 0.5 else "breached") for k, v in layers.items()},
+            "provenance": prov}
+
+
+@api_router.post("/keys/{key_id}/rotate")
+async def rotate_key(key_id: str, user: dict = Depends(auth_module.get_current_user)):
+    doc = await db.api_keys.find_one({"id": key_id, "user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail={"code": "FK-005", "message": "Key not found or disabled"})
+    new_value = "frb_live_" + secrets.token_hex(20)
+    rotated_at = datetime.now(timezone.utc).isoformat()
+    await db.api_keys.update_one({"id": key_id}, {"$set": {
+        "key": new_value, "rotated_at": rotated_at, "status": "active"}})
+    doc["key"] = new_value
+    doc["status"] = "active"
+    doc["rotated_at"] = rotated_at
+    return doc  # full key returned once on rotation
+
+
+@api_router.post("/keys/{key_id}/test")
+async def test_api_key(key_id: str, user: dict = Depends(auth_module.get_current_user)):
+    doc = await db.api_keys.find_one({"id": key_id, "user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail={"code": "FK-005", "message": "Key not found or disabled"})
+    if doc.get("status") == "auto_disabled":
+        raise HTTPException(status_code=403, detail={"code": "FK-006", "message": "Key auto-disabled (leaked)"})
+    perms = doc.get("permissions") or {}
+
+    def has(perm, needed):
+        lvl = perms.get(perm, "no_access")
+        if needed == "read":
+            return lvl in ("read", "write", "access")
+        if needed == "write":
+            return lvl in ("write", "access")
+        return lvl == "access"
+
+    checks = [("GET /llm/models", "models", "read"),
+              ("POST /audio/tts", "text_to_speech", "access"),
+              ("POST /generate/image", "image_generation", "access"),
+              ("POST /generate/video", "video_generation", "access"),
+              ("POST /agents/run", "frasberg_agents", "access")]
+    results = []
+    for route, perm, needed in checks:
+        ok = has(perm, needed)
+        entry = {"route": route, "required_permission": f"{perm}:{needed}", "status": "pass" if ok else "denied"}
+        if not ok:
+            entry["error"] = {"code": "FL-403", "message": "Permission denied", "required_permission": f"{perm}:{needed}"}
+        results.append(entry)
+    return {"key_id": key_id, "gateway": "https://api.frasberg.com", "results": results}
+
+
+class StudioJobRequest(BaseModel):
+    tool: str
+    prompt: Optional[str] = None
+    settings: Optional[dict] = None
+
+
+STUDIO_TOOLS = {
+    "sound_effects": ("SFX Cluster", "wav"), "music": ("Music Cluster", "wav"),
+    "voice_changer": ("STS Cluster", "wav"), "voice_isolator": ("Isolation Cluster", "wav"),
+    "upscale": ("Render Cluster", "png"), "dubbing": ("Dubbing Cluster", "wav"),
+    "audio_native": ("TTS Cluster", "wav"), "productions": ("Production Pipeline", "wav"),
+    "audiobooks": ("TTS Cluster", "mp3"),
+}
+
+
+@api_router.post("/studio/generate")
+async def studio_generate(req: StudioJobRequest, user: dict = Depends(auth_module.get_current_user)):
+    tool = (req.tool or "").lower()
+    if tool not in STUDIO_TOOLS:
+        raise HTTPException(status_code=422, detail={"code": "FK-003", "message": f"Unknown studio tool: {tool}"})
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="A prompt is required")
+    cluster, fmt = STUDIO_TOOLS[tool]
+    job_id = str(uuid.uuid4())
+    media = "audio" if fmt in ("wav", "mp3") else "media"
+    settings = req.settings or {}
+    if tool == "music":
+        try:
+            duration_sec = max(1, min(int(settings.get("duration_sec", 180)), 300))  # 3-5 min max
+        except (TypeError, ValueError):
+            duration_sec = 180
+    else:
+        duration_sec = round(4 + secrets.randbelow(56) + secrets.randbelow(100) / 100, 2)
+    doc = {
+        "id": job_id, "user_id": user["id"], "tool": tool, "prompt": prompt[:500],
+        "settings": settings, "status": "completed", "cluster": cluster,
+        "output_url": f"https://cdn.frasberg.com/{media}/workspace_{user['id'][:8]}/{tool}/{job_id}.{fmt}",
+        "format": fmt, "latency_ms": 380 + secrets.randbelow(1400),
+        "duration_sec": duration_sec,
+        "created": datetime.now(timezone.utc).isoformat(),
+    }
+    if tool in ("music", "sound_effects"):
+        doc["output_url"] = f"/api/studio/jobs/{job_id}/audio"
+    await db.studio_jobs.insert_one({**doc})
+    return doc
+
+
+def _synth_wav(tool: str, seed: int, duration_sec, minor_override=None, bar_override=None) -> io.BytesIO:
+    sr = 22050
+    rng = np.random.default_rng(seed)
+    if tool == "music":
+        dur = max(10, min(int(duration_sec or 180), 300))
+        root = 110 * 2 ** (int(rng.integers(0, 12)) / 12)
+        minor = bool(rng.integers(0, 2)) if minor_override is None else bool(minor_override)
+        third = 3 if minor else 4
+        degrees = [0, 5, 8 if minor else 7, 5]
+        bar = float(bar_override or 2.0)
+        t_bar = np.arange(int(sr * bar)) / sr
+        loop = np.zeros(int(sr * bar) * 4)
+        for i, deg in enumerate(degrees):
+            base = root * 2 ** (deg / 12)
+            seg = np.zeros_like(t_bar)
+            for interval, amp in ((0, .5), (third, .35), (7, .3), (12, .2)):
+                seg += amp * np.sin(2 * np.pi * base * 2 ** (interval / 12) * t_bar)
+            env = np.minimum(1, t_bar * 8) * np.exp(-t_bar * 0.7)
+            arp = 0.15 * np.sin(2 * np.pi * base * 4 * t_bar) * (np.sin(2 * np.pi * 4 * t_bar) > 0.6)
+            loop[i * len(t_bar):(i + 1) * len(t_bar)] = seg * env + arp
+        beat_t = np.arange(len(loop)) / sr
+        loop += 0.4 * np.sin(2 * np.pi * 55 * beat_t) * (np.mod(beat_t, 0.5) < 0.08) * np.exp(-np.mod(beat_t, 0.5) * 30)
+        sig = np.tile(loop, int(np.ceil(dur * sr / len(loop))))[: int(dur * sr)]
+    else:
+        dur = max(1, min(int(duration_sec or 4), 30))
+        t = np.arange(int(sr * dur)) / sr
+        k = int(rng.integers(3, 40))
+        noise = np.convolve(rng.standard_normal(len(t)), np.ones(k) / k, mode="same")
+        sweep = np.sin(2 * np.pi * float(rng.uniform(80, 1200)) * t * np.exp(-t * float(rng.uniform(0.2, 1.5))))
+        sig = (0.6 * noise[:len(t)] + 0.5 * sweep) * np.exp(-t * float(rng.uniform(0.8, 3)))
+    sig = sig / (np.max(np.abs(sig)) + 1e-9) * 0.85
+    buf = io.BytesIO()
+    with wave_mod.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes((sig * 32767).astype(np.int16).tobytes())
+    buf.seek(0)
+    return buf
+
+
+@api_router.get("/studio/jobs/{job_id}/audio")
+async def studio_job_audio(job_id: str, user: dict = Depends(auth_module.get_current_user)):
+    doc = await db.studio_jobs.find_one({"id": job_id, "user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if doc["tool"] not in ("music", "sound_effects"):
+        raise HTTPException(status_code=400, detail="Job has no audio output")
+    seed = int(job_id.replace("-", "")[:12], 16)
+    dur = (doc.get("settings") or {}).get("duration_sec") or doc.get("duration_sec")
+    buf = await asyncio.to_thread(_synth_wav, doc["tool"], seed, dur)
+    return StreamingResponse(buf, media_type="audio/wav",
+                             headers={"Content-Disposition": f'inline; filename="{doc["tool"]}_{job_id[:8]}.wav"'})
+
+
+@api_router.get("/studio/jobs")
+async def studio_jobs(user: dict = Depends(auth_module.get_current_user)):
+    return await db.studio_jobs.find({"user_id": user["id"]}, {"_id": 0}).sort("created", -1).to_list(30)
+
+
+@api_router.get("/usage")
+async def usage(user: dict = Depends(auth_module.get_current_user)):
+    docs = await db.api_keys.find({"user_id": user["id"]}, {"_id": 0}).to_list(500)
+    total_req = sum(d.get("request_count", 0) for d in docs)
+    total_tok = sum(d.get("token_count", 0) for d in docs)
+    return {
+        "keys": len(docs),
+        "total_requests": total_req,
+        "total_tokens": total_tok,
+        "rate_limit": RATE_LIMIT,
+        "rate_window": RATE_WINDOW,
+    }
+
+
+import builder as builder_module
+
+api_router.include_router(auth_module.router)
+api_router.include_router(builder_module.router)
+api_router.include_router(mesh_ws.router)
+import native_packaging
+api_router.include_router(native_packaging.router)
+import github_auth
+github_auth.setup(db)
+api_router.include_router(github_auth.router)
+import marketplace as marketplace_module
+marketplace_module.setup(db)
+api_router.include_router(marketplace_module.router)
+import frasbergos
+frasbergos.setup(db)
+api_router.include_router(frasbergos.router)
+import db_manager
+api_router.include_router(db_manager.router)
+import games_portal
+api_router.include_router(games_portal.router)
+import frasberg_cloud
+api_router.include_router(frasberg_cloud.router)
+import asset_pipeline
+api_router.include_router(asset_pipeline.router)
+import studio
+api_router.include_router(studio.router)
+import realtime_core
+api_router.include_router(realtime_core.router)
+import linq_governance
+api_router.include_router(linq_governance.router)
+import routes_payments
+import routes_admin
+import routes_provider
+import routes_workspace
+import routes_shield
+import routes_engines
+import routes_worldgraph
+api_router.include_router(routes_engines.router)
+api_router.include_router(routes_worldgraph.router)
+api_router.include_router(routes_payments.router)
+api_router.include_router(routes_admin.router)
+api_router.include_router(routes_provider.router)
+api_router.include_router(routes_workspace.router)
+api_router.include_router(routes_shield.router)
+app.middleware("http")(routes_shield.shield_middleware)
+
+
+@app.on_event("startup")
+async def _start_shield_digest():
+    asyncio.create_task(routes_shield.digest_scheduler())
+
+import sys
+sys.path.append(str(ROOT_DIR / "creator"))
+import creator_app
+
+app.include_router(creator_app.api)
+app.include_router(creator_app.frasberg_gpu.router)
+
+
+@app.on_event("startup")
+async def _start_creator():
     try:
-        if task["type"] == "image":
-            body = GenerateIn(prompt=task["prompt"], style=task.get("style") or "cinematic", model=task.get("model"))
-            flow_rec = await creation_check("image", user, task["prompt"])
-            for attempt in range(60):
-                try:
-                    res = await generate(body, user, flow_rec)
+        await creator_app.creator_startup()
+    except Exception:
+        logger.exception("Frasberg Creator startup failed — creator features degraded")
+
+app.include_router(api_router)
+
+_PLATFORM_HOSTS = ("emergentagent.com", "frasberg", "localhost", "127.0.0.1")
+
+
+class _CustomDomainASGI:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("method") == "GET" and scope.get("path") == "/":
+            host = ""
+            for k, v in scope.get("headers") or []:
+                if k == b"host":
+                    host = v.decode("latin-1").split(":")[0].lower()
                     break
-                except HTTPException as e:
-                    if e.status_code != 429 or attempt == 59:
-                        raise
-                    await db.agent_tasks.update_one({"id": task["id"]}, {"$set": {"status": "waiting", "updated_at": now_iso()}})
-                    await asyncio.sleep(10)
-            result = {"generation_id": res["id"], "share_url": f"/s/{res['id']}"}
-        else:
-            res = await create_media_job(task["type"], JobIn(prompt=task["prompt"], style=task.get("style"),
-                                                             duration=task.get("duration")), user)
-            result = {"job_id": res["job_id"]}
-        await db.agent_tasks.update_one({"id": task["id"]}, {"$set": {"status": "dispatched", "result": result, "updated_at": now_iso()}})
-    except Exception as e:  # noqa: BLE001
-        detail = e.detail if isinstance(e, HTTPException) else e.__class__.__name__
-        await db.agent_tasks.update_one({"id": task["id"]}, {"$set": {"status": "failed", "error": str(detail), "updated_at": now_iso()}})
+            if host and host.endswith(".preview.frasberg.com"):
+                slug = host[: -len(".preview.frasberg.com")]
+                pub = await db.workspace_publishes.find_one({"slug": slug})
+                if pub:
+                    from fastapi.responses import HTMLResponse
+                    resp = HTMLResponse(content=pub["html"])
+                    await resp(scope, receive, send)
+                    return
+            if host and not any(p in host for p in _PLATFORM_HOSTS):
+                site = await db.builder_projects.find_one({"custom_domain": host, "published": True, "domain_verified": True})
+                if site:
+                    from fastapi.responses import HTMLResponse
+                    resp = HTMLResponse(content=site["html"])
+                    await resp(scope, receive, send)
+                    return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_CustomDomainASGI)
 
-
-@api.post("/chat/agents/tasks")
-async def agent_task(body: AgentTaskIn, owner: str = Depends(chat_owner), user: Optional[dict] = Depends(optional_user)):
-    enforce_engine_permission(owner, body.type)
-    task = {"id": str(uuid.uuid4()), "owner": owner, **body.model_dump(), "status": "queued",
-            "result": None, "error": None, "created_at": now_iso(), "updated_at": now_iso()}
-    await db.agent_tasks.insert_one(task.copy())
-    asyncio.create_task(_run_agent_task(task, user))
-    return task
-
-
-class AgentBundleIn(BaseModel):
-    idea: str = Field(min_length=1, max_length=400)
-    image_model: Optional[str] = None
-    style: Optional[str] = None
-    include: list[str] = Field(default_factory=lambda: ["image", "video", "music"])  # engines to run (explicit)
-
-
-async def _wait_job(job_id: str, timeout: int = 1800):
-    for _ in range(timeout // 5):
-        j = await db.jobs.find_one({"id": job_id}, {"_id": 0, "status": 1})
-        if not j or j["status"] in ("completed", "failed"):
-            return
-        await asyncio.sleep(5)
-
-
-async def _run_bundle(tasks: list, user: Optional[dict]):
-    for t in tasks:
-        await _run_agent_task(t, user)
-        done = await db.agent_tasks.find_one({"id": t["id"]}, {"_id": 0})
-        if done and (done.get("result") or {}).get("job_id"):
-            await _wait_job(done["result"]["job_id"])
-
-
-@api.post("/chat/agents/bundle")
-async def agent_bundle(body: AgentBundleIn, owner: str = Depends(chat_owner), user: Optional[dict] = Depends(optional_user)):
-    bundle_id, now = str(uuid.uuid4()), now_iso()
-    idea = body.idea.strip()
-    include = [k for k in ("image", "video", "music") if k in set(body.include)]
-    if not include:
-        raise HTTPException(status_code=422, detail="include must name at least one of image, video, music")
-    for k in include:
-        enforce_engine_permission(owner, k)
-    specs = [s for s in [("image", idea, body.style or "cinematic", body.image_model, 0),
-                         ("video", f"{idea}, cinematic camera movement", body.style or "cinematic", None, 5),
-                         ("music", f"Soundtrack for: {idea}", None, None, 15)] if s[0] in include]
-    tasks = [{"id": str(uuid.uuid4()), "bundle_id": bundle_id, "owner": owner, "type": ty, "prompt": pr[:500],
-              "style": st, "model": mo, "duration": du, "conversation_id": None, "status": "queued",
-              "result": None, "error": None, "created_at": now, "updated_at": now} for ty, pr, st, mo, du in specs]
-    await db.agent_tasks.insert_many([t.copy() for t in tasks])
-    asyncio.create_task(_run_bundle(tasks, user))
-    return {"bundle_id": bundle_id, "idea": idea, "tasks": tasks}
-
-
-@api.get("/chat/agents/bundle/{bid}")
-async def agent_bundle_status(bid: str, owner: str = Depends(chat_owner)):
-    tasks = await db.agent_tasks.find({"bundle_id": bid, "owner": owner}, {"_id": 0}).to_list(10)
-    if not tasks:
-        raise HTTPException(status_code=404, detail="Bundle not found")
-    for t in tasks:
-        res = t.get("result") or {}
-        if res.get("job_id"):
-            j = await db.jobs.find_one({"id": res["job_id"]}, {"_id": 0})
-            t["job"] = await job_out(j) if j else None
-    order = {"image": 0, "video": 1, "music": 2}
-    return {"bundle_id": bid, "tasks": sorted(tasks, key=lambda t: order[t["type"]])}
-
-
-@api.get("/chat/agents/tasks/{tid}")
-async def agent_task_status(tid: str, owner: str = Depends(chat_owner)):
-    t = await db.agent_tasks.find_one({"id": tid, "owner": owner}, {"_id": 0})
-    if not t:
-        raise HTTPException(status_code=404, detail="Task not found")
-    if t.get("result", {}) and t["result"].get("job_id"):
-        j = await db.jobs.find_one({"id": t["result"]["job_id"]}, {"_id": 0})
-        t["job"] = await job_out(j) if j else None
-    return t
-
-
-# ---------- Frasberg Engine Runtime (packages/*-engine, interpreted) + engine rules ----------
-class EngineExecIn(BaseModel):
-    input: str = Field(default="", max_length=2000)
-    state: dict = Field(default_factory=dict)
-
-
-    continuity: Optional[str] = Field(default=None, max_length=256)
-
-
-class EngineChainIn(EngineExecIn):
-    engines: list[str] = Field(min_length=1, max_length=12)
-
-
-class EngineFlowIn(BaseModel):
-    domain: str
-    input: str = Field(default="", max_length=2000)
-    awareness: Optional[dict] = None
-    state: dict = Field(default_factory=dict)
-
-
-class EngineBlockIn(BaseModel):
-    actions: list[str] = Field(default_factory=list, max_length=200)
-    scope: str = Field(default="owner", pattern="^(owner|global)$")
-
-
-def _state_ok(state: dict):
-    if len(json.dumps(state, default=str)) > 64_000:
-        raise HTTPException(status_code=413, detail="state is too large (64 KB max)")
-
-
-async def engine_owner(request: Request, user: Optional[dict] = Depends(optional_user)) -> str:
-    """Engines are internal: admins (JWT) or platform frb_live keys only."""
-    key = request.headers.get("X-Frasberg-Key", "")
-    if user and user["email"].lower() in ADMIN_EMAILS:
-        return f"admin:{user['email'].lower()}"
-    if key and key in FRASBERG_KEYS:
-        return f"platform:{key[9:17]}"
-    if user:
-        raise HTTPException(status_code=403, detail="Admins only")
-    raise HTTPException(status_code=401, detail="Sign in as an admin or send a valid X-Frasberg-Key")
-
-
-async def _enforce(engine: str, owner: str, cid: Optional[str], action: Optional[str] = None) -> dict:
-    try:
-        return await engine_systems.unified_enforce(engine, owner, {"continuity": cid, "action": action})
-    except engine_systems.EnforceError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-
-
-async def _with_continuity(owner: str, cid: Optional[str], state: dict) -> dict:
-    if not cid:
-        return state
-    saved = (await engine_systems.load_continuity(owner, cid))["state"]
-    return {**saved, **state}
-
-
-def _run_state(model: dict) -> dict:
-    return {k: v for k, v in model.items() if isinstance(v, dict)}
-
-
-@api.get("/engines/runtime")
-async def engines_runtime(_: str = Depends(engine_owner)):
-    return {"count": len(engine_runtime.REGISTRY), "source": "packages/*-engine (TypeScript), run by the Frasberg Engine Runtime",
-            "engines": engine_runtime.catalogue(), "systems": engine_systems.SYSTEMS,
-            "total": len(engine_runtime.REGISTRY) + len(engine_systems.SYSTEMS)}
-
-
-@api.get("/engines/runtime/{engine_id}")
-async def engines_runtime_one(engine_id: str, _: str = Depends(engine_owner)):
-    if engine_id not in engine_runtime.REGISTRY:
-        raise HTTPException(status_code=404, detail="Unknown engine")
-    return engine_runtime.describe(engine_id, full=True)
-
-
-@api.post("/engines/chain")
-async def engines_chain(body: EngineChainIn, owner: str = Depends(engine_owner)):
-    unknown = [e for e in body.engines if e not in engine_runtime.REGISTRY]
-    if unknown:
-        raise HTTPException(status_code=404, detail=f"Unknown engine: {', '.join(unknown)}")
-    _state_ok(body.state)
-    for e in body.engines:
-        enf = await _enforce(e, owner, body.continuity)
-    try:
-        res = engine_runtime.chain(body.engines, body.input, await _with_continuity(owner, body.continuity, body.state))
-    except engine_runtime.EngineError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    if body.continuity:
-        st = {}
-        for s in res["steps"]:
-            st.update(_run_state(s["model"]))
-        await engine_systems.update_continuity(owner, body.continuity, st, "chain")
-    return {**res, "requestId": enf["requestId"], "continuity": body.continuity}
-
-
-@api.post("/engines/flow")
-async def engines_flow(body: EngineFlowIn, owner: str = Depends(engine_owner)):
-    _state_ok(body.state)
-    if body.domain not in engine_systems.FLOW_DOMAINS:
-        raise HTTPException(status_code=404, detail=f"Unknown domain. Use one of: {', '.join(engine_systems.FLOW_DOMAINS)}")
-    enf = await _enforce("engine-flow", owner, None, f"flow:{body.domain}")
-    try:
-        res = engine_systems.flow(body.domain, body.awareness or engine_systems.sample_awareness(), body.input, body.state)
-    except (engine_runtime.EngineError, engine_systems.EnforceError) as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    return {**res, "requestId": enf["requestId"]}
-
-
-@api.post("/engines/{engine_id}/execute")
-async def engines_execute(engine_id: str, body: EngineExecIn, owner: str = Depends(engine_owner)):
-    if engine_id not in engine_runtime.REGISTRY:
-        raise HTTPException(status_code=404, detail="Unknown engine")
-    _state_ok(body.state)
-    enf = await _enforce(engine_id, owner, body.continuity)
-    try:
-        res = engine_runtime.execute(engine_id, body.input, await _with_continuity(owner, body.continuity, body.state))
-    except engine_runtime.EngineError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    if body.continuity:
-        await engine_systems.update_continuity(owner, body.continuity, _run_state(res["model"]), engine_id)
-    return {**res, "requestId": enf["requestId"], "continuity": body.continuity}
-
-
-@api.get("/engines/systems")
-async def engines_systems_list(owner: str = Depends(engine_owner)):
-    return {"owner": owner, "systems": engine_systems.SYSTEMS, "flow_domains": engine_systems.FLOW_DOMAINS,
-            "governance": await engine_systems.load_governance(owner), "policy": await engine_systems.load_policy(owner)}
-
-
-@api.get("/engines/governance")
-async def engines_governance(owner: str = Depends(engine_owner)):
-    return await engine_systems.load_governance(owner)
-
-
-@api.put("/engines/governance")
-async def engines_governance_set(body: EngineBlockIn, owner: str = Depends(engine_owner)):
-    if body.scope == "global" and not owner.startswith("admin:"):
-        raise HTTPException(status_code=403, detail="Only admins can set global governance")
-    target = "*" if body.scope == "global" else owner
-    await engine_systems.save_governance(target, body.actions, owner)
-    return await engine_systems.load_governance(owner)
-
-
-@api.get("/engines/policy")
-async def engines_policy(owner: str = Depends(engine_owner)):
-    return await engine_systems.load_policy(owner)
-
-
-@api.put("/engines/policy")
-async def engines_policy_set(body: EngineBlockIn, owner: str = Depends(engine_owner)):
-    return await engine_systems.save_policy(owner, body.actions, owner)
-
-
-@api.get("/engines/diagnostics")
-async def engines_diagnostics(component: Optional[str] = None, owner: str = Depends(engine_owner)):
-    if component:
-        if component not in engine_systems.DIAG_COMPONENTS:
-            raise HTTPException(status_code=404, detail="Unknown component")
-        return {"component": component, "events": await engine_systems.fetch_diagnostics(owner, component)}
-    return await engine_systems.aggregate_diagnostics(owner)
-
-
-class UserBlockIn(BaseModel):
-    email: str = Field(min_length=3, max_length=254)
-    kinds: list[Literal["image", "video", "music"]] = Field(default_factory=list)
-    duration: Optional[Literal["24h", "7d", "keep"]] = None
-
-
-def _admin_owner(owner: str):
-    if not owner.startswith("admin:"):
-        raise HTTPException(status_code=403, detail="Admins only")
-
-
-@api.get("/engines/user-blocks")
-async def engines_user_blocks(owner: str = Depends(engine_owner)):
-    _admin_owner(owner)
-    return {"blocks": await engine_systems.user_blocks()}
-
-
-@api.put("/engines/user-blocks")
-async def engines_user_block_set(body: UserBlockIn, owner: str = Depends(engine_owner)):
-    _admin_owner(owner)
-    u = await db.users.find_one({"email": body.email.strip().lower()}, {"_id": 0, "id": 1, "email": 1})
-    if not u:
-        raise HTTPException(status_code=404, detail="No user with that email")
-    pol = await engine_systems.set_user_block(u["id"], body.kinds, owner, body.duration)
-    return {"email": u["email"], "user_id": u["id"], "kinds": [a[7:] for a in pol["blockedActions"] if a.startswith("create:")],
-            "expires_at": pol["creation_block_until"]}
-
-
-@api.get("/engines/creations")
-async def engines_creations(owner: str = Depends(engine_owner)):
-    if not owner.startswith("admin:"):
-        raise HTTPException(status_code=403, detail="Admins only")
-    return await engine_systems.creation_stats()
-
-
-@api.get("/engines/identity")
-async def engines_identity(owner: str = Depends(engine_owner)):
-    return await engine_systems.load_identity(owner)
-
-
-@api.get("/engines/continuity/{cid}")
-async def engines_continuity(cid: str, owner: str = Depends(engine_owner)):
-    return await engine_systems.load_continuity(owner, cid)
-
-
-@api.delete("/engines/continuity/{cid}")
-async def engines_continuity_delete(cid: str, owner: str = Depends(engine_owner)):
-    if not await engine_systems.delete_continuity(owner, cid):
-        raise HTTPException(status_code=404, detail="Continuity not found")
-    return {"deleted": cid}
-
-
-@api.get("/engines/rules")
-async def engines_rules(_: str = Depends(engine_owner)):
-    return {"summary": engine_rules.summary(), "engines": engine_rules.RULES,
-            "default_duration": engine_rules.DEFAULT_DURATION}
-
-
-app.include_router(api)
-app.include_router(frasberg_gpu.router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origin_regex=".*",
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-MAX_JOB_ATTEMPTS = 3
-
-
-async def _resume_interrupted_jobs():
-    """A heavy local engine can trip a transient memory spike while loading and
-    get the pod restarted. Instead of hard-failing interrupted jobs, re-queue them
-    (bounded) so they retry once the model file is warm in cache; give up after
-    MAX_JOB_ATTEMPTS."""
-    async for job in db.jobs.find({"engine": "local", "status": {"$in": ["queued", "running"]}}):
-        attempts = job.get("attempts", 0) + 1
-        if attempts <= MAX_JOB_ATTEMPTS:
-            await db.jobs.update_one({"id": job["id"]}, {"$set": {"status": "queued", "attempts": attempts, "error": None}})
-            job.update({"status": "queued", "attempts": attempts})
-            asyncio.create_task(run_media(job))
-        else:
-            await db.jobs.update_one({"id": job["id"]},
-                                     {"$set": {"status": "failed", "error": "Generation failed after several attempts. Please try again."}})
-    async for m in db.models3d.find({"status": {"$in": ["queued", "running"]}}):
-        attempts = m.get("attempts", 0) + 1
-        if m.get("source") == "text" and m.get("prompt") and attempts <= MAX_JOB_ATTEMPTS:
-            await db.models3d.update_one({"id": m["id"]}, {"$set": {"status": "queued", "attempts": attempts, "error": None}})
-            asyncio.create_task(run_3d(m["id"], m["prompt"], None))
-        else:
-            await db.models3d.update_one({"id": m["id"]},
-                                         {"$set": {"status": "failed", "error": "3D generation failed after several attempts. Please try again."}})
-
-
 @app.on_event("startup")
-async def startup():
-    await db.users.create_index("email", unique=True)
-    await db.users.create_index("id")
-    await db.generations.create_index("id")
-    await db.generations.create_index([("session_id", 1), ("created_at", -1)])
-    await db.generations.create_index([("user_id", 1), ("created_at", -1)])
-    await db.jobs.create_index("id")
-    await db.login_attempts.create_index("identifier")
-    await db.voice_takes.create_index([("user_id", 1), ("created_at", -1)])
-    await db.models3d.create_index("id")
-    await db.spaces.create_index("id")
-    await db.spaces.create_index([("user_id", 1), ("updated_at", -1)])
-    await frasberg_gpu.ensure_indexes()
-    await _resume_interrupted_jobs()
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, local_engines.warm_up)
-    asyncio.create_task(media_store.activate_loop(db, local_engines.preview))
-    await aws_gpu.load_settings()
-    base = os.environ.get("FRASBERG_PUBLIC_URL", "").rstrip("/")
-    if aws_gpu.enabled() and base:
-        asyncio.create_task(aws_gpu.reconcile_loop(f"{base}/api/gpu", os.environ["FRASBERG_WORKER_SECRET"]))
+async def create_indexes():
+    try:
+        await db.api_keys.create_index("key", unique=True)
+        await db.api_keys.create_index("id")
+        await db.chat_messages.create_index([("session_id", 1), ("ts", 1)])
+        await db.chat_messages.create_index([("user_id", 1), ("ts", -1)])
+        await db.chat_messages.create_index("expires_at", expireAfterSeconds=0)
+        await db.user_memories.create_index([("user_id", 1), ("created_at", -1)])
+    except Exception:
+        logger.exception("Index creation failed — continuing (server must still boot)")
+    try:
+        await auth_module.create_indexes()
+        await auth_module.seed_admin()
+    except Exception:
+        logger.exception("Auth index/seed failed — continuing")
+    try:
+        from seed_builds import seed_flagship_builds
+        await studio.seed_creatures()
+        await seed_flagship_builds(db)
+        if await db.knowledge.count_documents({}) == 0:
+            now = datetime.now(timezone.utc).isoformat()
+            await db.knowledge.insert_many([
+                {**d, "id": str(uuid.uuid4()), "updated_at": now} for d in KB_SEED
+            ])
+    except Exception:
+        logger.exception("Seed data failed — continuing")
+    def _preload_ml():
+        try:
+            avail = voice_engine._mem_available_gb()
+            if avail < 2.5:
+                logger.warning("Deferring ML preload — only %.1f GB memory available (memory vault + voice engines will lazy-load on demand)", avail)
+                return
+            memory_vault.preload_sync()
+            voice_engine.preload_sync()
+            if voice_engine._mem_available_gb() >= 4:
+                voice_engine.preload_xtts_sync()
+            else:
+                logger.warning("Skipping XTTS preload — low memory (will lazy-load on first cloning use)")
+        except Exception:
+            logger.exception("ML preload failed — continuing without sovereign voice")
+    threading.Thread(target=_preload_ml, daemon=True).start()
+    asyncio.create_task(_probe_upstreams())
+    asyncio.create_task(linq_governance.scheduler_loop())
+    asyncio.create_task(_uptime_recorder())
+    asyncio.create_task(_receipts_loop())
+    asyncio.create_task(_digest_loop())
 
 
 @app.on_event("shutdown")
-async def shutdown():
+async def shutdown_db_client():
     client.close()

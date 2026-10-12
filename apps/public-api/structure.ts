@@ -1,17 +1,10 @@
-import { executeStructure } from "../engine-server/structure-execute";
+import { executeStructure } from "../../apps/engine-server/structure-execute";
 
-export async function structure(req: any, res: any) {
-  const s = req.structure;
-  const input = req.body?.input;
+export async function structure(req, res) {
+  const structure = req.structure;
+  const input = req.body.input;
 
-  const result = await executeStructure(s, input);
+  const result = await executeStructure(structure, input);
 
-  res.json({
-    version: "1.0",
-    owner: req.ownerId,
-    continuity: req.continuityState,
-    diagnostics: req.diagnostics,
-    payload: result,
-    timestamp: Date.now()
-  });
+  res.json(result);
 }

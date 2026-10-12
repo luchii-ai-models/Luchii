@@ -1,4 +1,4 @@
-# FrasbergAI Developer Handbook
+# Frasberg Developer Handbook
 Version 1.0 — August 2026
 
 ## 1. Getting Started

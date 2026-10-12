@@ -1,6 +1,4 @@
-import type { Action } from "./action-model";
-
-export function buildActionEnvelope(action: Action) {
+export function buildActionEnvelope(action) {
   return {
     actionId: action.actionId,
     motion: action.motion,

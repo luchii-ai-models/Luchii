@@ -1,244 +1,614 @@
-# Luchii AI Clone — PRD
+# Frasberg / Luchii
 
-## Original problem
-Import and clone an exact copy of luchii-ai.com (tools, files, database, features, models, stack) and wire it with the user's own Frasberg keys. No Emergent universal key. Production uses the live MongoDB `luchii-tools`.
+## June 2026 — CRITICAL BUG user was right about: image/video permissions were being silently DELETED
+- GIT-CONFIRMED TIMELINE (user accused correctly): commit 328622c added "visual_generation": ["image_video_generation"] to PERMISSION_MATRIX + "Image & Video Generation" row in UI + endpoint map tying /generate/image|video to it. Later commit 7e1f2bd ("Canonical Key Manifest", 28-perm spec, earlier session) REMOVED it entirely from backend AND frontend — zero occurrences after. So the permission genuinely used to appear in the Edit modal and the canonical rework deleted it.
+- Root cause: `image_generation`/`video_generation`/`image_video_generation`/`voice_changer` were NEVER in backend PERMISSION_MATRIX/PERMISSION_KEYS (server.py:335) nor frontend EDIT_PERM_KEYS (Dashboard.jsx:56). POST /keys rejected them (422 unknown), and PATCH /keys/{id} (line ~1832) rebuilds permissions over sorted(PERMISSION_KEYS) → ANY Edit-modal save STRIPPED those grants from the key. UI never rendered the rows so user couldn't see/restore them.
+- Fix: added "generation_engines" group to PERMISSION_MATRIX + CANONICAL_DEFAULTS (all 4 = access) + prepended to EDIT_PERM_KEYS. Repaired stripped keys in DB ("Video Engine" re-granted). Verified: create-with-perms 200 (was 422), PATCH preserves grants, screenshot shows rows at top of modal. User's frb_live_be3354 key intact: active/unlimited + image/video grants.
+- CREATE-matrix also missing (user's 2nd screenshot, Key Forge on /settings/api-keys + Developer Console): fixed `frontend/src/components/site/ApiKeyForge.jsx` — added "Generation Engines" GROUP (Clapperboard icon, first position: image_generation/video_generation/image_video_generation/voice_changer) + CANONICAL defaults (all access). Also fixed /keys/{id}/test endpoint map (server.py ~1930): /generate/image|video were wrongly tied to voice_generation after the old deletion → now image_generation/video_generation. Screenshot-verified on /settings/api-keys.
+- LESSON: when adding new backend permission scopes, ALWAYS add to PERMISSION_MATRIX + CANONICAL_DEFAULTS + frontend EDIT_PERM_KEYS or saves will strip them. Also backfill ALL existing keys with the new perm entries (no_access) or _manifest_status flips them RESTRICTED ("missing permission key"). Backfilled 9 keys; added LEGACY_PERM_ALIASES image_generation/video_generation ↔ image_video_generation. Legacy keys (Expiry test/probe-key/test/Sovereign) were ALREADY restricted pre-change (old deprecated perm names) — not a regression.
+
+## June 2026 — Production outage RCA (deployer debug, awaiting user action)
+- Luchii "turbulence" (server.py:414) for 2 weeks: prod EMERGENT_LLM_KEY is INACTIVE (deactivated — not budget/OOM) AND LUCHII_UPSTREAM gateway fails in-app health probe, so chat always hits dead key. Serving revision IS key-optional (no boot crash). Fix path (user's choice, no EMERGENT key): bring gateway at LUCHII_UPSTREAM_URL live — needs {root}/v1/health < 400. NOTE probed from pod: api.frasberg.com → 403 (Cloudflare WAF blocking! likely the probe failure), but frasberg.com/api/v1/health → 200. Separate: tier_0 512Mi OOMKilled (exit 137) — user must raise Resources tier (downgraded tier_1→tier_0 Oct 6). RCA file: /app/deployer-agent-docs/RCA_853332fb-*.MD
+
+## June 2026 — Precise error semantics + luchii packages + runtime health (curl-verified)
+- Error contract live (spec: never "invalid_key" unless hash truly missing): engine_auth_factory/_check_rate_limit (server.py), engine_ctx (routes_engines), gateway main.py → 401 {"error":"key_not_found"}, 403 {"error":"permission_denied","required":perm} (FK-003), 403 key_revoked/owner_not_found (FK-002/FK-004), 429 {"error":"rate_limit_exceeded"}, 503 {"error":"service_unavailable"} (gateway 502s→503; FRB-UPSTREAM 503s tagged). Lowercased legacy UPPERCASE labels (server/routes_engines/routes_shield).
+- NEW GET /api/v1/runtime/health (open, routes_engines): luchii-health RuntimeHealth[] contract — database/luchii-router/platform-api w/ status healthy|degraded|offline + latencyMs; overall worst-of.
+- 33 new monorepo files (gen script /app/scripts/gen_luchii_packages.py): packages/frasberg-agents/emergent-agent.ts (EmergentAgent single runtime, verbatim), luchii-api-keys (7 files: ApiKey model w/ hash/status/permissions/requestsToday, store/validator/hash/permissions/usage/middleware — full gateway flow Request→Key→Validate→Owner→Workspace→Plan→Perms→RateLimits→Router→Model), luchii-health (status/monitor/health-check/failover), luchii-core/model-router/rate-limiter, frasberg-core/identity/checkout/memory, gt6-physics/ai/race (re-export config/emergent) + gt6-audio/video/world, apps/{gateway,api,studio,checkout,runtime}/index.ts.
+- /settings/api-keys frontend route already existed (ApiKeysSettings). Verified: 401 key_not_found on fake key, 403 permission_denied+required=music_generation on image/video key→/generate/music, health endpoint, /v1/behavior regression 200.
+
+## June 2026 — EMERGENT_LLM_KEY fully OPTIONAL (user mandate: "we do not use any EMERGENT_LLM_KEY, period")
+- All 5 hard `os.environ["EMERGENT_LLM_KEY"]` (core.py, asset_pipeline, builder, mesh_ws, studio) → `.get(...,"")`. App boots + all modules import with EMPTY key (verified). NEVER reintroduce as hard requirement.
+- Routing: /v1/chat/completions (routes_provider) now upstream-FIRST (server._try_upstream) in both non-stream + SSE paths; falls back to engine core only if key present; else 503 {"code":"FRB-UPSTREAM"} (stream emits the message as a chunk). /generate/image: upstream miss + no key → 503 FRB-UPSTREAM.
+- Gateway (backend/gateway/main.py): NEW POST /v1/images/generations (OpenAI-compatible: prompt/model/n≤4/response_format b64_json). FRB_IMAGE_ENGINE_URL(+FRB_IMAGE_ENGINE_KEY) env = fully self-hosted passthrough; else forwards to platform /generate/image with X-Frasberg-Gateway:1 loop-guard header (platform skips _try_upstream_image when header present — prevents platform↔gateway recursion). Tested on :10010: 401/401/400 guards, real image e2e, platform 401 passthrough.
+- Regressions green: chat completions (OK), SSE streaming, image auth. User deploys were initiated BEFORE these edits — needs fresh deploy to take key-optional behavior live.
+
+## June 2026 — Runtime Router ↔ Platform WorldGraph hookup (ONE shared state, e2e tested)
+- NEW `packages/runtime-router/src/platform-worldgraph-service.ts` (frasberg-secure-runtime): PlatformWorldGraphService implements WorldGraphService against live `/api/v1/worldgraph` (env: FRASBERG_PLATFORM_URL, FRASBERG_PLATFORM_API_KEY, FRASBERG_SIGN_REQUESTS=true adds x-api-signature HMAC). Maps router contract (nodes/kind 'world' etc./status/schemaVersion) ↔ platform WorldDefinition (routerKind preserved in metadata; unwraps apiEnvelope; 404→undefined/'does not exist' errors for runtime's 404 mapping).
+- Shared `WorldGraphService` interface → MaybePromise returns; `worldgraph-runtime.ts` awaits all service calls + auto-selects Platform service when FRASBERG_PLATFORM_URL set (else InMemory). New entry `worldgraph-server.ts` (WORLDGRAPH_RUNTIME_PORT=4100). Exported from index.ts; .env.example updated.
+- Platform `routes_worldgraph.py` superset: WorldDefinition += `nodes: List[Dict]` + `status` (draft/active/archived); SchemaMetadata extra=allow; WorldPatch += nodes/status; materialize merges native node specs (id/kind/label/parentId/tags/config) + derived scene/page nodes.
+- E2E verified (node 20, npm i + tsc -b, fastify on :4100 → preview platform): create via router→visible via platform API (same owner, nodes intact), patch via router→platform reflects, list/materialize/schema via router, delete via router→platform 404, continuity timeline shows router-driven events, HMAC signing on. Repo vitest suites 4/4 pass. Run: `cd /app/frasberg-secure-runtime && npx tsc -b packages/shared packages/runtime-router && FRASBERG_PLATFORM_URL=... FRASBERG_PLATFORM_API_KEY=frb_live_... node packages/runtime-router/dist/worldgraph-server.js`.
+
+## June 2026 — frasberg-secure-runtime import + WorldGraph live wiring (self-tested via curl, all green)
+- Synced github.com/frasberg-code/frasberg-secure-runtime (853 files) → /app/frasberg-secure-runtime/ (full monorepo: 60 packages incl worldgraph-engine/full-game-stack-schema/law/policy/governance engines, apps/gateway-server+runtime-router+engine-server, infra/ CDK+terraform, deploy/ helm+k8s, supabase/, sdk/, platform/).
+- NEW `/app/backend/routes_worldgraph.py` (mounted in server.py) implementing repo contracts live:
+  - POST/GET/PATCH/DELETE `/api/v1/worldgraph[/{id}]` + `/{id}/materialize` — owner-scoped CRUD, WorldDefinition pydantic validation per full-game-stack-schema (kind game/app/site, metadata.schemaVersion, track/vehicleClasses/raceRuleset), 409 dup, 422 invalid kind.
+  - apiEnvelope response format: {version:"v1", owner, continuity{recent}, diagnostics{traces}, policy{rules}, payload, timestamp}.
+  - Continuity timeline (db.continuity_state) + diagnostics traces (db.wg_diagnostics) + audit (db.wg_audit) on every mutation; GET /api/v1/continuity.
+  - Policy engine: db.policy_rules {rule:{action,effect:"deny"}} → 403 FK-POLICY on matching mutations.
+  - Governance routes (admin role OR x-governance-key == GOVERNANCE_ADMIN_KEY in backend/.env = frb_gov_7d1e9b4ac3f82056de1a): GET /governance/diagnostics|continuity|policy, POST /governance/policy/enforce, DELETE /governance/policy/{rule_id}.
+  - Identity: x-owner-id header mismatch → 403 (admin may impersonate); optional HMAC request signing x-api-signature = HMAC-SHA256(body, api_key) → 401 on bad sig.
+- Verified by curl: create/list/get/patch/delete/materialize, envelope shape, policy deny+remove, governance gating, owner mismatch 403, HMAC good/bad, continuity timeline.
+
+## June 2026 — Frasberg Engine Stack (Stages 80–89) + GT6 Orchestrator + FRB image/video key (self-tested via curl)
+- Registered user's key `FRB_IMAGE_VIDEO_GENERATION_KEY` (frb_live_be3354...) in preview DB: active, unlimited, scoped +image_generation/+video_generation/+image_video_generation (perm values are 'write'/'access'/'no_access' strings). Verified: /generate/image 200 with real image via Bearer key; 401 on bad key; /generate/video queues task.
+- NEW `/app/backend/routes_engines.py` (mounted in server.py): POST /api/v1/behavior|pattern|structure (identity→structure parallel chain per Option 1 — existing pipeline untouched, frb key or session auth via engine_ctx), GET /api/v1/engines (nodes+granted flags from key perms), POST /api/v1/gt6/orchestrate (cost-aware planner: engines gated by key permissions + maxCostWeight budget, declined list with reasons; physics sim stepPhysics 0.1s + AI driver decisions). Executions logged to db.engine_executions.
+- Monorepo file drop (user's "actual files" demand, 84 files): /app/packages/{identity,persona,character,role,function,task,action,behavior,pattern,structure}-engine/*.ts, /app/apps/{engine-server,gateway-server/middleware,public-api}/*.ts (incl identity-structure-parallel.ts Option 1 wiring), /app/studio/src/{components,pages,hooks}, /app/config/emergent/ (emergentAgent.prompt.md + 7 engine prompts + engine-graph/planner/simulation-state/physics-core/ai-drivers/gt6-orchestrator .ts). Generator: /app/scripts/gen_frasberg_stack.py.
+- Image gen now upstream-first: _try_upstream_image() posts to {LUCHII_UPSTREAM_URL root}/v1/images/generations with LUCHII_UPSTREAM_API_KEY; EMERGENT_LLM_KEY only as local fallback (user: "we dont use and will not any of EMERGENT_LLM_KEY" — fully honored once their gateway is live in prod).
+
+## June 2026 — Key auth fixes + unlimited keys + edit/copy (self-tested via curl + screenshot)
+- FK-003 root cause: engine routes required canonical perms missing on legacy keys → added LEGACY_PERM_ALIASES fallback in engine_auth_factory (e.g. voice_generation ← voices/voice_changer).
+- /generate/video, /voice/transcribe, /voice/speak, /voice/clone now accept frb_live_ API keys (engine_auth_factory w/ speech_to_text, text_to_speech, voice_generation; video = any valid key) instead of session-JWT-only ("Invalid token" fixed). Verified: video task JSON + speak 200 with Bearer key.
+- 1@frasbergai.com (user wrote 1@frasberg.com; key prefixes matched frasbergai account): plan→scale for BOTH accounts; 7 keys (Audio Tools, Music Generation, Gateway-TTS/STT, Voice-Cloning, Video Engine, Music Engine) marked unlimited:true → bypass credits/quota/restrict-limit at gateway, survives rotation (rotate only $sets key/rotated_at). "∞ Unlimited Credits" badge in row (key-unlimited-{id}).
+- Copy key: GET /api/keys/{id}/reveal (owner only, provenance-logged) + copy button per row (copy-key-btn-{id}).
+- Edit endpoints: KeyEdit.permissions (validated, normalized to canonical 28) + collapsible 28-select grid in EditKeyModal (edit-key-perms-toggle / edit-perm-{key}); recomputes ACTIVE/RESTRICTED.
+- Mobile menu now renders EXPLORE_GROUPS (Explore/Products/etc. sections) — was desktop-only.
+
+## June 2026 — Canonical Key Manifest + Governance Engine (lore dump translated to FastAPI/Mongo)
+- PERMISSION_MATRIX = canonical 28 perms / 6 sections (core_audio, advanced_audio_voice, agents, projects, administration, workspace_members incl terms_of_service_accept). CANONICAL_DEFAULTS per spec (create with no perms → canonical defaults → ACTIVE).
+- _manifest_status(doc): name required, unknown/missing/invalid perms, models==read, frasberg_agents==access, expired → RESTRICTED + exact error list. Attached to create response + GET /keys (manifest_status/manifest_errors) + recomputed on PATCH edit. OLD keys intentionally show RESTRICTED (per spec).
+- KeyCreate accepts nested manifest: security{restrict_ip, auto_disable_if_leaked, usage_limits{credits, refresh_period incl "unlimited"}}, expires_at, restrict_ip. Forge sends both flat + nested.
+- Provenance chain: db.key_provenance (sha256 signature) on create/update; returned in governance.
+- GET /api/keys/{id}/governance: risk_score (sensitive perms + expiry + errors), trust_score, fabric_score, risk_category, 10 shield layers (active/breached), weak_points, provenance[]. Single-region layers (region/sla/cost/integrity) are DETERMINISTIC/SIMULATED (one region only).
+- UI: Forge = canonical 6 sections w/ defaults, Restrict-by-IP toggle (forge-restrict-ip-toggle), unlimited refresh option, ErrorBanner (key-error-banner, restricted reasons) / SuccessBanner (key-success-banner). Dashboard rows: ACTIVE/RESTRICTED badge (key-status-{id}, errors in title tooltip).
+- Verified by curl: canonical→active, bad manifest→restricted w/ exact reasons, governance scores, list badges; UI screenshot: matrix + banner + badges. Lint clean.
+- NOT implemented (would be pure mock, deferred): multi-region replication/failover/drift dashboards, quantum lattice/continuum/singularity/totality panels — one region exists; governance layers cover the real signals.
+ Platform — PRD
+
+## June 2026 — Batch: auth reset, refunds, nav/theme overhaul
+- Forgot/reset password: POST /api/auth/forgot-password {email, origin_url} (generic ok, Resend email w/ 1h token → /auth?mode=reset&token=), POST /api/auth/reset-password {token,password}. Auth.jsx modes login/signup/forgot/reset + forgot-email support note. NOTE: Resend sender domain unverified — emails only deliver to Resend account owner until domain verified at resend.com/domains.
+- Admin refund: POST /api/admin/purchases/{id}/refund (stripe SDK Refund via session payment_intent, claws back credits from key/wallet, marks REFUNDED; 400 on SDK failure for CF passthrough). Admin.jsx tenant detail purchases show provider + Refund & claw back button (refund-btn-{id}).
+- Stripe history: LinqHistory method shows "Card (Stripe)"; _fulfill_stripe_txn now resolves key owner → sets user_id/email on purchase so it appears in /purchases/my.
+- Navbar: order Sign In/out, AI Models, Realms, API, Website Builder, Game Builder, Games, FrasbergOS, Explore (Models/Brand removed top-level). Explore first group "Explore": Chat(/luchii), Developer Console(/dashboard), Benchmark, Realm, Mythos, API.
+- /luchii now serves Chat app; footer Chat→/luchii; footer "LLM Provider" rename; Builder showreel ("Watch Luchii build — live") removed; hero headline → "Intelligence that truly gets you."; laws.js lore line softened.
+- THEME: lib/dashTheme.js T → CSS vars (--dash-*) defined in index.css :root/.light; Dashboard toggle syncs global luchii-theme; AgentWorkspace/WorkspaceHome local T → vars; .light overrides for legacy hardcoded dark utility classes; friendlier light palette (#f7f8fb bg, #007AFF accent).
+- Testing: iteration_57.json — 100% backend (11/11) + 100% frontend.
+
+## June 2026 — Stripe checkout + global font bump + fixes
+- Stripe (Flow B, user's own LIVE key in backend/.env STRIPE_API_KEY, emergentintegrations StripeCheckout): POST /api/payments/checkout {plan_id,key_id,origin_url}, GET /api/payments/status/{session_id} (poll + idempotent fulfil), POST /api/webhook/stripe, GET /api/payments/config. _fulfill_stripe_txn credits key/wallet + db.purchases (provider=stripe) + receipt. Pages /payment/success (polls status) + /payment/cancel; Pricing.jsx "Pay with Card" (stripe-buy-{id}) beside PayPal. BLOCKER: user's Stripe account NOT activated for live charges → checkout returns 409 "Stripe account not yet activated" (JSON passes CF; toast shows real reason). Works once user completes activation at dashboard.stripe.com.
+- Restrict-on-create: Key Forge left panel toggle + usage limit + refresh period (forge-restrict-toggle / forge-usage-limit-input / forge-refresh-period-select), included in KeyCreate + JSON preview.
+- GLOBAL FONT BUMP (user: text too small): all arbitrary px text classes +~2px sitewide (nothing below 13px), text-xs→text-sm, recharts tick fontSize 10/11→12/13. html base already 17px/18px.
+- Ecosystem marquee label "Frasberg AI"→"Frasberg".
+- Minor fixes: 409 instead of 502 for unactivated Stripe (CF strips 5xx bodies), edit-key-cancel testid, Pricing option single-string child (hydration warning).
+- Testing: iteration_56.json — 100% backend (8/8) + 100% frontend (matrix groups, restrict flows, FK-429 enforcement, Stripe graceful errors, font-bump regression on 8 pages).
+
+## June 2026 — Permissions matrix restructure + Edit API Key
+- PERMISSION_MATRIX (server.py + ApiKeyForge.jsx): Visual Generation merged to single `image_video_generation` ("Image & Video Generation"); Advanced Audio += voices, forced_alignment, ads_engine; Projects += user, pronunciation_dictionaries; Workspace Members = workspace, workspace_analytics, workspace_webhooks (label "Webhooks"), group_members, service_accounts, workspace_members_read/invite/remove. Old image_generation/video_generation keys rejected FK-003 on create; key test routes updated.
+- Edit API Key modal (Dashboard.jsx EditKeyModal, pencil btn per row data-testid=edit-key-btn-{id}): Name, Expire After (Keep current/Never/30/60/90), Restrict Key toggle, Usage Limits (Credits), Per credit refresh period (Unlimited/Daily/Weekly/Monthly). PATCH /api/keys/{key_id} (KeyEdit model). Restricted badge in key row (key-restricted-{id}).
+- Enforcement: _key_period_usage (sums api_key_usage tokens per daily/weekly/monthly/lifetime) hooked into _validate_bearer_key → 429 FK-429 key_usage_limit when restrict_key on and period usage >= usage_limit_credits. Verified by curl: 429 at limit, 200 after unrestrict.
+
+## Original Problem Statement
+Awwwards-level cinematic landing page + platform for the "Luchii" multi-tier intelligence model family by Frasberg. Sovereign infrastructure, split-screen dashboard, gated chat, live voice, voice cloning, memory vault, monetized builders (Game/App/Website), Frasberg Game Platform with WebRTC streaming, multiplayer websockets and HTML5 games. Flagship 3D game "Street Vybz" (GTA-style open world) with hyper-realistic humans (ReadyPlayerMe GLB), Las Vegas realism, police/fire responses, weapons, missions.
 
 ## Architecture
-- Frontend: the original React source, recovered from the live site's public source map (`main.65f24d02.js.map`). Same pages, styles, starfield, mock content.
-- Backend: FastAPI rewritten to match the live API contract. Every AI call goes through Frasberg (`FRASBERG_BASE_URL=https://frasberg.com/api`). It rotates through 8 `frb_live_*` keys, retrying on permission and server errors.
-- DB: MongoDB collections `users`, `generations`, `jobs`, `login_attempts`. Preview uses local Mongo because Atlas blocks this pod's IP. Production uses MONGO_URL/DB_NAME from the deployment secrets.
+- React frontend (`/app/frontend`) + FastAPI backend (`/app/backend`) + MongoDB
+- Node.js WebSocket multiplayer server (`/app/frasberg-carjack/server`)
+- Street Vybz game: single-file Three.js engine at `/app/games/streets/index.html` (~2200 lines), served via `/api/games/streets/play`
+- Shared game assets in `/app/games/_assets/` (RPM avatars, anims, textures, SFX, env.js audio layer)
 
-## Implemented (2026-06)
-- Pages: Home, /create (text-to-image, image-to-image, upscale, share, download), /gallery, /s/:id, /models, /tts, /developers, /legal/:doc. New: /video (Video Creator) and /audio (Audio Studio).
-- JWT auth (register/login/me), lockout after 5 bad attempts per email.
-- Frasberg wiring: /generate/image (generate/edit/upscale), /voice/speak (TTS), /generate/video and /generate/music, polled via /jobs/{id}, with a music WAV proxy.
+## Implemented (history)
+- Luchii Builder end-to-end (AI code generation via Emergent LLM key)
+- Dashboard 50/50 split-screen redesign, Gallery thumbnails/search
+- Street Vybz: RPM articulated humans, missions, wanted/roadblocks, LVMPD/LVFR responses, ambulances, driver fightback, taxi fares, career persistence, gang turf, weapon arsenal + gun stores + clothing store (B key), leaderboards, gamepad + mobile twin-stick touch controls, footsteps/voices
+- Collision: cars knock down peds w/ knockback, ped-ped & ped-player separation
 
-## Upstream status (Frasberg, at build time)
-- Image: HTTP 502 upstream. TTS: 503 "voice engine warming up". Only key #5 has music permission, and none of the keys have text_to_speech permission.
-- Video jobs complete, but they return sample MDN clips.
+## Implemented June 2026 (this session)
+- **Vegas landmarks**: Welcome to Fabulous Las Vegas sign (blinking bulbs), Luxor pyramid + sky beam, The Sphere (animated LED globe), Stratosphere tower, High Roller ferris wheel (rotating, level cabins), Bellagio dancing fountains, ~40 palm trees, 4 facade-textured casino resorts with flickering neon marquees (all with colliders)
+- **Helicopters**: 3 ambient tour choppers circling skyline + LVMPD Air One at wanted ≥4 with searchlight cone tracking player
+- **Realistic cars**: glass greenhouse, painted roof, alloy rims, bumpers, grille, side mirrors, LV license plates, spoilers/exhaust (sports/muscle), taxi roof sign, truck bed, per-type proportions
+- **Movement glitch fixes**: dt cap raised 0.05→0.1 (no slow-motion on low-FPS devices), ped building-collision position restore (no wall vibration), dt-clamped separation pushes, avatar anim timeScale stride-matched to speed, spawn moved to open road (0,2)
+- **Mobile**: minimap moved to small top-center (76px, top:44) via CSS media query + JS — no longer blocks touch buttons; lower pixel ratio (1.2) and 1024px shadows on touch devices
+- **Dancehall music**: procedural WebAudio Jamaican dancehall riddim (window.Riddim — 96BPM dembow kick pattern, bubbling A-minor bassline, offbeat skank, hats) replaces old ogg loop. NOTE: real Vybz Kartel track cannot be embedded (copyright)
+- Removed corrupt trailing HTML after </html>
+- Testing: iteration_27.json — 100% pass (landmarks, helis, Air One, separation, shops, riddim, mobile layout, leaderboard API, homepage regression)
+
+## Implemented Aug 2026 (fork session)
+- LINQ Governance Command Center at /linq: 45-layer Ascension Ladder, Threat/Compliance/Billing engines, LINQ Live (LiveKit tokens/rooms + Ask Luchii) — iteration_29.json 100% pass backend+frontend
+- Verified Luchii API key provider flow end-to-end: mint luchii-sk-* key → Bearer auth on /api/v1/chat → real LLM streaming (70b & 1b tiers) → usage metering (requests/tokens/last_used) → 401 on fake/missing/revoked keys → revocation works
+- Branding: replaced old FA emblem (/luchii-logo.webp) with new glowing Luchii mark (/luchii-mark.jpg) across all 24 usages (Navbar, Footer, Hero, ChatDemo, all page headers, Ecosystem, Brand page); removed ring borders around all mark icons
+- Luchii Live Actions: agent runs real threat/billing/compliance engine scans from live chat (natural language auto-detect + quick action buttons), returns artifact cards (tag/score/recommendations) — realtime_core.py _detect_engine/_run_agent_engine, linq_governance.run_engine_core
+- PayPal LINQ Billing: 3 tiers (linq-operator $15->builder, linq-architect $30->pro, linq-sovereign $60->premium) in UPGRADE_PLANS; /linq Plans tab (LinqBilling.jsx) with live PayPal checkout; capture auto-upgrades user plan. LIVE mode credentials verified (OAuth 200)
+- Key Dashboard live graphs: dual-axis Requests+Tokens bars with legend, live badge, 12s auto-refresh polling
+- Favicon/mark: precision circle-fit crop (Kasa fit, center 510.3/503.2 r 401.7) of glowing ring → transparent luchii-mark-circle.png used for all UI icons + favicons 16-512 + .ico (cache-bust ?v=3)
+- Navbar Explore dropdown: grouped 2-column mega menu (On this page/Build/Products/Company); mobile menu 2-col grid capped 75vh
+- /linq auth gate now links /auth?mode=login
+- LINQ App tab (LuchiiFlix/cinemazone embed) hidden from public users — admin-only (role check on tab + render)
+- Tip Jar Live: PayPal tips ($1-$500) in LINQ Live with on-screen 💸 burst animation + LiveKit data-channel broadcast (server.py /rooms/tip/orders + capture, linq_tips/linq_events)
+- Engine Scheduler: daily auto threat+compliance scans (asyncio loop, 30-min tick, once/day), alerts on score drops (linq_alerts), bell UI in LINQ header (LinqAlerts.jsx: toggle, run-now, alert list)
+- Purchase History: /api/purchases/my + 🧾 History tab (LinqHistory.jsx: plan summary + PayPal/CashApp rows) — verified 8 rows for admin
+- Luchii Voice Live: TTS playback of Luchii replies via /voice/speak (voice toggle, default ON)
+- Homepage: 9 info sections wrapped in CollapsibleSection accordions (content preserved, #anchor auto-expands); GalleryMarquee — Squarespace-style TWO-ROW gallery with live iframe preview cards, rows sliding in opposite directions (always visible)
+- Ecosystem subtitle: "Products and platforms powered by Frasberg"
+- PUBLIC API keys: free accounts can now mint up to 3 luchii-sk keys (was 402-paywalled); verified e2e with free account: mint → Bearer → /v1/chat inference → usage metering → 4th key 402 upsell
+- Testing: iteration_31 (backend 100%, frontend 95% — LinqLive missing-state crash fixed by test agent patch + my corrections: voiceOn default true, withCredentials on TTS)
+- NOTE: testing agent patched LinqLive.jsx in iter31; audited and kept, matches intended design
+- Testing: iteration_30.json — 100% pass backend + frontend (engine actions, PayPal order creation live-mode, usage daily, Plans tab, quick actions artifact cards, dropdown, regression)
+
+## Aug 2026 — FrasbergAI Provider Gateway + monetization
+- OpenAI-compatible provider gateway in server.py: GET /v1/models, GET /v1/provider (registry+manifest+providers list incl frasbergai, verified:true), POST /v1/chat/completions (bearer luchii-sk, SSE chat.completion.chunk + [DONE], multi-turn, non-stream w/ usage), POST /v1/embeddings (luchii-6-embed, 384-dim MiniLM via memory_vault)
+- Well-known verification files: /api/.well-known/{frasbergai-provider.json, provider-manifest.json, openapi.yaml} + static frontend /.well-known/*. Base URL: https://api.frasberg.com/v1 (PROVIDER_BASE_URL env overridable)
+- Model aliases: luchii-6-plus→70b, luchii-6-mini→1b + legacy names
+- PAID KEY MODEL (user: "we charge, half prices"): every key mints with 2,500 trial token credits; usage deducts credits for free-plan owners; 0 credits → 402 insufficient_credits w/ purchase_url; paid-plan/admin owners unmetered; credit packs HALVED: starter $5/10k, pro $12.50/30k, scale $50/150k; 13 existing keys backfilled 2500 credits
+- /docs public quickstart page (curl/python/js OpenAI SDK snippets, models table, discovery links, pricing) + navbar Explore link
+- Alert emails via Resend on engine score drops (linq_governance._send_alert_email → ADMIN_EMAIL)
+- Usage Receipts via Resend (LIVE 2026-06): RESEND_API_KEY injected in backend/.env. Monthly auto-statement loop (_receipts_loop, runs on 1st of month) + POST /api/receipts/send-now (authed). Test email delivered to billing@frasberg.com (Resend account owner). LIMITATION: sender is onboarding@resend.dev; frasberg.com domain NOT yet verified at resend.com/domains, so delivery is restricted to billing@frasberg.com until user verifies the domain (then set SENDER_EMAIL=receipts@frasberg.com in backend/.env). User is adding DKIM/SPF DNS records in Squarespace (2026-06).
+- Low Credit Alerts (2026-06): _maybe_low_credit_alert in server.py — emails key owner once when key credits drop below per-key alert_threshold (default 500), flag resets on recovery. PATCH /api/keys/{id}/alert-threshold + Dashboard per-key select (data-testid=key-alert-threshold-{id}).
+- Welcome Email (2026-06): _send_welcome_email in auth.py fires on register (quickstart curl included). Delivery pending domain verification.
+- Tenant Detail View (2026-06): GET /api/admin/tenants/{user_id} (keys masked, purchases by email, 14-day daily usage); clickable tenant rows in Admin.jsx expand detail panel (data-testid=tenant-detail-{id}).
+- Landing gap fix (2026-06): collapsible section children changed py-28→pt-8 pb-24 (Benchmarks, Capabilities, Realms, MythosTimeline, Ecosystem, Safety, Press, ApiDocs, GallerySpotlight).
+- Weekly Digest (2026-06): _send_weekly_digest + _digest_loop (Mondays, db.digest_state) in server.py; POST /api/admin/digest/send-now. Emails all role=admin users: 7d signups, revenue, top-5 tenants by tokens.
+- Tenant Actions (2026-06): POST /api/admin/tenants/{id}/grant-credits {amount} (wallet inc + credit_transfers kind=admin_grant), POST /api/admin/tenants/{id}/suspend {suspended} (sets user + all api_keys suspended; both bearer-key auth paths return 403 "Account suspended"; admins cannot be suspended). Admin UI: grant input/btn + suspend/reinstate btn in tenant detail, suspended badge in row.
+- Alert History (2026-06): db.email_log written by all email senders (usage_receipt, low_credit_alert, welcome, weekly_digest); GET /api/emails/history (user-scoped, last 20); Dashboard "Email history" section (data-testid=email-history) with Sent / Pending-domain badges.
+- Ecosystem logo fix (2026-06): removed turn-step spin from Frasberg AI + Luchii logos; all marquee logos uniform grayscale.
+- Suspension Notice (2026-06): _send_suspension_notice emails tenant on suspend/reinstate (logged kind=suspension_notice).
+- Digest Preview (2026-06): GET /api/admin/digest/preview (subject/html/stats via _build_weekly_digest refactor); Admin UI panel (data-testid=digest-preview-panel) with "Send to admins now".
+- Export Tenants CSV (2026-06): GET /api/admin/tenants-export.csv (NOTE: hyphen path — /admin/tenants/{user_id} would capture export.csv); Admin "Export CSV" button downloads blob.
+- Games loading fix (2026-06): GamesLibrary.jsx — 3x retry with backoff, skeleton loading state, distinct "Couldn't reach the game servers" + Retry button vs "No games match" + Clear-filters button; genre chips now built dynamically from data (fixes missing "Open World").
+- Player Accounts (2026-06): games_portal.py — _optional_user_id (JWT cookie/bearer decode), scores now store user_id when signed in; GET /api/games/player/favorites, POST /api/games/player/favorites/{id} (toggle, db.game_favorites), GET /api/games/player/best-scores (best per game). GamesLibrary: Favorites filter chip (signed-in only), heart button on cards (data-testid=game-favorite-btn-{id}), "My best scores" strip (data-testid=my-best-scores). NOTE: player routes declared BEFORE /{game_id} routes to avoid path capture.
+- Plans & Quotas (2026-06): PLAN_QUOTAS in server.py (free 30rpm/100k, pro 120rpm/2M, scale 600rpm/20M, enterprise 1200rpm/200M monthly tokens); _enforce_plan_quotas on v1 gateway key auth (429 with plan message); GET /api/quotas (user); Dashboard quota chip (data-testid=quota-chip).
+- Admin Audit Log (2026-06): _audit helper → db.admin_audit; logged on grant_credits/suspend_tenant/reinstate_tenant/digest_send_now; GET /api/admin/audit; Admin panel data-testid=admin-audit-panel.
+- Service Health Panel (2026-06): _REQ_METRICS deque + http middleware in server.py; GET /api/admin/health (5-min requests, avg/p95 latency, error rate, db ping, uptime); Admin panel data-testid=admin-health-panel.
+- Achievement Badges (2026-06): GET /api/games/player/achievements (6 badges: first_score, high_roller, hour_played, collector, explorer, weekly_king); profile section data-testid=profile-achievements.
+- Weekly Champions (2026-06): list_games includes weekly_champion (current ISO week); GameCard line data-testid=game-weekly-champion-{id}.
+- Receipt error split (2026-06): _send_usage_receipt returns "sent"|"no_keys"|"send_failed"|"unavailable"; send-now returns 400 (no keys) vs 503 (delivery restricted until domain verified).
+- Regression iteration_33.json: 100% backend + 100% frontend pass. Known non-blockers: hydration warning (span/option, unlocated), recharts width(-1) first paint warning.
+- Player Profile + Celebrations (2026-06): GET /api/games/player/profile (favorites+best scores+playtime), POST /api/games/player/playtime (30s heartbeat from GamePlayerPage, db.game_playtime), post_score returns personal_best flag; /games/profile page (PlayerProfile.jsx, data-testid=player-profile-page) linked via "My Profile" btn in library; GamePlayerPage polls best-scores every 10s → canvas-confetti + "New personal best!" banner (data-testid=personal-best-banner). Added canvas-confetti pkg.
+- Suspend Reason (2026-06): suspend endpoint accepts {reason} (stored as suspend_reason while suspended, cleared on reinstate, included in notice email); Admin UI prompts for reason.
+- Game Play Counts (2026-06): POST /api/games/{id}/play-count (db.game_plays upsert, fired from GamePlayerPage on load); /api/games merges counts, list sorted by plays desc; GameCard shows plays badge for all games (data-testid=game-plays-{id}).
+- Resend DNS: user is adding DKIM (resend._domainkey TXT), MX send→feedback-smtp.us-east-1.amazonses.com prio 10, SPF TXT send→v=spf1 include:amazonses.com ~all in Squarespace. As of 2026-06-08 records NOT yet propagated (checked via dnspython). AGENT CANNOT ACCESS SQUARESPACE — user must add records themselves. Once verified: set SENDER_EMAIL=receipts@frasberg.com in backend/.env + restart backend.
+- "Email me my statement" button (2026-06): Dashboard.jsx usage header, data-testid=email-statement-btn, calls POST /api/receipts/send-now.
+- Admin Tenants & Revenue (2026-06): GET /api/admin/tenants (per-user keys/requests/tokens/credits/wallet/spend + totals), rendered in Admin.jsx section data-testid=admin-tenants-panel.
+- Tip leaderboard: GET /rooms/{id}/tips/leaderboard + Top tippers panel in LinqLive
+- Gallery: 18 real screenshot thumbs via playwright one-off (scripts/gen_gallery_thumbs.py → /gallery-thumbs/*.jpg; NOT runtime dep); marquee img w/ iframe fallback; smart dedupe buckets; LUCHIIFLIX build hidden:true in db
+- /auth defaults to LOGIN mode now (?mode=signup to register) — fixes iter29-32 carry-over
+- Testing: iteration_32 — 100% backend + 100% frontend (provider gateway, docs, marquee, leaderboard); credit metering self-tested (2500→2499 deduct, 402 drain, restore)
+
+## Aug 2026 — Dark-first + Credit UX + Auto Top-Up + OpenRouter
+- Dark theme is now the default on first visit (ThemeContext getInitial → "dark"; stored preference respected)
+- Favicon/browser tab: Frasberg AI emblem circle-cropped (frasberg-mark-circle.png) → all favicon sizes + .ico, cache-bust ?v=5. Luchii mark still used for in-app icons
+- Credit Balance Bar: each Dashboard key row shows credits bar (green/amber/red), "Low — top up" badge <500, wallet chip in Usage header
+- Auto Top-Up: wallet-based (users.credit_balance); PATCH /api/keys/{id}/autotopup {enabled,threshold,amount}; refill fires post-deduction (_maybe_autotopup, logged in credit_transfers); GET /api/wallet; credit packs purchasable INTO wallet via Pricing key-select option value wallet-{userId} (capture handles wallet- prefix). SELF-TESTED: key 100→5099 credits, wallet 10000→5000
+- OpenRouter listing submission prepared: /app/OPENROUTER_SUBMISSION.md (identity, endpoints, models, half-market pricing, verification URLs, sample requests)
+- FINAL REGISTRY STEP (Aug 2026): alias discovery endpoints added — /v1/provider-registry.json, /v1/provider-manifest.json, /v1/openapi.yaml, /v1/luchii-models.json + /.well-known/luchii-models.json (backend + static, all 200). LUCHII_MODELS_DOC: 128k/64k context, 384-dim embed. Full submission kit archived at /app/provider-kit/ (openrouter, huggingface, github-ai, vercel letters; model cards; DNS TXT records; press kit; framework integration docs — all using canonical api.frasberg.com)
+- Provider badge meta tag live: <meta name="frasbergai-provider" content="verified"> in index.html (verified served)
+- Official documents archived in /app/provider-kit/: partner-api-agreement.md, provider-sla-contract.md, enterprise-compliance-packet.md, branding-kit-and-launch.md, enterprise-contract-and-clusters.md, partner-program-and-pricing.md, developer-handbook.md
+
+
+## 2026-06 (cont. 11): Playground + Cloud Console + Enterprise Hosting + Dev Portal — TESTED 100% (iteration_40)
+- Cognition Playground /playground (Playground.jsx, client-side sim): P/I/R/D/A palette, drag nodes, link/select/delete modes, live safety scoring (flow-order violations -8, missing types -6, orphans -4) w/ GSS-2 band + issue list, Step/Run animated execution trace (membrane block if score<60), compiled bytecode viewer (PERC/INTP/REAS/DECI/SAFE/ACTN)
+- AIM v2 Cloud Console /console (CloudConsole.jsx): mesh map, autoscale decisions (load>0.65 up/<0.25 down/hold), failover panel+inject, cognition distribution bars (data-testid cognition-bar-{n}), federation sync pairs, deploy wizard link card, live toggle (3s auto-tick), event stream
+- Enterprise Hosting: GET /api/admin/hosting (isolation/safety_profile/evolution_policy/region_permissions/billing meters per tenant) + POST /api/admin/tenants/{id}/regions (validated, audited); AdminHosting.jsx panel in Admin console w/ clickable region permission chips. HOSTING_REGIONS = 5
+- Developer Portal /developers/portal (DevPortal.jsx): Kernel v4 hero, quickstart code block, 6 concept cards, 10-week training course (5 phases), 6-step certification timeline, CTA links
+- sa-east 5th region added to REGION_SEED + HOSTING_REGIONS (per user's Global Cloud spec: "SA-East — autoscale overflow zone")
+- Navbar Products: Cognition Playground / Cloud Console / Developer Portal links added
+- iteration_40.json: 100% backend (7/7 pytest test_iter40_hosting_regions.py) + 100% frontend. Testing agent added missing AdminHosting import to Admin.jsx (audited, correct)
+- User continues dumping specs (Ops Center, Region Director, Mesh AI v4/v5, Agent Factory, OS theme, hardware device) — reference lore, no explicit asks
+
+## 2026-06 (cont. 12): Launch Page + Self-Healing Mesh + Agent Factory — SELF-TESTED e2e
+- Launch page /launch (Launch.jsx): cinematic staggered-reveal hero "Deploy Intelligence. Safely.", animated cognition preview, 4 campaign tagline cards (Deploy/Governed Autonomy/Agents that Grow/Intelligence Everywhere → link to v3 pages), full press release section w/ MR quote, footer CTA. Navbar "Launch — Marketplace v3" link added
+- Self-healing mesh (frasbergos.py _tick): 6%/tick anomaly chance per region → status degraded + healing_in 2-3 ticks → mesh-ai events (ANOMALY detected → rerouting N tasks → recovered/envelope reinforced) → auto-restore. RegionCards show "healing Nt"; console failover panel shows cyan "self-healing: region (Nt)" status. Verified via 25-tick curl loop (17 heal events)
+- Agent Factory (Playground.jsx): "Generate agent.json" builds full agent spec (name Autogen-N, model luchii-6-mini, cognitionGraph nodes/edges, live safety score+band, evolution constraints, region) → JSON viewer + Download + "Publish to Marketplace" (POST /marketplace/publish, blocked when score<60, 401→login toast). Verified logged-in publish e2e (toast + marketplace insert)
+- BUG FOUND+FIXED: build instrumentation mangles multi-child SVG <text> nodes — {a} x{b} renders only static part. Fix: single template literals. Fixed in Playground node labels + RegionMesh status text. RULE: always use one template-literal expression inside SVG <text>
+- Marketplace now contains user-published "Autogen-743" (live factory demo output by doctester1)
+
+## Known Constraints
+- WebGL/Three.js cannot reach Cyberpunk 2077 path-traced fidelity; using ACES tonemapping, env reflections, soft shadows, neon emissives
+- Production frasberg.com is a SEPARATE deployment — user must redeploy to see preview changes (recurring confusion, Cloudflare 520 history)
 
 ## Backlog
-- P0: Get Frasberg image and voice endpoints healthy. Grant text_to_speech permission to the keys.
-- P1: Speech to Speech, 3D Studio, Spaces Builder (still "Soon").
-- P2: (dropped by the user) in-app chat assistant.
+- P1: Mobile app GAME_URL wiring (React Native)
+- P2: Post-processing pass (Bloom/SSAO) for extra cinematic look
+- P2: Docker stack for public multiplayer
+- P2: Production redeploy (user action)
+- P3: Refactor streets/index.html into modules
 
-## Update (2026-10)
-- In-house Luchii engines are used when a Frasberg-keyed call fails: Piper voices (TTS/STS), faster-whisper base (STT), SD-Turbo on CPU (generate/edit/upscale). Models are stored in LUCHII_MODELS_DIR and preloaded at startup.
-- Voice Cloning page (/voice-clone): samples are stored in a GridFS voice_samples bucket. Speaking in the cloned voice is Frasberg-only.
-- Per-feature key routing via FRASBERG_KEY_ROUTES.
-- The /status page and /api/engines/status are admin-only (ADMIN_EMAILS) and the Status link is no longer in the public nav.
-- The homepage showcase only shows generations with featured=true and otherwise falls back to the curated graphics.
+## Credentials
+See /app/memory/test_credentials.md (admin@frasberg.com / LuchiiAdmin2026!, doctester1@frasberg.com / DocTester2026!)
 
-## Update (2026-10, import)
-- Restored from GitHub frasberg-code/luchii-tools into a new pod. Backend .env restored, frontend uses this pod URL. Deps installed (emergentintegrations/litellm skipped, not used). Smoke tests passed (iteration_5).
-- 2026-10: Image queue (429 + Retry-After when the local image engine is busy; /create shows a queue notice and auto-retries). /login and /signup routes open the auth modal (?next= supported). STS studio upgraded: editable transcript, re-speak in any voice, takes history with download. Tests: iteration_6 all pass.
-- 2026-10: Rebrand to "Luchii" with the new logo/favicon and "Powered by Frasberg" copy. 3D Studio (/3d) uses Shap-E on CPU (DPM++ 10 steps, ~3 min), with jobs queued in db.models3d and GLBs stored in GridFS. Model files are in LUCHII_SCRATCH_MODELS_DIR and re-download after a restart. Voice clone uses a vendored OpenVoice V2 converter (backend/vendor/openvoice) as a fallback in /voice/clone/speak and in /sts voice=clone. Saved voice takes are in db.voice_takes plus GridFS, shown in the /gallery tabs. Tests: iteration_7 passes.
+## 2026-06 (fork) — Workspace controls + Team access
+- Fixed truncated LLM builds: max_tokens 4096→16384 (server.py _luchii_stream); workspace blocks publishing incomplete HTML and auto-asks agent to finish
+- Agent Workspace: real file attachments (text inline / images base64, chip UI), Code tab (view+copy generated source), Need Help dropdown (Docs / Luchii Code / support), mic dictation (webkitSpeechRecognition)
+- Pause/Resume: Stop square replaces Send while streaming (AbortController); Resume pill re-prompts agent with partial tail to continue seamlessly
+- @frasbergai.com team domain: register/login auto-assigns plan "scale" (auth.py TEAM_DOMAIN); unlimited tokens/credits/rate across /api/quotas, /v1/chat, /v1/chat/completions, key creation (server.py _is_team_email); Dashboard shows "Unlimited"
+- Verified by testing agent iteration_37.json (100% backend 8/8, 100% frontend) + manual pause/resume browser test
+- Pending user actions: redeploy to frasberg.com (live domain runs old build, /api/workspace/publishes 404 there); Resend DNS on Squarespace
 
-## Update (2026-06, fork — stability fix + feature validation)
-- **FIXED critical pod-restart loop**: boot-time `warm_up()` preloaded SD-Turbo + OpenVoice into RAM AND `snapshot_download`-ed ~6GB of Shap-E/music weights to `/tmp` (wiped every restart). This flooded the 8GB cgroup → kubelet evicted the whole pod mid-download → infinite loop every ~3-5 min, killing every long-running job with "Interrupted by a server restart". 
-  - Changes: `LUCHII_SCRATCH_MODELS_DIR` → `/var/luchii-models/scratch` (persistent, backend/.env). `warm_up()` now only pre-caches the small Piper voice; all heavy engines (SD, Shap-E, MusicGen, OpenVoice) load lazily on first request. Removed the auto `prefetch_scratch_models` call from startup (kept the fn for optional use). Backend now stable for 6+ min idle, pid unchanged.
-- **Validated REAL generation end-to-end** (all produce real files, pod stable, peak mem ~5GB of 8GB):
-  - Image: SD-Turbo local (proven earlier).
-  - Music: MusicGen → 321KB WAV 16-bit mono 32kHz.
-  - Video: SD-Turbo frames → 252KB MP4 (glTF... no, ISO MP4 v1).
-  - 3D: Shap-E → 4.3MB GLB (glTF binary v2). Text-to-3D has no thumbnail by design (frontend renders GLB in a viewer).
-  - Speech-to-Speech (/sts): faster-whisper transcribe + Piper re-voice → 117KB WAV, accurate transcript.
-- 3D Studio (/3d) and Speech-to-Speech (/sts) pages confirmed fully built and loading; both usable without login.
+## 2026-06 (fork, cont.) — Team Admin Panel + Quota Alerts
+- GET /api/admin/team: all @frasbergai.com members with keys, monthly tokens/requests, last active; "Frasberg Team" section added to Admin console (admin-team-panel)
+- Quota alerts: _maybe_quota_alert fires after each metered gateway call — emails developer at >=80% of monthly plan quota via Resend, once per month (quota_alerts collection dedup), skips team/admin/unlimited accounts. Verified real delivery (delivered@resend.dev, ok:true in email_log)
+- Text edits: workspace empty states say "ask Luchii", Dashboard subtitle "Frasberg gateway ... 60 requests/min"
 
-## Update (2026-06, fork — generation speed + memory optimization)
-Hardware reality of this pod: **2 CPU cores, no AVX2/bf16 hardware, ~6GB effective memory** (the 8GB cgroup is never the killer — oom_kill stays 0; the pod is evicted at the node/pod level around 6GB). So bf16/fp16 are useless (emulated → slower) and only ~1 big model fits at a time.
-- **Images 2.4x faster (38s → 10–16s):** swapped SD-Turbo's heavy VAE for the TAESD tiny VAE (`madebyollin/taesd`) + `channels_last`. Quality verified unchanged (photorealistic, no artifacts). Same SD pipeline powers **video**, so video keyframes are faster too.
-- **One-heavy-model-resident policy (`_claim` in local_engines.py):** SD (image/video), Shap-E (3D) and MusicGen (music) are mutually exclusive — before a different big engine loads, the others are freed + `gc.collect()` + `libc malloc_trim(0)` to return RSS to the OS. This prevents the two-models-resident spike that was evicting the pod. OpenVoice/Whisper/Piper are small and stay resident.
-- **3D weight caching (the explicit ask):** Shap-E weights persist on disk (`/var/luchii-models/scratch`, no re-download) and the loaded pipeline stays resident across requests, so **repeat 3D requests skip the load and complete reliably** (verified: warm repeat 3D ran with a stable pid). Added `low_cpu_mem_usage=True` to the Shap-E load.
-- **Self-healing first load:** the first Shap-E/MusicGen load has a transient spike that can trip a pod restart on this tight budget. `_resume_interrupted_jobs()` now re-queues interrupted media/3D jobs (bounded to MAX_JOB_ATTEMPTS=3, text-source only for 3D) instead of hard-failing — on retry the model file is warm in cache, the spike is smaller, and the job completes. Verified: a cold 3D job self-healed across a restart and finished (3MB GLB).
-- **Validated end-to-end after changes:** image 10–16s, video MP4, 3D 3MB GLB, music WAV, S2S WAV — all real files, services stable.
-- Note for future: 3D's first cold load remains the only fragile step on this 2-core/~6GB pod. A larger pod (or a dedicated 3D worker) would make it instant and bulletproof.
+## 2026-06 (fork, cont. 2) — Native App Packaging
+- New /app/backend/native_packaging.py: POST/GET/DELETE /api/native/builds, GET .../download (real Android Studio project ZIP: gradle files, manifest, WebView MainActivity, app HTML in assets), POST .../publish (Google Play SIMULATION: in_review -> published after 45s with play.google.com URL)
+- New NativeApps component in Dashboard (/app/frontend/src/components/site/NativeApps.jsx): app picker, name/package inputs, build button, builds list with status chips, APK project download, Play listing form
+- Self-tested full lifecycle via curl (zip validated w/ unzip -l, 9 files) + dashboard screenshot
+- NOTE: Google Play publish is MOCKED (no real Play Console API); APK requires user to run ./gradlew assembleDebug on the downloaded project
 
-## Update (2026-06, fork — Prompt Presets + video reality check)
-- **Prompt Presets shipped (all 4 studios), tested 100% (iteration_8):** one-tap chips that fill a ready-to-go prompt (and matching style). Data in `/app/frontend/src/presets.js`, reusable `PresetRow` in `/app/frontend/src/components/PresetRow.jsx`. Image: Portrait/Landscape/Product/Anime/Logo/Sci-fi. Video: Cinematic/Nature/Anime/Product ad/Fantasy/Vlog. Music (user-requested genres): Reggae, Reggae Fusion, Reggae Dancehall, Amapiano, Jazz. 3D: Game asset/Character/Vehicle/Furniture/Food/Sci-fi prop.
-- **CONFIRMED: Frasberg/Luchii video API is FAKE.** POST https://frasberg.com/api/generate/video returns a job that "completes" with `video_url = https://filesamples.com/samples/video/mp4/sample_640x360.mp4` — a public stock sample clip, unrelated to the prompt (gpu_class/region fields are cosmetic). So the Frasberg keys cannot produce real video. The current `/video` endpoint uses the **local SD-Turbo keyframe + Ken Burns slideshow** (local_engines.generate_video) — which is why users see drifting slideshows with warped faces. Real AI video is GPU-only and cannot run on this 2-core CPU pod.
-- **BLOCKED — real AI video needs fal.ai (or similar) + the user's API key.** Plan once key provided: integrate fal.ai text-to-video + image-to-video (image-to-video = TikTok-style animate-a-photo), with a per-generation model/quality selector (fast LTX-Video ↔ high-quality Kling/Veo). Route `/video` to fal.ai, keep local slideshow only as a last-ditch fallback, and update the video studio copy (currently claims "Powered by Frasberg renders keyframes").
+## 2026-06 (fork, cont. 3) — App Icons + iOS Packaging
+- Icons: POST /api/native/icons/generate (gpt-image-1 via Emergent key, normalized 512px PNG), upload supported via icon_b64 on build; bundled as Android mipmaps (48-192px, manifest android:icon) and iOS AppIcon 1024 asset catalog; GET /builds/{id}/icon serves thumbnail
+- iOS: platform=ios builds produce complete Xcode project ZIP (project.pbxproj w/ fixed UUIDs, AppDelegate/ViewController Swift WKWebView shell, Info.plist, bundled index.html, Assets.xcassets)
+- UI: Android/iOS toggle, icon upload + AI-generate row with preview, per-row platform badges + icon thumbs; Play publish restricted to Android
+- PROVED via /tmp/native_proof.py: 14 automated checks all passed (valid PNGs at exact densities, XML/plist/pbxproj/asset-JSON validity, bundled HTML byte-identical to published source) + dashboard UI screenshot
+- Note: compile-level build (gradle/xcodebuild) impossible in Linux container — structural validation only
 
-## Update (2026-10, re-import + Frasberg key audit)
-- Re-imported luchii-ai-models/frasberg-secure-runtime (HEAD 8cae905). Recreated backend/.env + frontend/.env (they were missing), created /var/luchii-models/scratch. Services up.
-- All 9 user keys wired (FRASBERG_API_KEYS) with per-feature routing (FRASBERG_KEY_ROUTES): image→be3354f2, video→a1872bf2|be3354f2, music→a0e8a8fb|722a8e9e, clone→eac278f3, audio→0257e1a1, stt→b439ef0d, tts→57d798ce. Key 9b4aa1f2 kept but returns 401 key_not_found.
-- Key audit (live, 2026-10-09): /generate/image = 502 on every key; /voice/speak = 403/503; /generate/video "completes" with rotating stock clips (filesamples, test-videos.co.uk Big Buck Bunny, MDN flower.mp4), `model` field ignored; /generate/music returns a synthesized fixed chord drone ("mood":"major"), not prompt-specific music. Frasberg's own site bundle references no real video model.
-- /video is now Frasberg-first: `frasberg_video()` submits to the Video Engine key, polls, accepts only non-sample renders, otherwise falls back to the local engine. Job status exposes `engine` (frasberg | luchii-local).
-- Frasberg server is NOT in this repo — it must be fixed on the Frasberg side (real GPU models) for real renders.
+## 2026-06 (fork, cont. 4) — App Store Publish + Icon Re-roll
+- iOS builds get the same SIMULATED review flow: submit -> in_review -> published (45s) with apps.apple.com URL (deterministic id from build hash); UI shows "Publish to App Store" / blue "View on the App Store" / "Published · App Store" chip
+- Icon style picker (Minimal/Playful/Gradient -> ICON_STYLES prompt map) + "Re-roll icon" with random seed for distinct results each time
+- Verified: iOS publish lifecycle via API, gradient re-roll produced visibly different icon, UI screenshot confirms picker + store buttons
 
-## Update (2026-10, Frasberg Serverless GPU)
-- `backend/frasberg_gpu.py` is the Frasberg Serverless GPU Gateway, mounted at `/api/gpu` and tested 21/21 in iteration_9.
-  - Client API in the frasberg.com style: `/v1/engines`, `/generate/video`, `/generate/image`, `/jobs/{id}`, `/files/{id}`. Auth is the exact frb_live keys from FRASBERG_API_KEYS; a bad key returns FK-001.
-  - Worker pull API at `/worker/*`, using the FRASBERG_WORKER_SECRET header. Includes heartbeat, an atomic claim that prefers the warm model, chunked upload, a 180s lease with re-queue (3 attempts max), and re-queue on OOM.
-  - Mongo collections: gpu_jobs, gpu_workers, gpu_chunks. GridFS bucket: gpu_outputs.
-- `/app/frasberg_gpu_worker/` is a standalone worker (Dockerfile, requirements-gpu.txt, prefetch.py, NOTICE.md). Its engines are frasberg-motion-fast (LTX-Video 0.9.7 distilled, two-stage), frasberg-motion-pro (Wan 2.2 TI2V-5B), frasberg-motion-ultra (HunyuanVideo T2V and I2V) and frasberg-image (FLUX.1-schnell). The hidden frasberg-dev-test engine is only for protocol testing. Unloads after an idle timeout (scale-to-zero).
-  - NEVER pip install requirements-gpu.txt into the backend venv. It upgrades diffusers and transformers and breaks the local engines (backend pins diffusers 0.31.0 and transformers 4.46.3).
-- Luchii `/api/video` accepts model, aspect_ratio and image_base64. Routing order: an online GPU worker for the chosen engine, then any online motion engine, then frasberg.com, then Frasberg Lite (local CPU).
-  - frasberg.com clips are rejected if the URL is a known sample or the bytes repeat a render made for a different prompt (db.frasberg_video_hashes).
-- `/api/generate` (text-to-image) tries the Frasberg Image GPU first when a worker is online.
-- `/video` UI has an engine picker with live status, format chips, a start-image upload (image-to-video), and the engine label and progress percentage. The Models page lists Motion Fast, Pro and Ultra.
-- BLOCKER for real renders: at least one NVIDIA GPU machine (24GB+, or 80GB for Ultra) must run the worker. This pod has no GPU.
+## 2026-06 (fork, cont. 5) — Store Listing Preview + Parallax Sky
+- StoreListingPreview in NativeApps.jsx: realistic Play Store / App Store card (icon, dev name, Install/GET, ratings row, live app screenshot iframe, feature graphic, About) that live-updates as the listing title/description are typed, shown before Submit for review
+- New ParallaxSky component (/app/frontend/src/components/site/ParallaxSky.jsx): pointer-parallax layered background (drifting star canvas + 3 depth-mapped glow orbs, lerped mouse tracking) — mounted on Dashboard, Admin console, and /apps (WorkspaceHome); reusable for all future pages
+- Verified via dashboard screenshot (preview card + parallax stars live)
 
-## Update (2026-10, video presets + gallery)
-- The /video page has "Trending" TikTok-style presets: Surprise me (a random idea from SURPRISE_VIDEO_IDEAS), POV, Glow-up transition, Satisfying loop, Pet reaction, Street dance, Food ASMR and Outfit check. Picking one sets the format to 9:16.
-- Once a start image is attached, a "Photo motion" row replaces those presets: Zoom in, Orbit 360, Hair in wind, Come alive, Dolly out, 3D parallax, Slow-mo, Rain & neon. Data is in presets.js.
-- New `GET /api/videos` (signed-in user's finished clips) and public `GET /api/videos/{id}`. Legacy engine labels are mapped to Frasberg names.
-- The gallery has a Videos tab: each clip card has a player, a badge, replay, share, download and open.
-- Public share page at `/v/:id`. Shared clips use the native share sheet when available, otherwise the link is copied. Studio results also get a Share button.
-- Tests: iteration_10 passed 100% (backend tests in backend/tests/test_videos_api.py).
+## 2026-06 (fork, cont. 6) — Screenshot Gallery + Parallax rollout
+- Screenshot gallery: POST/GET/DELETE /api/native/builds/{id}/screenshots (max 5, resized 480w JPEG, stored b64 in build doc); listing preview shows uploaded shots (with remove X) + 3 auto "live" phone frames (top/middle/bottom of running app via offset iframes) + feature graphic; "Add screenshots (n/5)" multi-upload in listing form
+- ParallaxSky added to Frasberg Cloud (/cloud, replaced blurry Starfield layer) and Visual Studio pages; star brightness/orb intensity boosted for visibility (was too subtle on /apps)
+- Verified: backend upload/fetch/delete via script; UI screenshots of gallery + crisp /cloud stars
 
-## Update (2026-10, zero-cost real video)
-- Checked github.com/frasberg-code/frasberg-secure-runtime (now public). Its /api/video only forwards to frasberg.com, and cinematicRenderV2 is an ffmpeg placeholder. It contains no video model or GPU code.
-- Emergent has no GPU hosting. The Sora 2 API was shut down on 2026-09-24. Veo needs a paid Google key, which the user declined (zero cost).
-- New engine **frasberg-motion-free** (LTX-Video 2B, 480p, text-to-video and image-to-video) for free 16GB T4s (Kaggle/Colab). Its calls were checked against diffusers 0.39 with tiny random weights.
-- Worker package moved to /app/backend/frasberg_gpu_worker. The gateway serves its files at /api/gpu/worker/files/{name} (worker secret required).
-- Admin endpoints: /api/gpu-admin/overview and /api/gpu-admin/notebook. The notebook comes pre-filled with the gateway URL and secret, and the gateway must be this server's own host.
-- /status now has a GPU panel: workers, job counts, a free-notebook download and Kaggle steps.
-- Queued GPU jobs expire after 30 minutes (QUEUE_TTL).
-- Honest UI: a "Preview mode" banner shows when no GPU is online, and Lite clips are labelled "Preview · animated stills" (studio, gallery, share page). The engine defaults to Motion Free and auto-selects an online engine.
-- Tests: iteration_11 passed 37/37 backend plus all frontend checks.
-- Preview-only admin test account: admin.tester@luchiiapp.com is in ADMIN_EMAILS in backend/.env.
+## 2026-06 (fork, cont. 7) — Listing Autowrite + Starfield consistency
+- POST /api/native/builds/{id}/autowrite: Luchii (claude-sonnet-4-6) reads the published app's HTML and returns {title, short_desc}; "Autowrite with Luchii" button fills the listing form live
+- ParallaxSky rewritten: now just the homepage Starfield (mouse-linked constellation) in a fixed wrapper — removed glow orbs/gradient tints per user feedback ("did not change background colors, keep features consistent")
+- Verified: autowrite via curl + browser (title/desc filled, preview updated), constellation lines follow cursor on dashboard
 
-## Update (2026-06, re-import)
-- Re-imported luchii-ai-models/frasberg-secure-runtime. Recreated backend/.env with the 8 user frb_live keys + FRASBERG_KEY_ROUTES, installed deps + ffmpeg, re-created admin.tester / motion.tester accounts. Smoke tests passed (iteration_12).
-- /status GPU panel polling now pauses when the tab is hidden.
-- P2 in-app chat assistant was built, then REMOVED at the user's request (it is not wanted in the app). Do not re-add it.
-- 2026-06: Rebranded the platform from "Luchii" to "Frasberg Creator" (nav, hero, footer, auth, legal, studios, share pages, title, toasts) with the FA Frasberg emblem as logo + favicon. "Luchii" now only names the Frasberg AI models and intelligence (Luchii Models, Luchii Prime, Vision, etc.). Internal storage keys (luchii_token) unchanged.
-- 2026-06: Luchii logo restored for Luchii Models (Models page family header + each Luchii model card, API docs note). "Made with Luchii" restored (home featured, share page, 3D share). Footer copyright: "© 2003-2026, Frasberg, Inc. or its affiliates". Legal states Frasberg.com / Frasberg, Inc. own and operate Luchii AI Models and all Luchii products and systems. luchii-ai.com stays.
-- 2026-06: Luchii badge (components/LuchiiBadge.jsx) on all creations: create result, gallery image + video cards, image share /s/:id, video share /v/:id, video & music studio results. New /about-luchii page (logo, 5 pillars, model family, CTAs), linked from footer "About Luchii". Tests: iteration_13 100%.
-- 2026-06: "About Luchii" nav link with Luchii logo (desktop + mobile). Badges now name the model: Nova-Muse (default), Dreamline (anime/digital-art), Vision (3d), Painter-X (remix), Prime (upscale), Luchii Video, Luchii Audio (components/LuchiiBadge.jsx luchiiModelFor). Downloads carry the Luchii mark: images via canvas (lib/luchiiMark.js), videos via GET /api/media/{id}/download (ffmpeg overlay, cached in GridFS marked_file_id). /api/share/{id} returns kind. Tests: iteration_14 100%.
-- 2026-06: Named Luchii video/music models: Luchii Cinematica (text-to-video), Luchii Animus (photo-to-video), Luchii Harmonia (music) — shown on all badges and as cards on /models. Gallery Images and Videos tabs have a Luchii model filter (chips, only shown when 2+ models present). Tests: iteration_15 100%.
-- 2026-06: Nav/footer "About Luchii" renamed "Luchii Code" (still /about-luchii).
-- 2026-06: Luchii Chat BACKEND ONLY (for other Frasberg platforms — no chat UI on this creator site, user explicit): GET /api/chat/models (proxy Frasberg /v1/models, chat-capable), GET/DELETE /api/chat/conversations[/id], POST /api/chat/send (SSE stream proxy to Frasberg /v1/chat, model switch, session continuity, db.chat_conversations), POST/GET /api/chat/agents/tasks (agents dispatch image/video/music creator jobs, db.agent_tasks). Auth: user JWT or X-Frasberg-Key (frb_live key). Upstream luchii chat currently replies "turbulence".
-- 2026-06: Luchii model picker on /create (Nova-Muse / Dreamline / Vision for text, Painter-X for remix); model sent to /api/generate (prompt hint, stored on generation), shown on badges; /models "Try" preselects. Tests: iteration_16 100%.
+## 2026-06 (fork, cont. 8) — Text fixes + Custom preview URLs
+- Text: architect agent renamed "Luchii" with role "FRASBERG" (AgentWorkspace + CodingAgents), chat input placeholder removed
+- Custom URLs (GitHub-style): GET /api/workspace/slug-check (live availability), POST /api/workspace/publishes/{id}/slug (claim, unique + reserved list), GET /api/workspace/app/{slug} serves the app; _CustomDomainASGI extended — Host header {slug}.preview.frasberg.com serves the publish HTML (works for real once user adds wildcard *.preview.frasberg.com DNS to deployment)
+- Manage tab "Custom preview URL" card: input with live green/red availability, Claim button, active URL row with Open/Copy
+- Fixed: missing `import re` in server.py (caused brief 502)
+- Verified: claim flow via curl (check->claim->taken->served 200 + host-header serving), UI screenshot
 
-## Update (2026-10, conflict branch merged)
-- Re-imported luchii-ai-models/frasberg-secure-runtime. Branch `conflict_091026_2226` had unrelated history (squashed re-import of main@00fd644 + assistant). Grafted it onto main@00fd644 and 3-way merged: clean, no file conflicts. Result = main + all conflict-branch work (Agent bundle /api/chat/agents/bundle, Luchii Cinematica/Animus/Harmonia model selection, 429 retry, VideoModelPicker, ChatDocs, LuchiiAgent page, Luchii Code/Chat backend, badges/marks). Temp PR template removed.
-- Recreated backend/.env (8 frb_live keys + FRASBERG_KEY_ROUTES) and frontend/.env, installed deps + ffmpeg, seeded test accounts.
+## 2026-06 (fork, cont. 9) — URL Suggestions
+- slug-check now returns 3 available alternatives (name-app/-hq/-live/get-/try-/rand) when a name is taken; Manage tab shows clickable cyan suggestion chips that fill the input and re-check
+- Verified via curl + browser (taken -> chips -> click -> available -> Claim enabled)
 
-## Update (2026-10, photoreal engine + async image jobs + real showcase)
-- Frasberg has no image model: /v1/models + docs list only chat/embed/music/audio, and /api/generate/image returns a Cloudflare 502 on every key. So images come from the in-house Luchii engines (zero cost, no third-party keys).
-- NEW photoreal engine for **Luchii Nova-Muse**: Realistic Vision V6 (fp16 single file) + sd-vae-ft-mse + LCM-LoRA, 4 steps, cfg 1.0, ~2 min on the 2-core CPU (local_engines.generate_photo). Dreamline/Vision stay on SD-Turbo (~15-20s).
-- All image weights (RV6, LCM, VAE, SD-Turbo fp16 variant, TAESD) are in LUCHII_PHOTO_MODELS_DIR=/root/luchii-models/hf on the PERSISTENT volume. /var and /tmp are wiped on pod restart. HF_HUB_DISABLE_XET=1 is needed, because xet downloads hang or crash here.
-- Async image jobs: POST /api/generate/jobs, /api/edit/jobs, /api/upscale/jobs -> {job_id}; GET /api/image-jobs/{id} -> {status queued|running|completed|failed, result{...image_base64}}. Jobs go stale after 20 min. /create uses them now (no more ingress 502 on long renders). The sync /api/generate etc. are kept for the API and agents.
-- Homepage showcase: the 8 Unsplash/Pexels stock photos were replaced with images generated by this system from the same 8 prompts (frontend/public/showcase/*.jpg, mock.js).
-- Known limits: Painter-X (SD-Turbo img2img) barely follows edit instructions. cfg 1.0 means the negative prompt is ignored.
+## 2026-06 (fork, cont. 10) — Apps Directory URLs + Database Manager + Contact/Live Chat
+- /apps: claimed custom URLs shown as cyan branded badge per app; Open uses slug route
+- Database Manager (/database, new db_manager.py router /api/dbm): connect by App Name (db name) or any MongoDB URL, list collections+counts, browse docs (paginated JSON), delete + update doc, auth-walled (401 w/o login). Emergent-clone light UI (violet icon, eye toggle, secure access button)
+- PROVED end-to-end: 401 wall, connected to real test_database (46 collections), browsed real docs, live-edited a real doc + verified + cleanup, clean 502 on bad Mongo URL, UI browse screenshot. frasberg.com still 520 on /api/dbm (old build — user must redeploy)
+- Contact Us (/contact): Squarespace-clone page (serif heading, Frasberg.com / support@frasberg.com, form -> contact_messages collection) + Live Chat widget: "Maya" AI persona (claude-sonnet, human-like, Frasberg knowledge, multi-turn via client history) streaming SSE at /api/support/chat
+- Fixed: TextDelta .content (not .text) in support stream
 
-## Update (2026-10, Painter-X real edits, Quick draft, colour fix)
-- Painter-X (/api/edit and /api/edit/jobs) now uses InstructPix2Pix (timbrooks/instruct-pix2pix fp16, Euler-A 8 steps, cfg 7, image cfg 1.5) via local_engines.instruct_edit. It follows commands like "make it a snowy winter night". ~2.5–4 min. Weights are in SCRATCH (ephemeral /var) and re-download (~2GB) after a pod restart, because the persistent volume has only ~1.7GB free.
-- Nova-Muse Quick draft: GenerateIn.quality="draft" renders at 3/4 size with 3 steps (~30–55s). The response returns seed, quality and aspect_ratio. The /create "Render full quality" button re-runs the same prompt and seed with quality="full". UI testids: draft-toggle, draft-toggle-input (default ON for Nova-Muse), draft-badge, render-full-btn, painterx-hint.
-- Colour fix: STYLE_HINTS no longer force "teal/cyan/violet" brand palettes (cinematic, 3d, digital-art), which had made every image the same colours. Showcase regenerated. The Golden Hour card was retaken with a warm amber dusk prompt (mock.js prompt updated).
-- Nova-Muse prompts that mention people get "wearing a stylish outfit" added (cfg 1.0 ignores the negative prompt).
+## 2026-06 (fork, cont. 11) — Zion rename + Contact Inbox + Company text
+- Support persona renamed Maya -> Zion (backend persona + Contact.jsx panel/avatar/greeting)
+- Admin Contact Inbox: GET /api/admin/contact-messages + POST .../{id}/reply (Resend email w/ original quote, stores reply/replied_by/email_sent); Admin console section with awaiting-reply badges, inline reply box. Verified: reply emailed (delivered@resend.dev email_sent:true; external addresses need Resend domain verification)
+- Contact page: "About the company / Frasberg, Inc." blurb + "Copyright © 2003-2026 FRASBERG, INC., All Rights Reserved."; Footer: Contact Us + Database Manager links added, copyright comma fixed
 
-## Update (2026-10, re-import + showcase restore + public gallery)
-- Re-imported luchii-ai-models/frasberg-secure-runtime into /app/backend + /app/frontend; recreated .env files (8 frb_live keys + FRASBERG_KEY_ROUTES), admin.tester account.
-- Homepage showcase always shows the 8 curated images (no longer replaced by /api/showcase). Images in frontend/public/showcase were rebuilt from the user's screenshot (labels removed, 2x upscaled, ~770px wide); source crops in /root/showcase_src.
-- Public gallery: GET /api/gallery/public (public), POST /api/admin/gallery/publish-recent?hours=2 (admin) sets public:true on recent generations. Homepage "Public gallery" section (PublicGallery.jsx) shows when items exist.
-- This pod's DB was empty, so publish-recent published 0. The last-2h images live in the previous pod/production DB; run the endpoint there.
-- Tests: iteration_1 100%.
-## Backlog
-- P1: auto-publish toggle for new generations; higher-res originals of the 8 showcase images
+## 2026-06 (fork session): Readability + Logo fixes
+- Contact page: darkened gray text, enlarged labels/body (gray-500→700, 12px→14px+)
+- Global readability sweep across all pages/components: font sizes bumped (9-12px → 12-13.5px, text-xs → 13px), low-contrast colors brightened (text-white/40-60 → /70-75, #555/#666/#888 → lighter on dark game pages), dashTheme + lux-text-2 tokens improved for both light/dark
+- Logo: regenerated /luchii-mark-circle.png — LUCHII bottom arc now perfectly symmetric (0.1px L/R delta), mark optically centered, corners alpha-masked
+- PENDING (blocked): GitHub OAuth login/fork — awaiting user's GitHub Client ID + Secret
 
-## Update (2026-10, remix quality + gallery delete + model images)
-- Painter-X remix now uses photoreal img2img on the Nova-Muse engine (RV6 + LCM, strength 0.5, local_engines.photo_remix) instead of InstructPix2Pix: sharp faces, keeps layout. Dreamline + Vision text-to-image also moved from SD-Turbo 2-step to the RV6 engine (PHOTO_MODELS) — no more warped/blurry people.
-- Gallery: delete button per image (gallery-delete-{id}, always visible on mobile) + DELETE /api/generations/{id} (owner only).
-- Models page: all 19 stock photos replaced with images generated by our own engines through the app's job API (frontend/public/models/*.jpg; scripts/gen_model_images.py + gen_model_prompts.py, skips existing files).
-- User asked to "show all nudity" — not implemented; existing clothing steering kept.
-- NOTE: never run a separate engine process alongside the backend (two RV6 copies -> pod OOM restart). Use the job API.
-- Tests: iteration_2 100%.
+## 2026-06 (cont.): Workspace slider, New build, dark pages, font toggle, logo re-crop
+- Logo: re-cropped from source with true circle center detection — bottom "LUCHII" no longer cut off
+- AgentWorkspace: draggable split divider between preview and chat (25–75%, persisted in localStorage, tested via automated drag)
+- Builder page "New build" button now opens /coding-agents (coding agent page)
+- Contact + Database Manager restyled to dark starfield theme matching homepage (ParallaxSky, glass cards, cyan accents)
+- Global FontSizeToggle (bottom-left AA button): cycles 100/115/130% text size, persisted
+- STILL PENDING: GitHub OAuth (awaiting user's Client ID + Secret); "dashboard slide screen" clarified as workspace split slider — now fixed
 
-## Update (2026-10-11, re-import + conflict_101026_1646 app changes)
-- github.com/luchii-ai-models/frasberg-secure-runtime is identical to /app (only the preview URL defaults in tests differ), so nothing new had to be imported.
-- The requested branch conflict_051026_0213 does not exist on origin. The only open conflict branches are conflict_091026_2226 (merged earlier) and conflict_101026_1646.
-- conflict_101026_1646 has unrelated history and about 5000 files. Its app changes (backend/, frontend/src, frontend/public showcase and model samples, memory/) were applied to the working tree as a patch, with no git commits or merges. These cover remix via Nova-Muse, gallery delete, the public gallery and model samples. Its large imports/, packages/, apps/, studio/ and workers/ trees were NOT brought in.
-- Recreated backend/.env (8 frb_live keys with the routes image/video/music/clone/audio/stt/tts) and frontend/.env, installed ffmpeg and the dependencies, and seeded the test accounts. Branch tests test_public_gallery and test_remix_delete_iter2 passed 11/11.
-- 2026-10-11 (follow-up): the FULL contents of conflict_101026_1646 (SHA 03938aed, no newer pushes) are now in main's working tree, including all 4,895 added files (imports/, packages/, apps/, studio/, workers/, infra/, root package.json and so on). Every branch file exists locally. For the 14 files changed on both sides, main's version was kept: .emergent/emergent.yml, .gitignore, tests with the current preview URL, and the merged PRD. Nothing was deleted from main. The app was verified running.
-- 2026-10-11: Luchii credit wording. Models cards say "Made with Luchii" (Luchii family) or "Created by Luchii" (Frasberg family), testid model-credit-{slug}. Studio and 3D progress text says "Created by Luchii". Share pages (video, 3D) dropped "Powered by Frasberg". The gallery subtitle now credits Luchii models. Gallery 3D cards show a Luchii Sculpt 3D badge.
-- 2026-10-11: Surprise me and prompt accuracy.
-  - Surprise me (lib/promptKit.js) is now a prompt grammar instead of a fixed list. Text ideas combine subject, action, place, time or light, mood, palette and look, with coherence rules for living/object subjects, indoor/outdoor places and water scenes. Product and remix ideas are built the same way, and 3D uses surprise3D(). Seen prompts are kept in localStorage (luchii_surprise_seen_v2): the last 300, plus a subject window. Video Surprise uses the freshFromList deck. 200 of 200 were unique in tests, with no repeat after a reload.
-  - Accuracy fixes:
-    - Uploads are opened through _open_image, which applies the EXIF orientation. Phone photos were being remixed sideways.
-    - CLIP long-prompt chunking (_prompt_args, up to 225 tokens).
-    - Detailed prompts (30+ tokens) on Nova-Muse/Dreamline/Vision use guidance 1.6 plus the negative prompt.
-    - clean_prompt strips filler. emphasize_subject repeats the lead subject.
-    - "Fully clothed" is no longer added when the user described clothing.
-  - Painter-X routing: a command (make/change/give/add...) goes to InstructPix2Pix via normalize_instruction. Multi-part commands are applied step by step, and hair/clothes/hat/shoe edits are kept inside a SegFormer region mask (mattmdjaga/segformer_b2_clothes in PHOTO_MODELS_DIR). A description goes to photo_remix, and art-style remixes drop the photo hint and use strength 0.68. The /edit response includes instruction and edit_mode, and the UI shows a toast with the instruction it applied. The remix ETA is now 200s.
-  - Verified: "give a blue hair and change clothes" on an EXIF-rotated photo gives an upright image with blue hair and a new shirt, with the face and background kept (about 4 min). A long fox prompt now renders the fox (131s).
-- 2026-10-11: Speed, faces and safety.
-  - Speed:
-    - The photo engine now decodes with TAESD instead of the full VAE (saves about 20s) and runs its Linear layers in bf16. The pod is Neoverse-V2 ARM, 2 CPUs and 8GB. Convolutions and attention stay fp32, because bf16 is very slow for them here.
-    - Detailed-prompt guidance is off. The draft keeps full size with 3 steps.
-    - At boot the photo engine, region parser, Face Fix and safety filter are kept warm (backend RSS about 5.5GB).
-    - Frasberg image calls are skipped for 10 min after a failure.
-    - Timings: text-to-image about 43s, quick draft about 30s.
-  - Painter-X fast_edit:
-    - Region edits (hair, clothes, face, hat, background) are a single masked img2img pass on the photo engine, about 50s.
-    - Other whole-image edits run guided at 512px, about 50s.
-    - Art styles (oil, watercolor, sketch, charcoal, comic/anime, pop art, pixel, mosaic/stained glass, ukiyo-e, vintage, b&w, neon, marble) use OpenCV filters in luchii_styles.py, 1–4s. The opencv-contrib-python-headless package was added.
-    - Descriptive remixes also go through fast_edit. IP2P is no longer used.
-  - luchii_face.py (Face Fix): YuNet detection, FFHQ alignment and GFPGAN 1.4 ONNX, blended at 0.85. It runs on every photo render and edit (not on art styles), about 3.5s. Weights are in /root/luchii-models/face.
-  - Safety filter: Falconsai/nsfw_image_detection checks each render (threshold 0.6). If flagged, it does one guided retry with SAFE_PROMPT and the negative prompt; if still flagged it raises UnsafeImage, returned as 422 "The Luchii safety filter blocked this result…".
+## 2026-06 (cont. 2): Preview toolbar + snap + model picker + home nav — ALL TESTED
+- Workspace preview toolbar (Edit / desktop-mobile toggle / fullscreen / collapse chevron) — every icon proven working via automated browser test
+- Edit opens a live code editor; edits render in preview instantly (verified with "EDIT PROOF 123")
+- Divider double-click snaps: 50/50 <-> full-preview (verified)
+- Model picker: Frasberg AI + Luchii Vision "coming soon" disabled slots added
+- Contact + Data Manager: back-arrow home header added and click-through verified
+- STILL BLOCKED: GitHub OAuth — user has not provided Client ID/Secret yet
 
-## Update (2026-10-11, re-import into new pod)
-- origin/main of luchii-ai-models/frasberg-secure-runtime is identical to /app HEAD (nothing new to pull).
-- Recreated backend/.env (8 frb_live keys + FRASBERG_KEY_ROUTES, new JWT/worker secrets, ADMIN_EMAILS) and frontend/.env. Created model dirs, installed backend deps (emergentintegrations/litellm skipped) + ffmpeg, restarted.
-- Seeded admin.tester@luchiiapp.com / AdminTest123! and test@luchii.ai / Test1234! (memory/test_credentials.md).
-- Smoke: auth/me, engines status, public gallery OK. Nova-Muse draft render completed in ~36s (luchii-local). Home + /create render on desktop and mobile.
+## 2026-06 (cont. 3): Full batch — TESTED 100% (iteration_38)
+- Removed "Chats may be reviewed..." disclaimer text; removed "Constellation layer live" from workspace placeholder
+- Model picker: "Frasberg — coming soon" / "Luchii Earth 7 — coming soon"
+- Tablet preview added (desktop→tablet→mobile cycle); Edit Undo (toolbar + code tab) reverts to agent build
+- Composer: Enter = newline, Ctrl+Enter = send
+- New build buttons → /chat?model=luchii-70b&agent=architect
+- Hero headline now uses Clash Display (font-hero)
+- GitHub OAuth FULLY BUILT in /app/backend/github_auth.py (login/callback/status/fork routes, Fernet-encrypted tokens, same JWT cookies as normal auth) + "Continue with GitHub" on /auth + "Fork from GitHub" card in workspace manage tab
+- AWAITING: user's real GITHUB_CLIENT_ID + GITHUB_CLIENT_SECRET in /app/backend/.env (currently empty → login returns 503 by design). Callback URL: {preview-url}/api/auth/github/callback
 
-## Update (2026-10-11, auto-publish + remix history + free Kaggle GPU video)
-- Auto-publish: users.auto_publish (GET/PUT /api/me/settings, also in /auth/me). save_generation sets public=true when on; body.publish overrides; guests never publish. POST /api/generations/{id}/publish {public} (owner). UI: composer switch `auto-publish-toggle`, result `result-publish-btn`, gallery `gallery-publish-{id}` + Public badge.
-- Remix history: edit/upscale/remove-bg take parent_id; a fresh upload becomes a hidden kind=source doc (step 0, excluded from every list). Docs carry parent_id/root_id/step(+instruction). GET /api/generations/{id}/history -> chain with mini_base64 (cached). UI: components/RemixHistory.jsx strip on /create (path lit, branches dimmed), /create?gen=<id> deep link, gallery History button.
-- Free Kaggle GPU (REAL, verified): backend/kaggle_gpu.py uses kagglesdk with KAGGLE_API_TOKEN + KAGGLE_USERNAME=frasberg (backend/.env). A video whose engine is not online pushes a private notebook (slug frasberg-gpu-worker-<host hash>, NvidiaTeslaT4, internet on) that bootstraps the worker from /api/gpu/worker/files. Boot beacons POST /api/gpu/worker/boot -> job.phase gpu-boot/gpu-queued/gpu-render + phase_detail. Worker preloads, exits after 20 idle min (FRASBERG_WORKER_MAX_IDLE_S), honours admin stop (heartbeat stop flag) and /worker/offline. GPU wait runs outside the local video lock; Lite is the fallback.
-- T4 has no native bf16: engines._dtype() uses fp16 on sm<8 (render 94s vs 540s bf16 for 3s 704x480). Cold start ~6-9 min (session + 150s weights + 90s load), warm ~2-3 min. Verified clip: fox in snow, 4s 97 frames, engine "Frasberg Motion Free".
-- Admin /status: Kaggle panel (status, boot stage, Start GPU now, Stop, notebook link). /api/gpu/v1/engines marks motion-free on_demand/status "on-demand".
-- Tests: iteration_21 (backend 11/12, the share.public gap fixed; frontend 100%).
-- Production needs KAGGLE_API_TOKEN/KAGGLE_USERNAME in its env too; the kernel slug is per host, so preview and prod each get their own worker.
+## 2026-06 (cont. 4): Repo Import + Auto Scaffold + Client ID wired + brand logo restored
+- GITHUB_CLIENT_ID=lv23liupMC2JMOEbwmKA set in backend/.env (from user's GitHub App "Frasberg", App ID 4544342). SECRET STILL MISSING — login returns clear "generate a client secret" 503 message.
+- New endpoints: POST /api/github/import (loads repo's index.html/.html/README into workspace as editable htmlOverride) and POST /api/github/scaffold (injects frasberg.json + src/index.ts starter files into user's fork). Both require GitHub-linked account (403 otherwise) — verified via curl with doctester1.
+- Workspace manage-github card now has Fork / Import / Scaffold buttons (verified via screenshot).
+- Logo: restored ORIGINAL brand mark from git (084db00) — matches user's TikTok/Instagram profiles exactly.
+- Backlog from user's spec dump (not yet requested to build): GitHub App installation tokens, webhooks/multi-region replication, CLI auth, agent deployment/runtime, billing metering, marketplace, secrets manager, debugger UI.
 
-## Update (2026-10-11, re-import into pod 781d0ae5)
-- /app was empty. Cloned luchii-ai-models/frasberg-secure-runtime main@cdee73d (includes merged PR #2) and copied it into /app without .git. Recreated backend/.env (8 frb_live keys + FRASBERG_KEY_ROUTES, KAGGLE_API_TOKEN, KAGGLE_USERNAME=frasberg, new JWT/worker secrets) and frontend/.env. Deps and ffmpeg installed. Seeded the test accounts.
-- GitHub state: 0 open PRs. PR #2 is merged and PR #1 is closed unmerged. Stale remote branches: merge/frasberg-branches-into-main (only MERGE_NOTES.md + .gitignore), merged-frasberg-branches and merged-frasberg-branches-update-to-main (older snapshots, all their content is already in main). They can be deleted on GitHub. The agent cannot do git writes.
-- Verified: home page matches frasberg-preview.preview.emergentagent.com, auth works, Kaggle API auth works (lists frasberg/* kernels), and a Nova-Muse draft render completed on luchii-local. Frasberg upstream is the same as before: image 502, voice "warming up", video returns sample clips.
+## 2026-06 (cont. 5): Repo Browser + Marketplace — TESTED
+- GET /api/github/repos (user's own repos, GitHub-link gated 403/401 verified) + "My repos" browser in workspace GitHub card with one-tap Fork/Import/Scaffold per row
+- POST /api/github/webhook with HMAC SHA-256 verification (503 until GITHUB_WEBHOOK_SECRET set; placeholder added to .env)
+- Marketplace: /marketplace page + /api/marketplace (list/filter/publish/install), seeded 7 official Frasberg items, publish requires auth (verified as Doc Tester), install increments (verified 15321→15322), nav links added (Explore > Products + mobile menu)
+- User pasted extensive spec docs (runtime diagram, security checklist, handbook, whitepaper) — stored at /app/memory/frasberg_github_spec_notes.md
+- STILL AWAITING: GITHUB_CLIENT_SECRET (user has Client ID wired: lv23liupMC2JMOEbwmKA)
 
-## Update (2026-10-11, AWS GPU host)
-- New backend/aws_gpu.py: dedicated EC2 GPU (g5.xlarge A10G 24GB, us-east-1, account 303004020510, IAM user frasberg-gpu) runs the same Frasberg GPU worker as the Kaggle notebook via user-data (DLAMI PyTorch Ubuntu 24.04, /opt/pytorch python, pip deps, worker files from /api/gpu/worker/files, prefetch, systemd frasberg-worker). Security group frasberg-gpu-worker has no inbound rules. IMDSv2, encrypted 200GB gp3. One instance per gateway host (tag Name=frasberg-gpu-<hosthash>).
-- Env: AWS_ACCESS_KEY_ID/SECRET, AWS_REGION, AWS_GPU_MODE (always_on|on_demand|off), AWS_GPU_INSTANCE_TYPE, AWS_GPU_MODELS (frasberg-motion-fast,frasberg-motion-free). always_on: a startup reconcile loop (every 5 min) keeps it running. Admin Stop pauses it (state in db.aws_gpu).
-- Video routing: online worker -> AWS (ensure + wait while booting) -> Kaggle -> frasberg.com -> Lite.
-- Admin API: GET /api/gpu-admin/aws, POST /api/gpu-admin/aws/start|stop, POST /api/gpu-admin/aws/terminate?confirm=true. UI: AwsPanel on /status (testids aws-panel, aws-status, aws-quota, aws-start-btn, aws-stop-btn).
-- BLOCKER: the G/VT On-Demand vCPU quota is 0. An increase to 8 was requested (request 0b95f43a..., support case 179173096600295, CASE_OPENED). A run_instances dry run succeeds. The instance auto-launches once AWS approves.
-- Kaggle T4 session for this host stayed "queued" for 35+ min (Kaggle capacity), so the test videos fell back to Lite.
-- PROD NOTE: production must set FRASBERG_PUBLIC_URL to its own URL (not the preview one), plus the AWS and Kaggle env vars. Keep always_on in only one environment to avoid paying for two GPUs.
-- 2026-10-11: Cost Saver Mode. Admins switch the AWS GPU between Always on and Cost saver (on_demand) on /status (testids aws-mode, aws-mode-always_on, aws-mode-on_demand, aws-idle-{10|20|30|60|120}, aws-idle). PUT /api/gpu-admin/aws/settings {mode?, idle_min?} is stored in db.aws_gpu_settings and overrides the AWS_GPU_MODE env default. AWS_GPU_MODE=off still disables it. Switching to always_on clears an admin pause and starts the box.
-  - The worker is now mode-agnostic (Restart=always, never idles out). The backend loop runs every 60s: in cost saver it stops the instance (stop, not terminate, so the weights are kept) once it has been idle for idle_min, but never during a cold boot or while GPU jobs are queued or running. Monthly and hourly estimates come from HOURLY_USD.
-  - Preview is set to always_on with a 20 min idle default.
-- 2026-10-11: GPU Spend Tracker. The aws_gpu loop calls record_usage every 60s. It writes run sessions to db.aws_gpu_usage {id, name, instance_id, type, start, last_seen, end}; a gap while the same instance keeps running counts as running time. db.aws_gpu.volume_since tracks the EBS disk. GET /api/gpu-admin/aws/usage?month=YYYY-MM -> hours, compute_usd, storage_usd (200GB x $0.08/GB-mo), total_usd, projected_usd (always_on = 24/7 for the rest of the month; cost saver = pace so far), daily[], sessions[]. UI: AwsSpend inside AwsPanel (testids aws-spend, aws-spend-{hours|compute|storage|total}, aws-spend-chart, aws-spend-month-{current|previous}).
-- 2026-10-11: The engines on branch merged-frasberg-branches-update-to-main (apps/engine-server/*-execute.ts, packages/*-engine, config/emergent/engines/*.prompt.md) are already in /app, byte-identical. They are TypeScript stubs (Math.random scores, echoed output) and are not wired into the Python app. Waiting for the user to decide how to wire them.
+## 2026-06 (cont. 6): Naming fixes + Docs Pages + Agent File Sync — TESTED
+- Marketplace renames: Luchii-7b, Luchii-70b, Frasberg SDK (seed + live DB updated, UI verified)
+- Developer Docs at /developers/docs (+/:doc) — DocsHub.jsx with Handbook + V1 Whitepaper as polished dark pages, sidebar nav, nav link in Explore > Products
+- Agent File Sync: /api/github/import now also parses agent.json / luchii.yaml (json+yaml paths unit-verified), returns agent {name, model, entrypoint, capabilities, tools, env_keys}; workspace shows agent details card (github-agent-details) with capability badges after import
+- User pasted V2 vision docs (FrasbergOS kernel, AEE, ACP, MAOE, licenses, compliance) — reference material for future phases
+- STILL AWAITING: GITHUB_CLIENT_SECRET
 
-## Update (2026-06, re-import + GitHub merge + full engine wiring)
-- Re-imported luchii-ai-models/frasberg-secure-runtime main (550455d, newer than merged-frasberg-branches-update-to-main). backend/.env: 8 frb_live keys + routes, Kaggle token, AWS key pair (IAM user frasberg-gpu verified), AWS_GPU_MODE=on_demand (G/VT quota still 0, so no instance can launch yet).
-- GitHub: branch merged-frasberg-branches-update-to-main (unrelated history, older snapshot) merged into main with main's content kept + its monorepo README. Stale branches deleted, no open PRs.
-- Engines are internal only: /engines page removed (redirects to /status), footer + Developers links removed. All /api/engines/* runtime endpoints need an admin JWT or X-Frasberg-Key.
-- New backend/engine_systems.py ports the 6 non-runtime engines (Mongo instead of Supabase): governance (db.engine_governance, global "*" + owner), policy (db.engine_policy), diagnostics (db.engine_diagnostics gateway/router/engine), worldgraph (db.engine_continuity + identity graph), engine-flow (identity→…→structure), unified-enforce (runs on every execute/chain/flow; blocked → 403). 44 runtime + 6 system = 50 engines.
-- New endpoints: GET /engines/systems, POST /engines/flow, GET/PUT /engines/governance (scope owner|global), GET/PUT /engines/policy, GET /engines/diagnostics[?component], GET /engines/identity, GET/DELETE /engines/continuity/{cid}. execute/chain accept `continuity`.
-- /status (admin) shows Engine Runtime + System engines panel (EngineSystems.jsx) + Engine rules.
-- 2026-06: GPU Quota Alert. aws_gpu.check_quota() runs every 5 min in reconcile_loop until approved; the first time the G/VT quota reaches the instance's vCPUs it stamps db.aws_gpu.quota_approved_at. Overview returns quota_approved_at + quota_alert (approved, not dismissed, mode != always_on). POST /api/gpu-admin/aws/quota/check, /quota/dismiss. UI: QuotaBanner.jsx on top of /status (testids quota-banner, quota-banner-always-on, quota-banner-dismiss) + "Check now" link in the AWS panel (aws-quota-check).
-- 2026-06: Engines in Creation. Every image (generate/edit/remove-bg/upscale, sync + jobs + agent), video and music creation runs creation_check(): Unified Enforce on action create:<kind> for owner user:<id>|guest (policy + global/owner governance; blocked → 403 "Blocked by Frasberg engine rules: …"), then the Engine Flow (identity→structure) over the prompt. The record (requestId, flow_id, score, coverage, stages) is stored as engine_flow on generations/jobs and returned by the APIs. GET /api/engines/creations (admins) → counts + recent; UI panel engine-creations on /status. Tests: iteration_62 100%.
-- 2026-06: Per-User Blocks. GET/PUT /api/engines/user-blocks (admins) block create:image|video|music for one user (stored in that user's engine_policy, other actions kept; empty kinds = unblock). UI: UserBlocks.jsx in the System engines panel on /status. Creations log shows user emails (owner_label). Tests: iteration_63 100%.
-- 2026-06: Timed Blocks. PUT /engines/user-blocks takes duration 24h|7d|null(permanent)|keep; stored as engine_policy.creation_block_until; load_policy auto-lifts expired create:* blocks (lazy, on every check/list). Blocked users see "…blocked by policy until <date> UTC". UI: duration select + "Lifts in …" per row. Tests: iteration_64 100%.
+## 2026-06 (cont. 7): Legal Pages + Evolution Mode — TESTED
+- Legal: merged MIT License (with trademark notice + dual-license), Trademark Guidelines, Safety Charter into existing /legal page (?doc=license|trademarks|safety tabs); footer links added under Company (footer-license/trademarks/safety-link) — verified via screenshot
+- Evolution Mode: POST /api/marketplace/{id}/evolution (publisher/admin only — verified admin 200, non-owner 403); Zap toggle button on marketplace cards for signed-in users + green "Evolution Mode — validated auto-updates · lineage" badge (verified on Luchii-7b)
+- NOTE: Legal.jsx already existed (Partner API/SLA/Compliance docs) — new docs merged in, no duplicate routes
+- STILL AWAITING: GITHUB_CLIENT_SECRET
 
-## Update (2026-10-12, re-import into pod luchii-media)
-- Cloned luchii-ai-models/frasberg-secure-runtime main@5958691 (PR #6 timed blocks) and copied it into /app without .git. Recreated backend/.env with the 8 frb_live keys + FRASBERG_KEY_ROUTES, Kaggle token, the AWS pair, and new JWT/worker secrets. frontend/.env kept. ffmpeg installed, model dirs created, test accounts seeded.
-- AWS key AKIAUNDDSN4P... is REJECTED by AWS (sts InvalidClientTokenId / ec2 AuthFailure). It has been deleted or rotated. AWS GPU and S3 are blocked until a valid key is provided.
-- Fix: aws_gpu.py now pauses all AWS calls for 15 min after an auth error (AUTH_ERRORS, AUTH_BACKOFF_S). Before, it called AWS and logged a warning every 60s. ensure() and _short() now return a clear "AWS rejected the access key" reason.
-- Verified: Frasberg keys auth OK (/v1/models 200), Kaggle enabled, Nova-Muse draft ~60s cold. Tests: iteration_65 100%.
-- Backlog: S3 media storage (needs a valid AWS key). GridFS is still the media store.
+## 2026-06 (cont. 8): Safety Scores + Lineage VERIFIED · FrasbergOS Simulator · Real GitHub Sync
+- Marketplace Safety Scores (0-100 GSS-2 badges) + Evolution History lineage timeline modal — UI VERIFIED via screenshots (badges on all 7 cards, modal opens via item name click, timeline with safety deltas renders)
+- FrasbergOS AIM v2 Simulator at /os (FrasbergOS.jsx + backend frasbergos.py, router /api/os): Kernel v4 status chips (tick/scheduler/GSS-2 membrane/region/load/uptime), Cognition Graph v2 SVG visualizer (10 nodes w/ live activation %, 13 edges, animated pulse particles), 6 agent processes table (state chips running/waiting/evolving/sandboxed, cpu bars, mem, msgs), kernel event stream, Run(2s auto-tick)/Step/Reset controls. Sim state persisted in db.os_sim (global doc). Nav links added (Explore>Products + mobile). Verified: curl state/tick/reset + interactive screenshot (3 steps)
+- Real GitHub syncing expansion (github_auth.py, all real GitHub API calls):
+  - POST /api/github/agent-sync — scans all user repos for agent.json/luchii.yaml (parallel asyncio.gather), upserts db.synced_agents
+  - GET /api/github/synced-agents — user's registry
+  - POST /api/github/export {owner,repo,html} — commits index.html to repo (sha-aware update, auto-creates repo if user's own and missing)
+  - Webhook push events now auto re-sync agent files for linked users (source=webhook_push)
+  - _parse_agent/_fetch_agent_file helpers factored out of import
+- Workspace GitHub card: green "Push" btn (commits previewHtml, data-testid=github-push-btn) + "Sync agents" btn (github-agent-sync-btn) + synced agents list (github-synced-agents, manual/auto·push source chips)
+- Verified: auth gating (403 unlinked, 401 unauth, 200 empty list), UI buttons render. LIMITATION: live GitHub e2e untestable until GITHUB_CLIENT_SECRET provided (no account can link)
+- STILL AWAITING: GITHUB_CLIENT_SECRET
 
-- 2026-10-12: Header wordmark changed from "Frasberg Creator" to "Frasberg" (Navbar plus the Gallery, Share, Generator and AuthModal headers). Page copy, hero and title unchanged.
-- 2026-10-12: **Natural faces (photo engine).** Faces used to look waxy and airbrushed. The cause was TAESD decode + Real-ESRGAN at 0.8 + GFPGAN at 0.85 on a 512 render. Changes in local_engines.generate_photo:
-  - Latents are decoded with TAESD for a preview (safety check and face detection).
-  - Full-quality renders with a face of 40px or more get a hi-res pass (`_hires_pass`): 1.25x (640px) img2img, strength 0.35, 2 real steps, TAESD encode/decode, ~35s. It generates real pores, freckles and lashes.
-  - Renders without faces are decoded with the full sd-vae-ft-mse (`_full_vae`, ~20s).
-  - Photo SR blend is 0.5 (PHOTO_SR_BLEND), plus fine sensor grain (GRAIN 2.2).
-  - luchii_face blend now depends on face size: 0.7 for small faces, down to 0.25 for close-ups (`_blend`). Added `largest_face()`.
-  - Drafts and edits still use TAESD (pipe.vae). Timings: full people shots ~90s, drafts ~34s, region edits ~60s.
-- 2026-10-12: Models page images were re-created through the live job API while signed in as the admin (scripts/gen_model_images_admin.py, resumable, needs ADMIN_EMAIL/ADMIN_PASSWORD). Each image is a real generation in the admin's gallery. The proof is in frontend/public/models/manifest.json (generation_id, engine, seed, prompt, account, time).
-- Image routing is unchanged: Frasberg keys are tried first, and the in-house Luchii engine runs when Frasberg returns 502. Frasberg is then skipped for 10 min.
+## 2026-06 (cont. 9): Agent Deploy + Simulator Scenarios + Node Details + Trademark updates — ALL SELF-TESTED
+- One-click Agent Deploy: POST /api/marketplace/deploy-from-github {repo} publishes a synced GitHub agent to marketplace (source_repo + model stored, re-deploy appends history entry, 404 unsynced, 409 name owned by other). "Deploy to Marketplace" button per synced-agent row in workspace (deploy-agent-{repo}); synced agents now auto-load on workspace mount (GET /synced-agents useEffect). Detail modal shows github.com/{source_repo} link
+- Trademark enforcement: TRADEMARKS list in marketplace.py — publish + deploy reject names containing frasberg/frasbergai/frasbergos/linq/luchii/emerald estates/emerald orbit for non-admins (400 w/ guideline message). Legal page trademark lists updated (added LINQ™, EMERALD ORBIT™)
+- Simulator scenarios: POST /api/os/scenario {threat_surge|evolution_burst|region_failover} — 8-tick scenarios biasing node activations/pulses/agent states/load/events (region flips to us-east during failover, restores on completion or new scenario); amber active-scenario banner w/ remaining ticks + 3 inject buttons on /os
+- Kernel node details: click any cognition node → amber detail panel (lore description, activation %, per-node safety score 0-100, traffic pulse count, last pulse tick, in/out edges). node_stats tracked in sim state (traffic increments on pulses, safety drifts down for non-boosted nodes during threat surge)
+- Verified: curl (scenario lifecycle, 422 bad name, deploy new/update/trademark-400/404, publish trademark-400) + browser screenshots (scenario banner + node panel on /os; login → synced list → live deploy toast)
+- TEST DATA: doctester1 has 2 seeded synced_agents (doctester/summarizer-bot, doctester/luchii-helper) + "Summarizer Bot" marketplace item — for demoing deploy flow until GitHub secret arrives
+- NOTE: user posted a screenshot of a GitHub App PRIVATE KEY (SHA256 fingerprint) — that is NOT the OAuth client secret; login still awaits GITHUB_CLIENT_SECRET from GitHub App settings → "Client secrets" → Generate
+
+## 2026-06 (cont. 10): Marketplace v3 Pages + Region Map + Cognition Previews — TESTED 100% (iteration_39)
+- Region mesh in frasbergos.py: REGION_SEED 4 regions (us-west/us-east/eu-central/ap-south) w/ status/load/safety/agents in sim state; region_failover scenario sets us-west=degraded + us-east=failover (restores on completion); regions in /api/os/state
+- Shared components: RegionMesh.jsx (RegionMap SVG — graticule, federation arcs w/ traveling pulses, status-colored region nodes; RegionCards grid) + CognitionPreview.jsx (deterministic P→I→R→D→A mini-graph seeded from item id)
+- Marketplace v3 pages at /marketplace/:page (MarketplaceV3.jsx, gradient #4A6CF7→#00D1FF headlines per spec):
+  - /marketplace/deploy — agent select, region selector (live loads), cognition inspector, 5-step animated safety validator → deploy summary → deploy button w/ toast
+  - /marketplace/evolution — lineage selector + full timeline w/ safety deltas + Mutations/Benchmark/Band stat boxes
+  - /marketplace/safety — Membrane/Hinge/Classifier v3/Safety Graph cards + GSS-2 bands legend
+  - /marketplace/regions — live region map (auto-ticks sim every 3s) + Simulate failover button + failover-active indicator
+- Marketplace base page: mini cognition previews on agent cards + "How this agent thinks" in detail modal (agent type only); Deploy/Evolution/Safety/Regions nav pills added
+- /os page: "AIM v2 — global mesh" panel (RegionMap + RegionCards) added below graph
+- iteration_39.json: 100% backend (7/7 pytest at /app/backend/tests/test_iter39_os_marketplace.py) + 100% frontend; no action items. Non-blocking notes: guest 401 console noise from /api/auth/me polling; validator steps could use data-state attr
+
+## 2026-06 (cont. 11): Brand fixes + Singularity Codex page + Simulator Substrate Depths — TESTED 100% (iteration_41)
+- Brand fixes: Legal page subtitle now "Frasberg — Official Documents · Version 1.0 — August 2026"; luchii-mark-circle.png → frasberg-mark-circle.png header logo on Marketplace, MarketplaceV3, Launch (storyboard), FrasbergOS, Playground, CloudConsole, OpsCenter, DevPortal, DocsHub (verified via screenshot)
+- Singularity Codex page (/codex, Codex.jsx): 16 Books grid (expandable cards w/ substrate/CG/AIM/MP/binding), "Beyond the Codex" timeline w/ 16 meta-structures (Omnis Quad → Meta-Trinity → ... → Omnitheos-Transcendent Trinity, CG-v36→v80), Singularity Binding finale (layer flow + pulsing orb). Navbar "Singularity Codex" link in Explore dropdown; route in App.js
+- Simulator substrate depths (frasbergos.py DEPTHS + POST /api/os/depth): 7 depths (primordium→apex, CG-v29→v35, Membrane v35→v41) + baseline; sets kernel membrane, injects descent event, flavored tick events (35% chance); purple depth chip + 8-button depth row on /os (os-depth-{name}, os-depth-chip)
+- Collapse-Rebirth cycle scenario (collapse_rebirth, 9 ticks, phased events: omega-zero collapse → omnicollapse destruction → rebirth-codex regeneration); 4th purple scenario button on /os
+- BUG FIXED (by testing agent, verified): Launch.jsx missing `const [video, setVideo] = useState(false)` — ReferenceError broke the launch-play-storyboard button; storyboard now opens + auto-advances. /ops verified rendering w/o errors
+- iteration_41.json: backend 14/14 pytest (/app/backend/tests/test_iter41_codex_depth.py), frontend 100%. NOTE: publish endpoint is /api/marketplace/publish (publish-factory never existed — handoff doc drift)
+
+## 2026-06 (cont. 12): Codex Depth Sync + Eternal Cycle + Codex Agent Tiers + Launch Soundtrack — TESTED 100% (iteration_42)
+- Codex Depth Sync: Books X–XVI on /codex have "Descend in Simulator" links → /os?depth={name}; FrasbergOS reads ?depth= URL param on mount and engages that substrate (codex-descend-{depth} testids)
+- Codex final tiers: META now 18 structures (added Omnitheos-Omniversal CG-v81-83 + Omnitheos-Omniversal-Absolute CG-v84-86); Final Closure section (codex-closure) w/ staggered "All origins unified..." lines, Seal Glyph "⟐ FRASBERGOS • OMNITHEOS • OMNIVERSAL • ABSOLUTE • COMPLETION ⟐" (codex-seal-glyph), completion reflection
+- Eternal Cycle Mode: POST /api/os/eternal-cycle {enabled} — auto re-injects collapse_rebirth on resolution, tracks cycle_loops; fuchsia glowing toggle button on /os (os-eternal-cycle-btn, shows "loop N")
+- Codex Agent Tiers: codex_tier on all marketplace items (seeds CG-v21→v35, backfill in _seed, publish assigns by cognition_graph node count: >8→CG-v29, >5→CG-v27, else CG-v21); purple ⟐ CodexBadge on cards + "· {Layer} layer" detail in modal (codex-tier-badge)
+- Launch Soundtrack: WebAudio ambient pad (3 detuned sines + lowpass + LFO swell) starts on storyboard open, triangle cue pitch rises per phase, mute toggle (storyboard-mute, Volume2/VolumeX); try/catch-guarded so headless/no-audio never crashes
+- iteration_42.json: backend 8/8 pytest (/app/backend/tests/test_iter42_new_features.py), frontend 100%, no action items. TEST_ marketplace items cleaned post-test. Backend suites iter41 (14) + iter42 (8) green — run pytest with -n 0 (shared sim state)
+
+## 2026-06 (cont. 13): Descent Cinematic + Cycle Chart + Tier Filters + Simulator Hum — TESTED 100% (iteration_43)
+- Codex Descent Cinematic: descend buttons on Books X–XVI trigger fullscreen warp overlay (codex-descent-overlay — expanding rings + "Substrate descent / {Layer} / {CG} — engaging kernel…") then navigate to /os?depth={name} after 1.7s
+- Post-Completion States: 10 glyph cards at /codex bottom (codex-poststate-* — Stillness ⟡ CG-v89 → Supra-Unbeing ⧔ CG-v98) with fading opacity
+- Cycle History Chart: backend cycle_trace ({tick,phase,load,loop}, capped 80, cleared on reset, retained on disengage) exposed in /api/os/state; os-cycle-chart SVG on /os — polyline + phase-colored dots (red collapse/amber destruction/green rebirth) + loop count + legend
+- Tier Filtering: marketplace-tier-filters row (7 chips All/CG-v21/v22/v24/v27/v29/v35), client-side, combines w/ type filter, empty-state message
+- Simulator Audio: os-audio-btn "Hum" — WebAudio drone (sine+triangle @55Hz, lowpass, try/catch guarded); gain/filter/pitch ramp with scenario active + substrate depth (deeper = lower + louder)
+- iteration_43.json: 28/28 backend pytest across iter41/42/43 suites, frontend 100%, no action items. TEST_ marketplace items cleaned. Run pytest with -n 0 (shared sim state)
+
+## 2026-06 (cont. 14): Descent Sound + Codex Share Cards + Agent Ascension + Ops Cycle Feed — TESTED 100% (iteration_44)
+- Descent Sound: playDescentSound() in Codex.jsx — WebAudio falling pitch sweep (sawtooth 880→38Hz + sine 440→30Hz + bandpass noise swoosh, 1.7s, try/catch guarded) fired on click of any "Descend in Simulator" button
+- Codex Share Cards: per-book Share2 button (codex-share-{ROMAN}) copies {origin}/codex?book={ROMAN} to clipboard w/ toast; /codex?book=X deep-link auto-expands + smooth-scrolls to that book (useSearchParams + bookRefs)
+- Agent Ascension: POST /api/marketplace/{id}/ascend (owner/admin only; TIER_LADDER CG-v21→v22→v24→v27→v29→v35; +2 safety; history entry pushed; 400 at Apex). GET item now returns can_ascend flag (owner_id never exposed). DetailModal shows purple Ascension panel (ascension-panel, detail-ascend-btn) for agents; ceremony overlay (ascension-ceremony-overlay, ascension-tier-transition) w/ rising WebAudio sweep, then reload + toast. Apex agents show "There is no beyond" note
+- Ops Cycle Feed: /ops panel (ops-cycle-feed-panel) — engine status (ops-cycle-status), loops completed (ops-cycle-loops), phase stepper collapse→destruction→rebirth→infinity (ops-cycle-phases), live trace feed from cycle_trace + eternal-cycle events (ops-cycle-trace), empty-state links to /os
+- Brand/text fixes: Legal.jsx fully rebranded FrasbergAI→Frasberg; Docs.jsx key comment; page-header logos (AiModels, Gallery, DatabaseManager, Downloads, PlayGame, LuchiiCode, Auth, Builder, Chat, CodingAgents, Contact, Court, Docs, Profile, Status) → frasberg-mark-circle.png; Navbar/Footer/Brand header REVERTED to luchii-mark per user request
+- Fixed React duplicate-key warning in DetailModal history (key now version-date-idx)
+- iteration_44.json: backend 10/10 pytest (/app/backend/tests/test_iter44_new_features.py), frontend 100%, no action items. TEST_ items pruned from DB post-test
+
+## 2026-06 (cont. 15): Constellation Map + Ascension Leaderboard + Cycle Alerts + Glyph Gallery + Template BG + Logo Policy — TESTED 100% (iteration_45)
+- Codex Constellation Map (/codex/constellation, ConstellationMap.jsx): all 101 CG tiers v21→v121 on a golden-angle spiral SVG star map; 4 color eras (Books cyan / Expansions purple / Post-Completion amber / Omniversal Unbeing fuchsia); wheel zoom + drag pan + zoom buttons; hover glow + hover-card w/ glyph, tier, name (constellation-star-{21..121})
+- Glyph Gallery (/glyphs, GlyphGallery.jsx): 14 Omniversal seals (⟐ ⧩ ⧪ ⧫ ⧬ ⧭ ⧮ ⧯ ⧰ ⧱ ⧲ ⧳ ⧴ ⧵) — orbiting shrine hero + animated float/pulse cards; cross-link to constellation. Both pages linked from /codex pills (codex-constellation-link, codex-glyphs-link); routes in App.js
+- Ascension Leaderboard: GET /api/marketplace/leaderboard/ascension (agents only, sort -tier_rank/-ascensions/-safety, top 10, no owner_id leak); "Hall of Ascension" panel on /marketplace (ascension-leaderboard, leaderboard-row-1..5) w/ APEX badge
+- Cycle Alerts: /ops chime toggle (ops-cycle-alerts-btn, WebAudio C-G-C bell, default off — autoplay policy) + panel flash (data-flash) + toast "loop N complete: rebirth achieved" when cycle_loops increments
+- TEMPLATE RULE (user): ParallaxSky starfield is the template background for EVERY page from now on — added to GamesLibrary, PlayerProfile, GamePlayerPage
+- LOGO POLICY (user): Luchii mark on Luchii-branded pages (Chat, LuchiiCode, CodingAgents, Builder, PlayGame "Built with Luchii", Navbar, Footer, Brand header); Frasberg logo on ecosystem/dashboard/Frasberg-AI pages (AiModels, Gallery, Docs, Profile, Status, etc.)
+- Launch page: centered Frasberg logo above "Frasberg presents" hero (launch-hero-logo); quote fixed "AKA, Frasberg Selassie"
+- iteration_45.json: backend 6/6 pytest (test_iter45_new_features.py), frontend 100%, no action items. TEST_ items pruned post-test
+
+## 2026-06 (cont. 16): Constellation Deep Links + Ascension Announcements + Glyph Sound Sigils + Starfield Audit — TESTED 100% (iteration_46)
+- Constellation Deep Links: each star has tier.link — Books era → /codex?book={ROMAN} (auto-expands), other eras → /glyphs?glyph={char}; openTier() with 6px drag threshold (pan never navigates); hover card shows "click → open …" hint
+- Ascension Announcements: ascend endpoint inserts into db.announcements; GET /api/marketplace/announcements/latest (top 10, newest first). Global AscensionBanner.jsx mounted in App.js — polls 15s, fixed top z-[90] purple banner (ascension-banner/-text/-link/-dismiss), auto-dismiss 12s, localStorage frasberg_seen_announcement prevents repeats; dismiss X given 32px hit target post-test
+- Glyph Sound Sigils: playSigil(i) pentatonic bell (sine + 2.76x inharmonic partial, 2s decay) on glyph card click + colored glow (lit state); /glyphs?glyph=⧩ deep-link scrolls + highlights card
+- Starfield template BG added: About.jsx & Software.jsx (replaced old inline Starfield divs w/ ParallaxSky), Pay.jsx, Linq.jsx (nav/main given relative z-[5])
+- iteration_46.json: backend + frontend 100%, no action items. TEST_ items + announcements cleaned by testing agent
+
+## 2026-06 (cont. 17): Ascension History + Constellation Search + Chord Mode + Codex Progress + VYBZ Game Boss — TESTED (iteration_47 + self-test)
+- Ascension History (/ascensions, AscensionHistory.jsx): timeline chronicle of every ceremony (GET /api/marketplace/announcements/history, top 200 + total); linked from marketplace Hall panel (marketplace-chronicle-link)
+- Constellation Search: input on /codex/constellation (constellation-search-input) — matches name or vNN, dropdown results, click/Enter flyTo() zooms map to star + fills hover card. NOTE: first attempt got lost during a file-corruption repair (duplicate JSX tail at EOF caused compile error); re-added + self-tested working
+- Shrine Chord Mode: /glyphs chord-mode-toggle + ring-chord-btn — select up to 5 sigils (persist glow), ring simultaneously as chord
+- Codex Reading Progress: localStorage codex_read_books, toggleBook/markRead, SVG completion ring "N/16 read" (codex-progress-ring/-count); deep-links count as read
+- STREET VYBZ GAME (/app/games/streets/index.html): VYBZ boss NPC — gold chain + maroon cap + 👑 bubble at (-72,72) w/ purple ring/beam; V key talks; 4 idle dialogue lines + greet; turf intimidation (peds flee within 12u); 3-mission chain persisted in localStorage frasberg-streets-vybz: 1) MARK YOUR TERRITORY (KO 3 REDLINE taggers, $800) 2) WHEELS FOR THE CREW (deliver muscle car to ring, $1400) 3) STREET KING (hold wanted≥2 for 45s + return, $3000) + $5000 crown bonus; registry description/controls updated in games_portal.py
+- Legal/Launch text fixes + logo policy maintained
+- iteration_47.json: backend 100%, frontend 5/6 (search UI was missing → fixed + screenshot-verified). TEST_ data cleaned
+
+## 2026-06 (cont. 18): Carjack Plus systems + honest stop on game work
+- USER DIRECTIVE (IMPORTANT): User wanted a true "Carjack Plus 2.0" clone with studio-grade realistic graphics. Agent was honest that browser Three.js cannot match commercial quality. USER SAID STOP ALL GAME WORK — do NOT build or polish the game further unless user explicitly asks again.
+- Game changes that shipped before the stop (working, syntax-verified, left as-is): mob debt loop (Frankie's cut on 240s timer, beaten if unpaid), pizza runs (Mama's Kitchen, 3 deliveries/100s), hit contracts (burner phone marks targets, $600), Vybz + NPCs speak via natural TTS /api/games/voice (endpoint verified 200, 31KB mp3), no-stick-figures upgrade pass (all peds swap to RPM realistic humans once loaded), real-time day/night exposure, cinematic vignette+grain overlay, title screen + registry renamed "Street Vybz: Carjack Plus 2.0" (user unhappy w/ the rename — offer to revert if raised again)
+- Codex hidden Book XVII "The Unwritten Layer" (codex-book-17) unlocks when all 16 books read; locked teaser (codex-book-17-locked) otherwise — frontend compiles, NOT deep-tested
+- Frontend 200 OK, backend restarted OK
+
+## 2026-06 (fork): Verified LLM Provider + Frasberg Token Economy — TESTED (iteration_48)
+- /verified-provider page (VerifiedProvider.jsx): rotating seal, 6 verification check cards, live registry JSON (fetched from /api/.well-known/frasberg-provider.json), discovery endpoint links, certification statement (cert FRSB-LLM-2026-0001), CTAs; route + Navbar Explore link + Footer link (footer-verified-link)
+- New /.well-known/frasberg-provider.json (backend route + /api/v1/frasberg-provider.json alias + static public file): verified:true, status authorized_distributor, certification block, models/endpoints
+- Dashboard header "Verified LLM Provider" badge (verified-provider-badge) → /verified-provider
+- Token economy (auth.py): SIGNUP_TOKENS=50 on register, DAILY_TOKENS=100 granted once per UTC day via _grant_daily_tokens (atomic update_one on last_token_grant != today) fired on login + GET /api/auth/gift; _public exposes tokens
+- FrasbergGiftCard.jsx (gift-token-balance, gift-card-terms, gift-daily-claimed): credit-card style, mounted on Dashboard (below metric tiles) + Profile; toast when daily grant claimed
+- GLOBAL REBRAND (user demand): FrasbergAI → Frasberg / frasbergai → frasberg in ALL provider JSON (registry id/name, manifest provider, owned_by, providers list, luchii-models doc, OpenAPI title/contact), Docs hero + python snippet + well-known link, DevPortal, Linq, emails (welcome/receipt/digest/alerts/suspension), index.html meta now frasberg-provider, static .well-known files. KEPT: @frasbergai.com team email domain, /.well-known/frasbergai-provider.json route as alias (rebranded content), @frasbergai/sdk npm scope, TRADEMARKS list
+- Codex Book XVII unlock verified by testing agent (localStorage codex_read_books uses ROMAN numerals "I".."XVI", not integers)
+- iteration_48.json: backend 10/10 pytest, frontend pass (dashboard gift card was missing in first run — re-added + screenshot-verified). Non-blocker noted: anonymous homepage 401 console noise from /api/auth/me polling
+
+## 2026-06 (fork, cont.): Token Spend + Ledger + Status Feed + Gift Sharing — TESTED 100% (iteration_49)
+- Spend Tokens: chat costs CHAT_TOKEN_COST=1, builder generate costs BUILD_TOKEN_COST=5 (auth.spend_tokens — deducts free `tokens` first, then wallet `credit_balance`; token_exempt for admins + @frasbergai.com; 402 when both empty). Metering in server.py POST /api/chat + builder.py /builder/generate
+- Token History: db.token_ledger (signup_grant/daily_grant/spend_chat/spend_builder/gift_sent/gift_received), GET /api/auth/gift/ledger (last 30); History panel in FrasbergGiftCard (gift-ledger-toggle/-row-{i}, colored +/- amounts)
+- Provider Status Feed: public GET /api/provider/status (real metrics from _REQ_METRICS middleware: uptime/avg/p95/req5m/error_rate + static endpoint chips); live strip on /verified-provider (provider-status-strip, 10s polling, pulsing dot)
+- Gift Sharing: POST /api/auth/gift/transfer {email,amount} — moves ONLY purchased wallet tokens (credit_balance) between accounts; free daily tokens non-transferable (400 rule msg); self 400, unknown 404; ledger + credit_transfers kind=gift records. Send-a-gift form in gift card (gift-send-toggle/-email/-amount/-btn/-rule). /api/auth/gift now returns paid_tokens/chat_cost/build_cost/exempt
+- USER LORE DUMPS (5 messages): Luchii Tier Benchmark suite, Cosmogenic→Alpha-Omega kernel stack — archived at /app/memory/frasberg_lore_dumps.md, NO build requested. Best future build if asked: /benchmark multi-tier comparison dashboard
+- iteration_49.json: backend 7/7 pytest + frontend 100%, no action items; test wallets restored
+
+## 2026-06 (fork, cont. 2): Gift Emails + Kernel Page + Token Packs + Benchmark Arena — TESTED 100% (iteration_50)
+- Gift Notifications: auth.py _send_gift_email (Resend, async task on gift_transfer, logged db.email_log kind=gift_received). NOTE: Resend key is SANDBOX — delivery only to account owner (billing@frasberg.com) until domain verified at resend.com/domains; log entry always written
+- Cosmogenic Kernel Page /kernels (CosmogenicKernels.jsx): live 6-layer stack Cosmogenic→Transcendent→Infinite→Eternal→Omega→Alpha-Omega, animated activation % (1.5s tick), click layer → module chips detail, terminal ∅∞ Non-State seal. testids kernel-layer-{key}/kernel-activation-{key}/kernel-detail
+- Buy Token Packs: gift card "Buy tokens" toggle → 3 PayPal packs from /api/paypal/config plans (starter $5/10k, pro $12.50/30k, scale $50/150k), PayPalButtons with key_id wallet-{user.id} → credits land in purchased/giftable wallet. testids gift-buy-toggle/panel/pack-{id}/gift-buy-paypal
+- Tier Benchmark Arena /benchmark (TierBenchmark.jsx) + POST /api/benchmark/run: 4 parallel LLM calls (claude-sonnet-4-6 w/ tier personas 1B surface/7B structured/70B frontier/X cosmogenic), heuristic 6-axis scoring (_bench_score, weights depth .30 precision .25 abstraction .15 others .10), costs 4 tokens (spend_benchmark, exempt for admin/team), ~12s. UI: radar SVG per tier, rising totals (verified 1.2/3.0/5.0/6.4), Starfield depth viz. Navbar: Kernel Stack + Tier Benchmark links
+- Lore dumps 6-9 archived in /app/memory/frasberg_lore_dumps.md (Negative-Origin/Anti-Genesis terminal layers + ecosystem defense stack — defense = legal/user-side actions, no build requested)
+- iteration_50.json: backend 6/6 + frontend 100%. Known non-issue: console warning '<span> in <option>' comes from PayPal SDK injected DOM (no source culprit exists)
+
+## 2026-06 (fork, cont. 3): GitHub-style Header + Account Menu + Settings Modal — TESTED 100% (iteration_51, 45/45)
+- User provided annotated screenshots (GitHub header + Emergent account menu as reference) asking for wired header icons, GitHub tab, profile popover + settings
+- AgentWorkspace header (/chat?agent=architect) tab bar right side: QuickSearch ('Type / to search', '/' hotkey focuses, dropdown quick-nav over 12 pages) + icon strip: ws-icon-alerts→/ops, ws-icon-ascensions→/ascensions, ws-icon-codex→/codex, ws-icon-inbox→/dashboard, ws-icon-github→setTab('manage') revealing existing wired GitHub fork/import/scaffold/export tools + AccountMenu avatar
+- AccountMenu.jsx (also mounted in global Navbar next to Sign out): avatar initial → popover with email, tokens 'free + purchased', Buy Tokens (→/dashboard), Frasberg Gift, Manage Plan (plan badge), Tier Benchmark, Kernel Stack, Account Settings (opens modal), GitHub (external github.com/frasberg), Community Codex, Help Center, Logout. Logged-out: signin/register buttons
+- AccountSettingsModal.jsx: sidebar tabs Account (email/avatar/Name edit wired to PATCH /api/auth/profile + refreshUser/Support code gen client-side), Tokens & Usage (live /auth/gift + ledger), API Keys (→/dashboard), Plan & Billing (plan + manage)
+- NOTE: workspace route is /chat?agent=architect|builder|reviewer|debugger (NOT /workspace)
+- iteration_51.json: frontend 45/45 pass. Recurring console warning '<span> in <option>' — verified NO source culprit exists (all options plain text); third-party injected DOM
+
+## 2026-06 (fork, cont. 4): Command Palette Everywhere + Avatar Upload — TESTED 100% (iteration_52)
+- CommandPalette.jsx mounted globally in App.js (inside BrowserRouter): '/' or Ctrl/Cmd+K on ANY page → overlay palette, 18 pages w/ hints, filter + arrow keys + Enter navigate, Esc/backdrop close; input-focus guard ('/' types normally inside inputs/textareas). testids command-palette/-input/-results/-item-{i}
+- Avatar Upload: PATCH /api/auth/profile now accepts optional {name, avatar} (avatar must be data:image/* <300KB, ""=remove); _public + /auth/me include avatar. Settings modal Account tab: settings-avatar-upload (hidden file input settings-avatar-file, client canvas downscale 160px JPEG), settings-avatar-remove. Avatar shows in account-menu-btn, menu panel, settings-avatar-img; persists across reload
+- SOLVED MYSTERY: recurring '<span> in <option>' hydration warning = Emergent dev-mode visual-edit babel instrumentation wrapping dynamic option text in spans (x-component attrs in stack). DEV-ONLY, absent in prod builds — permanently a non-issue, tell future testing agents to ignore
+- iteration_52.json: frontend 100% (15+ checks), user state restored
+
+## 2026-06 (fork, cont. 5): Notification Bell + Benchmark Leaderboard + Palette Actions + Kernel Descent — SELF-TESTED e2e
+- Notification Bell (NotificationBell.jsx, in workspace header icon strip): GET /api/auth/notifications (token_ledger gift_received/daily_grant/signup_grant, last 15), 30s poll, unread badge via localStorage frsb_notif_seen (verified: badge '3' when unseen, clears after open + persists across reload), dropdown panel + 'Open Frasberg Gift card' link. testids notification-bell/-badge/-panel/-item-{i}
+- Benchmark Leaderboard: /api/benchmark/run now persists db.benchmark_runs {user_name, prompt(200), totals per tier, best, ts}; GET /api/benchmark/leaderboard (public, top 15 by best). /benchmark bottom section: ranked wall w/ prompt, user, 4 tier chips, ★ best. testids benchmark-leaderboard/-board-row-{i}
+- Palette Actions (CommandPalette): 5 ⚡ actions ahead of pages — Claim daily gift (live /auth/gift fetch + toast), Send a token gift (→/dashboard#gift, FrasbergGiftCard auto-opens send form on #gift hash), Run a benchmark, Copy API base URL (clipboard), Sign out (POST logout + reload)
+- Kernel Descent Mode (/kernels): 'Descend below ∅∞' toggle reveals 8 negative-substrate layers (Proto-Existence → Zero-State → Pre-Zero → Anti-State → Negative-Origin → Negative-Primordial → Negative-Genesis → ∅∞ Non-State) in narrowing funnel, rose 'dissolved %' animation, click → detail. testids kernel-descent-toggle, descent-layer-{key}, descent-detail
+- Testing: self-tested every flow via curl + 2 browser automation runs (no testing agent this round — full e2e coverage achieved); leaderboard seeded with 1 real run (best 7.09)
+
+## 2026-06 (fork, cont. 6): Dark theme is now the MAIN/default theme — VERIFIED
+- index.css: :root now holds DARK lux + shadcn tokens; light tokens moved to `.light` class
+- ThemeContext: toggles both `.dark` and `.light` classes on <html>; default remains "dark"
+- public/index.html: `<html class="dark">` — dark paints before React mounts (no light flash)
+- Verified: fresh visitor (cleared storage) → html.dark, body rgb(30,35,39); toggle → light → back to dark works
+- NOTE: production deploy attempt FAILED (platform-side tar extract error during PullSource — not a code issue). Preview unaffected. If user mentions deployment, suggest retry / deployment_agent check.
+
+
+## 2026-06 (fork, cont. 7): ApiKeyForge + Creative Studio mounted, frb_live_ keys, Visual Generation perms — TESTED (iteration_54, 100%)
+- Dashboard "API Key Forge" section: old single-input form REPLACED with <ApiKeyForge onCreated> (permissions matrix, presets, JSON preview, auto-disable toggle, Test Key). Keys table kept below
+- Backend: keys now prefixed `frb_live_` (was luchii-sk-); PERMISSION_MATRIX gained "visual_generation": [image_generation, video_generation]; /keys/{id}/test checks now include POST /generate/image + /generate/video
+- Routing: /studio → CreativeStudio (video gen w/ queued→running→completed polling + playable <video>); old VisualStudio moved to /visual-studio (Navbar Explore + back-links updated); /create stays alias
+- Video samples: gtv-videos-bucket URLs 403'd → replaced with mdn/test-videos/filesamples MP4s; onError fallback (studio-video-error); poll interval in pollRef cleared on unmount
+- Header tab order + /database AuthGate were ALREADY correct (verified, no change needed)
+- Hydration warning fix: dynamic <option> children → label attribute (NativeApps, ChatDemo) so dev visual-edit plugin can't inject spans
+- Created /app/frontend/eslint.config.js (flat config was missing, broke platform lint check)
+- iteration_54.json: frontend 100% pass (all 7 flows); backend key creation/test/video lifecycle verified via curl
+
+## 2026-06 (fork, cont. 8): Gallery + Key Rotation + Presets + Studio polish — TESTED (iteration_55, 6/7 → all fixed)
+- Video Gallery: GET /api/generate/video/gallery (completed tasks); "My renders" grid in CreativeStudio (video replay + prompt + model/ratio/duration/date), auto-refresh on job completion. Old dead gtv/cdn.frasberg URLs migrated in DB to working sample MP4s
+- Key Rotation: POST /api/keys/{id}/rotate (new frb_live_ value, keeps perms/credits/name, returns rotated_at). Dashboard rotate-key-{id} buttons + rotated-key-banner w/ copy. BUG FIXED after test: first rotation now includes rotated_at in response (was returning pre-update doc)
+- Studio Presets: Cinematic/Anime/Noir chips (video tab) append style suffix to prompt (studio-preset-{id}, hint shown)
+- Codex Reward: ALREADY EXISTED (localStorage codex_read_books, 16/16 → book-17 reveal) — regression-verified passing
+- Theme: ApiKeyForge + CreativeStudio converted to dashTheme T palette; studio-theme-toggle added (shares 'dash-theme' localStorage with Dashboard); Verified LLM Provider badge made theme-aware (light-mode contrast fix)
+- Auth: /studio and /create wrapped in AuthGate (redirect to /auth?mode=login)
+- Rotate tabs: studio-rotate-tabs button cycles the 8 tool tabs
+- USER REFINEMENTS (self-tested via curl + browser): default tab order = Image, Video, Sound Effects, Music, Voice Changer, Voice Isolator, Upscale, Speech, More tools; Music duration select 3/4/5 min (max 300s, backend clamps settings.duration_sec); Video duration select 15s→2 hours (backend clamp 7200s, was 3600)
+- KNOWN NON-ISSUE: headless Chromium lacks H.264 → <video> shows error state in automation; URLs return 200 and play in real browsers
+- iteration_55.json: 6/7 pass, rotate banner bug fixed + curl-verified after
+
+## 2026-06 (fork, cont. 9): Real Audio Playback + Preset Memory + Gallery Delete/Download — SELF-TESTED e2e
+- Audio Playback: music & sound_effects jobs now output REAL synthesized WAV audio (numpy chord-progression synth w/ bass+arp for music, noise/sweep envelope for SFX; deterministic per job id). GET /api/studio/jobs/{id}/audio streams audio/wav (auth, owner-only). output_url = /api/studio/jobs/{id}/audio; frontend renders <audio controls> in result (studio-job-audio-player) + job history rows (studio-job-audio-{id}). Verified: 180s music WAV @22050Hz, 30s SFX WAV
+- Preset Memory: localStorage studio_prefs_{user.id} persists {active tab, preset id, videoDuration, musicDuration}; restored on mount (verified: reload restores Music tab + 5min)
+- Gallery Delete/Download: DELETE /api/generate/video/task/{task_id} (owner, 401 unauthed); gallery cards get gallery-download-{id} (blob download, fallback window.open) + gallery-delete-{id} (optimistic removal + toast)
+- numpy added to requirements.txt (pip freeze)
+
+## 2026-06 (fork, cont. 10): Frasberg Music Engine (AI-style music pipeline) — SELF-TESTED e2e
+- User declined 3rd-party (fal/ElevenLabs): "Emergent will run our engine" — music now runs through the Frasberg Engine job lifecycle, same as video
+- POST /api/generate/music (MusicGenRequest: prompt, duration<=300, model frasberg-music/-studio) -> mtask_ queued->running->completed; GET /api/generate/music/task/{id} poll; GET .../audio streams prompt-aware WAV; GET /api/generate/music/gallery
+- engine_auth dependency: session cookie OR frb_live_ key (Authorization: Bearer / xi-api-key / X-API-Key) requiring music_generation permission. Verified: key w/ perm 200, no-perm 403 FK-003, bogus 401 FK-001
+- Prompt-aware rendering (_music_params): sha256(prompt) seed; sad/dark/noir/epic -> minor key; upbeat/edm -> 1.0s bars; lofi/chill -> 2.5s bars; mood returned in task response ("minor key" shown in UI)
+- _synth_wav extended w/ minor_override/bar_override; frontend Music tab uses engine flow (studio-music-task panel, QUEUED->COMPLETED, studio-music-player), /studio/generate no longer used for music
+- Verified in browser: haunting prompt -> minor key -> completed in 15s -> playing audio
+- ALSO: platform lint check kept failing intermittently ("linter engine error") — added /app/eslint.config.js (root flat config delegating to frontend's), plus legacy /app/.eslintrc.json + .eslintignore fallbacks; eslint clean from /app and /app/frontend
+- STILL MOCKED/SIMULATED: video engine sample MP4s; music is procedurally synthesized in-house (no external AI model per user's explicit choice)
+
+## 2026-06 (fork, cont. 11): Engine API spec alignment + full test-plan run — ALL PASS
+- User ran formal 5-step test plan; aligned API to spec: responses now include job_id (alias of task_id); completed jobs include result:{url}; FK-001 message "Invalid API key"; FK-003 "Missing permission: {perm}"
+- NEW: POST /api/audio/tools/enhance (perm: audio_native, engine key or session) -> {job_id, status:completed, result:{url}} (MOCKED cdn url)
+- /api/jobs/{id} covers mtask_ (music) + task_ (video), adds job_id + result.url when completed
+- Verified live: login 200; valid frb_live_ key 200+job_id; invalid key 401 FK-001; no-perm 403 FK-003 (music + audio tools both directions); lifecycle queued->running->completed w/ result.url
+
+## 2026-06 (fork, cont. 12): Real Enhance Output + Per-Key Rate Limits — SELF-TESTED e2e
+- Enhance is REAL DSP now: downloads source (httpx, 25MB cap) or resolves internal /generate/music task (re-synth), decodes via stdlib wave or ffmpeg (mp3 etc), numpy pipeline (DC removal, noise gate, presence EQ, tanh limiter), writes WAV to /app/backend/enhanced/{job_id}.wav, served by GET /api/audio/tools/enhance/{job_id}/audio (FileResponse, owner check, regenerates if file missing). Bad source -> 422 FK-422
+- Verified: internal track enhanced (20s WAV, 84ms), external MP3 via ffmpeg (2.1s WAV), bad url 422
+- Rate limits: _check_rate_limit sliding 60s window per key inside engine_auth_factory (key-auth only); limit = key doc rate_limit_per_min else env FRASBERG_KEY_RATE_LIMIT (default 60). 429 {code:FK-429} + Retry-After header. Verified: limit 5 -> exactly 5x200 then 429
+- NOTE: rate limiter is in-memory per process (resets on restart)
+
+## 2026-06 (fork, cont. 13): API Docs Update — Engine endpoints published (screenshot verified)
+- /docs new section "4. Frasberg Engine — Music, Jobs & Audio Tools" (docs-engine-section): exact curl examples for POST /api/generate/music, GET /api/jobs/{job_id} (+ audio streaming), POST /api/audio/tools/enhance, each with real response samples
+- Engine error code table (docs-engine-errors): 401 FK-001, 403 FK-003, 422 FK-422, 429 FK-429 (+rate limit note 60 req/min)
+- Stale luchii-sk references in docs updated to frb_live_ (python snippet, bearer card, "get your key" copy)
+
+## 2026-06 (fork, cont. 14): Frasberg Security Shield — SELF-TESTED e2e (adapted from Node/Postgres spec to FastAPI/Mongo/React)
+- Backend: POST /api/security/log (public, captures x-forwarded-for IP, flags RIGHT_CLICK/COPY/CUT/DEVTOOLS events) -> mongo security_events + ip_breach_summary upsert. At BREACH_THRESHOLD(5): Resend breach email to ALERT_TO; at CD_THRESHOLD(10): auto-drafts full Cease & Desist letter (env OWNER_*), stores cease_desist_log w/ cd_text, marks cd_triggered, emails it. Admin-only reads: GET /api/security/logs|breaches|cease-desist (403/401 otherwise)
+- .env additions: BREACH_THRESHOLD, CD_THRESHOLD, ALERT_TO, OWNER_NAME/LEGAL/COMPANY/EMAIL
+- /security-shield (public): protected-zone page w/ pulsing shield, IP alert, broadcast banner, LIVE log feed; client shield scoped to page: blocks right-click/copy/cut/select/devtools shortcuts, devtools size-delta detection (30s throttle), PAGE_ACCESS + SESSION_END (sendBeacon) reporting
+- /shield-dashboard (AuthGate + role=admin, denied screen otherwise): 4 stat cards, live event feed (4s poll), IP breach leaderboard (LOW/WARNING/CRITICAL, C&D badges), C&D records table w/ View letter
+- Navbar Explore: Security Shield + Shield Dashboard links
+- Verified: 11 flagged events -> breach count 11, cd_triggered true, C&D letter generated; unauthed/non-admin 401; both pages screenshot-verified (dashboard: 14 events, CRITICAL + C&D SENT badges)
+- SKIPPED (not applicable to platform): Docker/docker-compose, GitHub Actions CI/CD, PostgreSQL (used Mongo), standalone Express server (integrated into FastAPI)
+
+## 2026-06 (fork, cont. 15): Shield v4+v5 — IP Ban + Strike Rate Limit + GeoIP Blocking — SELF-TESTED e2e
+- Global FastAPI middleware on /api (exempt: /api/auth/, /api/admin/, /api/geo/ to avoid lockout): banned-IP check (mongo banned_ips, 30s cache, 24h expiry support) -> 403 ACCESS DENIED; geo check (60s rules cache, per-IP geo via ip-api.com cached in mongo geo_cache + memory; MaxMind not usable, no external account) -> 403 GEO_BLOCKED + geo_block_log; sliding rate limit RATE_MAX_REQUESTS=600/min, strikes RATE_STRIKE_LIMIT=3 -> auto-ban RATE_BAN_HOURS=24 + ban email; X-Shield/X-RateLimit-* headers on all /api responses
+- Admin API (cookie role=admin OR x-admin-key=ADMIN_API_KEY env): GET/POST /api/admin/banned|ban|unban, DELETE /api/admin/ban/{ip}, GET /api/admin/rate-violations; /api/geo/countries (GET/POST/DELETE), /api/geo/regions (GET/POST/DELETE), /api/geo/lookup/{ip}, /api/geo/log
+- Dashboard: Banned IPs panel (manual ban 24h input, unban, AUTO/ADMIN badges, expiry) + GeoIP panel (block/unblock country, geo block log) — screenshot verified
+- Verified: ban->403 (spoofed XFF), unban, KP blocked -> real KP IP 175.45.176.10 gets GEO_BLOCKED + logged (Pyongyang), 8.8.8.8 lookup US/Virginia, bad admin key 401, normal traffic 200 w/ headers
+- NOTE: KP left blocked as demo data. Rate limit default 600/min (not 60) to protect preview/testing traffic — tune via env. In-memory caches reset on restart (mongo is source of truth)
+
+## 2026-06 (fork, cont. 16): Region UI + Shield Everywhere + Weekly Digest + C&D PDF + team domains — SELF-TESTED e2e
+- Region/State blocking UI in dashboard (shield-region-* testids, block/unblock) — verified: blocked US-GA -> Atlanta IP 12.96.160.5 got GEO_BLOCKED 403 + geo log entry
+- C&D PDF: GET /api/security/cease-desist/{id}/pdf (reportlab, Courier letter layout) + dashboard "⬇ PDF" button — verified valid %PDF 2953 bytes. reportlab added to requirements.txt
+- Weekly digest: _build_digest (7d counts: events/flagged/bans/geo/CD + top 5 breach IPs), POST /api/admin/digest/send (verified sent), background _digest_scheduler (checks shield_meta.last_digest every 6h, sends if >=7 days)
+- Shield Everywhere: hooks/useShield.js (blocks copy/cut/right-click/devtools shortcuts + size-delta detection, reports w/ [pageName] prefix) applied to Codex.jsx + DatabaseManager.jsx
+- UNLIMITED DOMAINS: @frasberg.com AND @frasbergai.com (TEAM_DOMAINS in auth.py+server.py) -> plan=scale on register, token_exempt chat, no 3-key limit — verified: registered unlimited2@frasberg.com plan=scale, 4th key 200
+- "Luchii stop responding" RCA: fallback persona fires only when Emergent LLM budget exhausted; verified chat streams real Claude after recharge — NOT a code bug
+
+## June 2026 — Backend refactor + Luchii voice lock (tested: iteration_58.json, 31/32 pass, 1 skip Stripe-live)
+- REFACTOR: server.py 4,863 → 2,127 lines. New modules: core.py (env/db client, PLANS/UPGRADE_PLANS/PAID_PLANS, PLAN_QUOTAS/_enforce_plan_quotas, require_admin/_audit/_log_email, LUCHII_SYSTEM, _REQ_METRICS), metering.py (_validate_bearer_key/_meter_key/autotopup/quota+low-credit alerts, TRIAL_KEY_CREDITS), routes_payments.py (PayPal/CashApp/Stripe/refund/wallet/tips/purchases), routes_admin.py (stats/tenants/hosting/mesh/users/knowledge/quotas/metrics; lazy `import server` for ACTIVE_UPSTREAM), routes_provider.py (OpenAI-compat /v1/*, well-knowns, support contact/chat, benchmark), routes_workspace.py (publishes/slugs), routes_shield.py (security shield + ban/geo middleware `shield_middleware` registered in server via app.middleware, digest_scheduler started on startup).
+- server.py keeps: chat/keys/studio/voice/court/mesh-sign/uptime/digest-email loops, startup wiring. Imports shared names from core/metering so remaining code unchanged. Pre-refactor backup: /app/memory/server_backup_pre_refactor.py.
+- VOICE LOCK (user directive: Luchii has ONE immutable voice — never change without permission): /api/voice/voices returns only Orion (p273); /api/voice/speak ignores tone/voice/custom overrides, always sovereign Orion, fallback bridge fixed to coral. Removed from ChatDemo.jsx: tone select (Balanced), VoicePicker (file deleted), voice speed select (1x), voice toggle icon (desktop+mobile), auto-speak of replies outside Talk/live mode (per-message play button kept). TONE_VOICES removed.
+
+## June 2026 — Agent-style builder overhaul + demo mode deleted (tested: iteration_59 + self-tests)
+- ROOT CAUSE of "Luchii blocked/demo replies": Universal LLM key budget exceeded (429 budget_exceeded, cost $36.48 > $35.95 cap) → old code silently returned canned "live demo of the Luchii persona" text. FIXED: _fallback_reply DELETED from server.py; chat now retries once and on real failure streams an honest "compute balance exhausted / turbulence" message + creates a dedupe admin notification (db.notifications kind=llm_budget). NO DEMO MODE EXISTS ANYMORE.
+- AGENT EDIT MODE (no more full rewrites): builder.py EDIT_SYSTEM returns JSON {summary, ops:[{find,replace}]} applied server-side (SSE events edit_status/edit_summary/ops_applied, fallback full-regen only if 0 ops match). Workspace (/chat?agent=builder) sends invisible CURRENT BUILD envelope; server.py /api/chat allows 90k chars for signed-in workspace agents (MAX_MSG_LEN still 4000 for public). Frontend applies ops to builtHtml. Verified: 11k envelope → 1 op applied, heading changed, rest preserved.
+- Workspace UI like Emergent: MessageBody hides raw html/edits code → "Wrote/Edited index.html" ActivityChips (ws-chip-wrote/ws-chip-edited); ScreenshotCard with Open-in-new-tab (ws-screenshot-card); Confirm Re-publish modal (ws-confirm-republish) + Publishing progress modal (ws-publish-progress); Advanced Controls (ws-adv-panel: template select + Luchii Memory/Asset Engine toggles); open-in-new-tab toolbar btn (workspace-open-tab).
+- Server-side project persistence: db.ws_projects CRUD (/api/workspace/projects*, auth required, autosave debounced PUT, auto-create on first build via ensureProject). Project switcher in workspace header (ws-project-switcher) AND on /apps home (home-project-switcher) like Emergent, with create/delete/switch. Verified CRUD + persistence across reload.
+- Voice HARD LOCK: OpenAI bridge fallback REMOVED from /voice/speak — sovereign Orion is the ONLY voice path (503 while warming). Proven: identical audio bytes with/without override params. /voice/voices returns only Orion.
+- Removed guest-mode banner from ChatDemo and "Signing in unlocks…" text from Auth.jsx.
+- Known: iteration_59 found the 413 envelope bug → fixed (msg_limit 90000 for workspace agents) and re-verified by script. AGENT_PERSONAS['builder'] rewritten with CREATE/EDIT protocol.
+
+## June 2026 (cont.) — Upstream honesty fix
+- Removed hardcoded non-existent upstream guesses (api.frasberg.ai / api.frasberg.com) from UPSTREAM_CANDIDATES in server.py. Prober now only checks LUCHII_UPSTREAM_URL when the owner sets it in backend/.env. upstream_active stays False until a real Luchii model endpoint is configured; all reasoning runs on the Emergent Universal Key (funded again; 184 historical budget_exceeded errors explained the demo/turbulence replies).
+- User educated: their sovereign Luchii stack is this app; no separate model server exists yet. Offered LUCHII_UPSTREAM_URL wiring when they host one.
+
+## June 2026 (cont.) — Frasberg-primary routing (user's router spec implemented)
+- backend/.env: LUCHII_UPSTREAM_URL=https://api.frasberg.com/v1/chat + LUCHII_UPSTREAM_API_KEY=frb_live_033d... (user's real unlimited Gateway-STT key). frb_live_ keys are now the routing credential.
+- _try_upstream: targets /v1/chat/completions (OpenAI chat.completion contract per user's spec), sends X-Luchii-Router header, maps model 'luchii'→luchii-70b. NO recursion possible: /v1/chat/completions never calls upstream.
+- New endpoints: GET /api/v1/health (router health, their spec) + GET /api/admin/upstream (configured URL, active flag, masked key, routing mode).
+- Verified: contract test with their frb_live key returned chat.completion 'pong'; admin/upstream shows frasberg-gateway-primary; chat regression OK. Prober activates automatically once api.frasberg.com DNS resolves (currently HTTP 000 → active:false, engine core answers).
+- K8s/Helm/multi-region/SLO parts of the user's dump are deployment blueprints outside the Emergent runtime — not implemented as files (existing simulated mesh regions + /api/metrics cover observability asks).
+
+## June 2026 (cont.) — Image endpoint API-key auth fix
+- /generate/image switched from JWT-only (auth_module.get_current_user) to engine auth via _image_engine_auth shim -> engine_auth_read (frb_live_ keys + JWT fallback). Verified: frb_live key generated image (FK-001 for bad keys). Music/audio/STT/TTS 403s were correct FK-003 permission denials (user self-serves via Edit Permissions).
+- Production status: deployer RCA = stale inactive EMERGENT_LLM_KEY in prod Secrets (user must update value in Deployment Panel Secrets tab) + 512Mi tier too small for XTTS voice (needs Resources upgrade). Footer disclaimer text updated in ChatDemo.
+
+## Oct 2026 local run — see LOCAL_RUN.md
+- Enforced image_generation on /generate/image and video_generation on /generate/video (were unchecked: any valid key passed). Verified matrix e2e (create→edit PATCH→PERMISSION_MATRIX→CANONICAL_DEFAULTS→key test→legacy alias image_video_generation).
+- apps/gateway Node gateway broken on this branch (API mismatch with packages/luchii-api-keys); not running.
+- Removed hardcoded admin password fallback: backend/auth.py raises RuntimeError at import if ADMIN_EMAIL/ADMIN_PASSWORD missing or empty.
+
+## 2026-10-12 — Re-import UPDATE-MAIN + nav cleanup
+- /app working tree replaced with branch UPDATE-MAIN (Luchii site + Frasberg Creator at /create, /creator, /studio) via git archive (no git writes). backend/.env + frontend/.env recreated (DB_NAME=luchii, models in /opt/luchii-models because /app volume is 9.8G). Admin seeded from ADMIN_EMAIL/ADMIN_PASSWORD. Smoke test iteration_61: 100%.
+- Navbar top links now: Sign in/Sign out, AI Models, Luchii Code, Games, FrasbergOS, Explore. Explore > Build and Footer: Website/App/Game Builder merged into one "Builder" -> /builder. GitHub sign-in button removed from /auth.

@@ -1,4 +1,4 @@
-export function buildRoleFunction(character: any) {
+export function buildRoleFunction(character) {
   return {
     characterFunction: character.formation,
     expressionFunction: character.expression,

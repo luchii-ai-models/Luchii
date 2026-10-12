@@ -19,6 +19,7 @@ CREATE TABLE api_keys (
         )
     ),
 
+    -- e.g. ["chat.generate","image.generate","memory.read","memory.write","agents.execute"]
     permissions JSONB NOT NULL,
 
     quota_tokens BIGINT DEFAULT 0,

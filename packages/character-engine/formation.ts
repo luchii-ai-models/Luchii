@@ -1,4 +1,4 @@
-export function buildCharacterFormation(persona: any) {
+export function buildCharacterFormation(persona) {
   return {
     personaFormation: persona.model,
     projectionFormation: persona.projection,

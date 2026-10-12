@@ -1,4 +1,4 @@
-export function buildMotion(task: any) {
+export function buildMotion(task) {
   return {
     taskMotion: task.action,
     dynamicsMotion: task.dynamics,

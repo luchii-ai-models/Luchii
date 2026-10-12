@@ -5,27 +5,25 @@ import {
   createWorldGraphRecord,
 } from './full-game-stack-schema';
 
-export type MaybePromise<T> = T | Promise<T>;
-
 export interface WorldGraphService {
-  createWorld(input: WorldGraphCreateInput): MaybePromise<WorldGraphRecord>;
-  getWorld(id: string): MaybePromise<WorldGraphRecord | undefined>;
-  listWorlds(): MaybePromise<WorldGraphRecord[]>;
+  createWorld(input: WorldGraphCreateInput): WorldGraphRecord;
+  getWorld(id: string): WorldGraphRecord | undefined;
+  listWorlds(): WorldGraphRecord[];
   updateWorld(
     id: string,
     updates: Partial<WorldGraphCreateInput>,
-  ): MaybePromise<WorldGraphRecord>;
-  deleteWorld(id: string): MaybePromise<WorldGraphRecord | undefined>;
-  materializeScene(worldId: string): MaybePromise<{
+  ): WorldGraphRecord;
+  deleteWorld(id: string): WorldGraphRecord | undefined;
+  materializeScene(worldId: string): {
     worldId: string;
     rootId: string;
     nodes: WorldGraphRecord['nodes'];
     materializedAt: string;
-  }>;
+  };
   toSchema(
     worldId: string,
     input?: Partial<FullGameStackSchema>,
-  ): MaybePromise<FullGameStackSchema>;
+  ): FullGameStackSchema;
 }
 
 export class InMemoryWorldGraphService implements WorldGraphService {

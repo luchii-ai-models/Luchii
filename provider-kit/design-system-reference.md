@@ -1,7 +1,7 @@
-# FrasbergAI Design System & Brand Identity (Reference)
+# Frasberg Design System & Brand Identity (Reference)
 
 NOTE: The live Frasberg site uses its own established Luchii design language. This file archives the
-FrasbergAI corporate design tokens supplied by the platform team for partner/marketing surfaces.
+Frasberg corporate design tokens supplied by the platform team for partner/marketing surfaces.
 
 ## Design Tokens
 ```css

@@ -1,16 +1,16 @@
-# OpenRouter Listing Submission — FrasbergAI (Luchii model family)
+# OpenRouter Listing Submission — Frasberg (Luchii model family)
 
 Send to: https://openrouter.ai/docs/providers (provider intake) or support@openrouter.ai
-Subject: Provider listing request — FrasbergAI (Luchii models, OpenAI-compatible)
+Subject: Provider listing request — Frasberg (Luchii models, OpenAI-compatible)
 
 ---
 
 ## 1. Provider identity
 | Field | Value |
 |---|---|
-| Provider name | FrasbergAI |
-| Provider slug | `frasbergai` |
-| Operator / legal entity | FRASBERG INC |
+| Provider name | Frasberg |
+| Provider slug | `frasberg` |
+| Operator / legal entity | Frasberg, Inc. |
 | Website | https://frasberg.com |
 | Documentation | https://docs.frasberg.com |
 | Contact email | admin@frasberg.com |
@@ -27,16 +27,16 @@ Subject: Provider listing request — FrasbergAI (Luchii models, OpenAI-compatib
 | Rate limits | 60 req/min per key (higher on request) |
 
 ## 3. Verification / discovery documents (live)
-- https://api.frasberg.com/.well-known/frasbergai-provider.json
+- https://api.frasberg.com/.well-known/frasberg-provider.json
 - https://api.frasberg.com/.well-known/provider-manifest.json
 - https://api.frasberg.com/.well-known/openapi.yaml
 
 ## 4. Models to list
 | Model ID | Type | Context | Notes |
 |---|---|---|---|
-| `frasbergai/luchii-6-plus` | chat | 32K | Flagship reasoning tier |
-| `frasbergai/luchii-6-mini` | chat | 16K | Fast, low-latency tier |
-| `frasbergai/luchii-6-embed` | embedding | 1K input | 384 dimensions |
+| `frasberg/luchii-6-plus` | chat | 32K | Flagship reasoning tier |
+| `frasberg/luchii-6-mini` | chat | 16K | Fast, low-latency tier |
+| `frasberg/luchii-6-embed` | embedding | 1K input | 384 dimensions |
 
 ## 5. Pricing (per 1M tokens, USD — half the market rate)
 | Model | Input | Output |

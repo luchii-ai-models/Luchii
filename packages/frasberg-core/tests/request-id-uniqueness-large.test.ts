@@ -1,12 +1,14 @@
-import { describe, expect, test } from 'vitest';
-import { generateRequestId } from '../src/request-id';
+import { describe, test, expect } from "vitest";
+import { generateRequestId } from "../request-id";
 
-describe('request id uniqueness', () => {
-  test('generates unique ids across 10,000 requests', () => {
+describe("request id uniqueness at scale", () => {
+  test("10000 generated ids are unique", () => {
     const ids = new Set<string>();
-    for (let i = 0; i < 10_000; i += 1) {
+
+    for (let i = 0; i < 10000; i++) {
       ids.add(generateRequestId());
     }
-    expect(ids.size).toBe(10_000);
+
+    expect(ids.size).toBe(10000);
   });
 });

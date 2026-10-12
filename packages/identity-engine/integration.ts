@@ -1,6 +1,6 @@
-export function buildIntegration(self: any) {
+export function buildIntegration(self) {
   return {
-    harmonyIntegration: 'stable',
-    checksum: Math.random().toString(36).slice(2),
+    harmonyIntegration: "stable",
+    checksum: Math.random().toString(36).slice(2)
   };
 }

@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app';
-import type { FrasbergGateway } from '@frasberg/shared';
+import { FrasbergClient, FrasbergGateway } from '@frasberg/shared';
 
 const apiKeys = [
   {
@@ -407,6 +407,57 @@ describe('gateway auth and routing', () => {
     expect(voice).toHaveBeenCalledWith({ prompt: 'welcome message' });
   });
 
+  it('verifies Supabase sessions and forwards them for image generation and polling', async () => {
+    const accessToken = 'verified-supabase-session';
+    const userId = '4b682ba7-921a-4d02-aad8-3b210a7561af';
+    const imageForUser = vi.fn(async () => ({
+      job_id: 'image-user-1',
+      state: 'queued',
+    }));
+    const job = vi.fn(async () => ({ id: 'image-user-1', state: 'completed' }));
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe('https://supabase.test/auth/v1/user');
+      return new Response(JSON.stringify({ id: userId }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const app = buildApp({
+      apiKeys: [],
+      fetchImpl: fetchImpl as typeof fetch,
+      supabaseUrl: 'https://supabase.test',
+      supabaseAnonKey: 'supabase-anon-key',
+      frasbergGateway: {
+        imageForUser,
+        job,
+      } as unknown as FrasbergGateway,
+    });
+
+    const image = await app.inject({
+      method: 'POST',
+      url: '/api/image',
+      headers: { authorization: `Bearer ${accessToken}` },
+      payload: { prompt: 'a track at sunset' },
+    });
+    const polled = await app.inject({
+      method: 'GET',
+      url: '/api/jobs/image-user-1?domain=image',
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+
+    expect(image.statusCode).toBe(200);
+    expect(imageForUser).toHaveBeenCalledWith(
+      { prompt: 'a track at sunset' },
+      accessToken,
+    );
+    expect(polled.statusCode).toBe(200);
+    expect(job).toHaveBeenCalledWith('image-user-1', {
+      domain: 'image',
+      accessToken,
+    });
+    await app.close();
+  });
+
   it('applies a domain-specific burst quota by tenant', async () => {
     const music = vi.fn(async () => ({ job_id: 'job-1', state: 'queued' }));
     const frasbergGateway = {
@@ -478,6 +529,67 @@ describe('gateway auth and routing', () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.json().status.status).toBe('ok');
+  });
+
+  it('serves provider status only to governance administrators without submitting jobs', async () => {
+    const providerFetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get('authorization');
+      return new Response('{}', { status: auth ? 200 : 405 });
+    });
+    const app = buildApp({
+      apiKeys: [
+        {
+          id: 'governance-admin',
+          secret: 'governance-secret',
+          permissions: ['governance:admin'],
+        },
+        { id: 'plain', secret: 'plain-secret', permissions: ['chat'] },
+      ],
+      frasbergGateway: new FrasbergGateway(
+        new FrasbergClient({
+          fetchImpl: providerFetch as unknown as typeof fetch,
+        }),
+        { FRASBERG_TTS_KEY: 'tts-secret-value' },
+      ),
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+    });
+
+    expect(
+      (await app.inject({ method: 'GET', url: '/v1/providers/status' }))
+        .statusCode,
+    ).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: 'GET',
+          url: '/v1/providers/status',
+          headers: { 'x-api-key': 'plain-secret' },
+        })
+      ).statusCode,
+    ).toBe(403);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/providers/status',
+      headers: { 'x-api-key': 'governance-secret' },
+    });
+    expect(response.statusCode).toBe(200);
+    const tts = response
+      .json()
+      .providers.find((p: { domain: string }) => p.domain === 'tts');
+    expect(tts).toMatchObject({
+      keyConfigured: true,
+      keyAccepted: true,
+      reachable: true,
+    });
+    const music = response
+      .json()
+      .providers.find((p: { domain: string }) => p.domain === 'music');
+    expect(music.keyConfigured).toBe(false);
+    expect(response.body).not.toContain('tts-secret-value');
+    for (const [, init] of providerFetch.mock.calls) {
+      expect(init?.method).toBe('GET');
+    }
   });
 
   it('accepts the dedicated governance admin key for governance routes only', async () => {

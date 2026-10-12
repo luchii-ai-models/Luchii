@@ -1,6 +1,6 @@
 import { evolvePattern } from "../../packages/pattern-engine/evolve";
 
-export async function executePattern(pattern: any, input: any) {
+export async function executePattern(pattern, input) {
   const evolution = evolvePattern(pattern);
 
   return {

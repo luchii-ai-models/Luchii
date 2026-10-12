@@ -1,6 +1,4 @@
-import type { Func } from "./function-model";
-
-export function buildFunctionEnvelope(func: Func) {
+export function buildFunctionEnvelope(func) {
   return {
     functionId: func.functionId,
     execution: func.execution,

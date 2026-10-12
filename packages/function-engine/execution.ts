@@ -1,4 +1,4 @@
-export function buildExecution(role: any) {
+export function buildExecution(role) {
   return {
     roleExecution: role.function,
     dynamicsExecution: role.dynamics,

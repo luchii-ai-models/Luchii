@@ -3,22 +3,15 @@ import { useFrasbergClient } from "../hooks/useFrasbergClient";
 
 export default function PatternViewer() {
   const client = useFrasbergClient();
-  const [result, setResult] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const [result, setResult] = useState(null);
 
   useEffect(() => {
     client.request("/v1/pattern", {
       input: "hello pattern"
-    }).then((res: any) => {
+    }).then(res => {
       setResult(res.payload);
-      setLoading(false);
-    }).catch((err: any) => {
-      console.error("Pattern error:", err);
-      setLoading(false);
     });
-  }, [client]);
-
-  if (loading) return <div>Loading Pattern...</div>;
+  }, []);
 
   return (
     <div>

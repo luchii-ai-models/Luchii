@@ -1,6 +1,4 @@
-import type { Character } from "./character-model";
-
-export function buildCharacterEnvelope(character: Character) {
+export function buildCharacterEnvelope(character) {
   return {
     characterId: character.characterId,
     formation: character.formation,

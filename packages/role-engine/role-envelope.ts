@@ -1,6 +1,4 @@
-import type { Role } from "./role-model";
-
-export function buildRoleEnvelope(role: Role) {
+export function buildRoleEnvelope(role) {
   return {
     roleId: role.roleId,
     function: role.function,

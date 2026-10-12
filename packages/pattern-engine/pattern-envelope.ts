@@ -1,16 +1,9 @@
-import { Pattern } from './pattern-model';
-
-export function buildPatternEnvelope(pattern: Pattern) {
-  const envelope = {
+export function buildPatternEnvelope(pattern) {
+  return {
     patternId: pattern.patternId,
     structure: pattern.structure,
+    dynamics: pattern.dynamics,
     patternGraph: pattern.patternGraph,
-    timestamp: Date.now(),
+    timestamp: Date.now()
   };
-
-  if (pattern.dynamics !== undefined) {
-    return { ...envelope, dynamics: pattern.dynamics };
-  }
-
-  return { ...envelope, formation: pattern.formation };
 }

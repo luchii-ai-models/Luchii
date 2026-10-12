@@ -1,4 +1,4 @@
-# FrasbergAI Global Partner Program
+# Frasberg Global Partner Program
 Version 1.0 — August 2026
 
 ## 1. Partner Types
@@ -21,11 +21,11 @@ GDPR · CCPA · SOC2 (in progress) · HIPAA (optional)
 4. Branding approval
 
 ## 6. Partner Badge
-"FrasbergAI Verified Partner"
+"Frasberg Verified Partner"
 
 ---
 
-# FrasbergAI Pricing Sheet
+# Frasberg Pricing Sheet
 Version 1.0 — August 2026
 
 ## 1. Chat Models

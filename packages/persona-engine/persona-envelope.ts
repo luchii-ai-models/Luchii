@@ -1,6 +1,4 @@
-import type { Persona } from "./persona-model";
-
-export function buildPersonaEnvelope(persona: Persona) {
+export function buildPersonaEnvelope(persona) {
   return {
     personaId: persona.personaId,
     model: persona.model,

@@ -3,22 +3,15 @@ import { useFrasbergClient } from "../hooks/useFrasbergClient";
 
 export default function StructureViewer() {
   const client = useFrasbergClient();
-  const [result, setResult] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const [result, setResult] = useState(null);
 
   useEffect(() => {
     client.request("/v1/structure", {
       input: "hello structure"
-    }).then((res: any) => {
+    }).then(res => {
       setResult(res.payload);
-      setLoading(false);
-    }).catch((err: any) => {
-      console.error("Structure error:", err);
-      setLoading(false);
     });
-  }, [client]);
-
-  if (loading) return <div>Loading Structure...</div>;
+  }, []);
 
   return (
     <div>

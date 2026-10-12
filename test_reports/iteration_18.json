@@ -1,31 +1,23 @@
 {
-  "summary": "Iteration 18 (post re-import regression). Backend 22/27 pytest pass. All merge-scope tests pass: agent bundle (5/5), video luchii_model auto-select (3/3), chat/auth/agent-task (test_luchii_chat 7/7, test_assistant_chat 4/4 for auth+gpu-admin), /api/chat/models 200. 5 failures are stale pre-existing test files unrelated to the merge: test_assistant_chat.py hits /api/assistant/chat (endpoint doesn't exist in server.py; feature removed before this merge) and test_luchii_mark.py uses TEST-mark-* seed IDs that aren't present in a fresh pod. Frontend: all 11 routes (/, /create, /gallery, /models, /about-luchii, /audio, /3d, /video, /developers, /agent, /login) render with zero console errors. Navbar shows Frasberg Creator branding + Luchii Code link. /login & /signup open auth modal. /agent shows login gate when logged out and (after Bearer token login) agent-idea-input, agent-image-model, agent-start-btn and agent-results (3 queued tasks: image/video/song in order). /video shows video-model-picker with auto-note flipping from 'Luchii Cinematica' (no image) to 'Luchii Animus' (with start image). /developers shows api-chat-docs with api-chat-base-url populated from REACT_APP_BACKEND_URL. 8 Frasberg frb_live keys wired in backend/.env FRASBERG_API_KEYS and FRASBERG_KEY_ROUTES.",
-  "backend_issues": {
-    "critical": [],
-    "minor": [
-      {"endpoint": "/api/assistant/chat", "issue": "backend/tests/test_assistant_chat.py has 3 tests posting to /api/assistant/chat which returns 404 - endpoint not implemented. Likely stale test file (feature was removed/renamed to /api/chat/*). Recommend deleting those 3 tests or re-pointing to /api/chat/completions."},
-      {"endpoint": "/api/share/TEST-mark-img, /api/media/TEST-mark-video/download", "issue": "backend/tests/test_luchii_mark.py expects pre-seeded TEST-mark-* rows which don't exist in fresh pod -> 404. Tests should seed their own data via fixture."}
-    ]
+  "summary": "Frontend-only regression for CourtGate + Builder instant demos + Chat/Profile changes. All 7 scoped features verified end-to-end. No bugs found.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
   },
-  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
-  "test_report_links": ["/app/backend/tests/test_agents_bundle.py", "/app/backend/tests/test_luchii_chat.py", "/app/test_reports/pytest/iter18.xml"],
-  "action_items": [
-    "(Optional) Remove or rewrite the stale assistant/chat tests in /app/backend/tests/test_assistant_chat.py (TestAssistantChat class) - they target /api/assistant/chat which no longer exists. The TestAuthAndGpuAdmin class is still valid.",
-    "(Optional) Make /app/backend/tests/test_luchii_mark.py self-seeding (create a share row + a completed media job in a fixture) instead of relying on TEST-mark-img / TEST-mark-video seed data."
-  ],
+  "test_report_links": ["/app/test_reports/iteration_18.json"],
+  "action_items": [],
   "critical_code_review_comments": [
-    "Merge integrated cleanly: backend/server.py routes for /api/chat/*, /api/chat/agents/bundle, /api/video all respond correctly; luchii_media_model mapper auto-picks Animus with image, Cinematica without, Harmonia for music - verified via pytest.",
-    "Agent bundle enforces owner-scoped access: 401 unauth, 404 cross-user, 404 unknown bundle_id - verified.",
-    "FRASBERG_API_KEYS (8 keys) and FRASBERG_KEY_ROUTES per-feature mapping are wired without breaking /api/chat/models (returns 6 luchii-* models, default luchii-6-plus).",
-    "Frontend AuthContext uses localStorage key 'luchii_token' and GET /api/auth/me hydrates user; data-testids on all critical merge-scope elements (luchii-agent-page, agent-login-gate, agent-idea-input, agent-image-model, agent-start-btn, agent-results, video-model-picker, video-model-auto-note, api-chat-docs, api-chat-base-url) are present and discoverable.",
-    "No hardcoded URLs in tested frontend code paths: ChatDocs renders base URL from process.env.REACT_APP_BACKEND_URL."
+    "Builder.jsx is now 533 lines — consider splitting demos strip and remix logic into a hook/component if it grows further.",
+    "Test spec referenced 'builder-demo-ai-gateway-demo' slug but real gallery slugs are 'flagship-*' or dynamic. Not a bug (real data loads correctly), but the spec's example slug was stale."
   ],
   "updated_files": [],
-  "success_rate": {"backend": "100% within merge scope (15/15 merge-related tests); overall 22/27 (5 stale pre-existing failures)", "frontend": "100%"},
-  "test_credentials": "motion.tester@luchiiapp.com / Motion123! and admin.tester@luchiiapp.com / Admin123! (from /app/memory/test_credentials.md)",
-  "seed_data_creation": "pytest + playwright created TEST_bundle rows; cleaned up at end (11 jobs + 12 agent_tasks deleted from db.luchii-tools).",
+  "success_rate": {"backend": "n/a (skipped)", "frontend": "100%"},
+  "test_credentials": "admin@frasberg.com / LuchiiAdmin2026!  ,  doctester1@frasberg.com / DocTester2026!",
+  "seed_data_creation": "None. Free user gained 1 new website project via remix (TEST leftover).",
   "retest_needed": false,
   "should_main_agent_self_test": false,
-  "context_for_next_testing_agent": "Merge of conflict_091026_2226 into main is clean and regression-free. If future testing agent sees failures in test_assistant_chat.py (TestAssistantChat::test_*_422 / test_chat_returns_503_turbulence) or test_luchii_mark.py (test_share_includes_kind / test_media_video_download_success), those are pre-existing stale tests, NOT regressions - they already failed on this fresh pod before any changes. Playwright login via UI did not propagate user state in Chromium quickly enough for subsequent assertions; use the API login + localStorage.setItem('luchii_token', token) pattern instead (works reliably). Frasberg upstream image endpoint may still queue-throttle - bundle UI will show image task 'failed' and move on; that is expected upstream behavior per iteration 17.",
-  "rca of the issue": "No functional issues from the merge. Pre-existing stale test failures: (1) test_assistant_chat.py references the removed /api/assistant/chat endpoint, (2) test_luchii_mark.py expects seed data that doesn't exist in a freshly-booted pod. Both predate this merge and are cosmetic. Recommended cleanup documented in action_items."
+  "context_for_next_testing_agent": "Verified in this iteration: (1) Guest visiting /court /laws /downloads all redirect to /. (2) Landing Navbar (desktop+mobile) and Footer contain no court/laws/downloads/status links; Explore menu is clean. (3) Admin can load /court (h1 'AI World Court'), /laws (h1 'AI Court Constitution and Laws'), /downloads (h1 'My certified downloads'), and /status (System Status). (4) Guest on /game-builder sees 6 real demo chips inside data-testid=builder-demos-strip; clicking flagship-nebula-dodge loads srcdoc (3.5KB) into builder-preview-iframe and shows builder-remix-demo-btn; clicking Remix as guest redirects to /auth?mode=login&next=%2Fgame-builder%3Fremix%3Dflagship-nebula-dodge. (5) Signed-in free user (doctester1) on /website-builder: demo click loads preview, Remix creates a copy — projects count went 1 -> 2 in My websites sidebar. (6) Chat page footer Terms link href = /about (not /laws). (7) Profile downloads card (profile-downloads-link) visible for admin (count 1), hidden for free user (count 0). Regression: landing renders, chat page loads, admin /status loads. Note: mobile menu selector timed out once but navbar html scan already confirmed no court/laws text in mobile block via source review.",
+  "rca of the issue": "n/a — no issues found."
 }

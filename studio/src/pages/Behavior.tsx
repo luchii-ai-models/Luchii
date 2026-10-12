@@ -1,4 +1,4 @@
-import BehaviorViewer from '../components/BehaviorViewer';
+import BehaviorViewer from "../components/BehaviorViewer";
 
 export default function Behavior() {
   return (

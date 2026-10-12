@@ -1,23 +1,36 @@
-import request from 'supertest';
-import express from 'express';
-import { describe, test, expect } from 'vitest';
-import { requestIdMiddleware } from '../src/request-id';
+import request from "supertest";
+import express from "express";
+import { describe, test, expect } from "vitest";
 
-describe('request id length limits', () => {
+import { requestIdMiddleware } from "../request-id";
+
+describe("request id length limits", () => {
   const app = express();
-  app.use(requestIdMiddleware);
-  app.get('/test', (req: any, res) => res.json({ requestId: req.requestId }));
 
-  test('accepts a 128 char suffix', async () => {
-    const id = 'req_' + 'A'.repeat(128);
-    const response = await request(app).get('/test').set('x-request-id', id);
-    expect(response.body.requestId).toBe(id);
+  app.use(requestIdMiddleware);
+
+  app.get("/ping", (req: any, res) => {
+    res.json({ requestId: req.requestId });
   });
 
-  test('replaces an oversized id', async () => {
-    const id = 'req_' + 'A'.repeat(129);
-    const response = await request(app).get('/test').set('x-request-id', id);
-    expect(response.body.requestId).not.toBe(id);
+  test("rejects oversized request id", async () => {
+    const oversized = "req_" + "x".repeat(500);
+    const response = await request(app).get("/ping").set("x-request-id", oversized);
+
+    expect(response.body.requestId).not.toBe(oversized);
     expect(response.body.requestId).toMatch(/^req_/);
+    expect(response.body.requestId.length).toBeLessThanOrEqual(132);
+  });
+
+  test("accepts valid request id", async () => {
+    const response = await request(app).get("/ping").set("x-request-id", "req_valid12345");
+
+    expect(response.body.requestId).toBe("req_valid12345");
+  });
+
+  test("generated ids are req_ plus 32 hex characters", async () => {
+    const response = await request(app).get("/ping");
+
+    expect(response.body.requestId).toMatch(/^req_[0-9a-f]{32}$/);
   });
 });

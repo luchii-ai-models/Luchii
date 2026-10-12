@@ -1,16 +1,19 @@
-import { describe, expect, test } from 'vitest';
-import { ErrorCode } from '../src/error-codes';
+import { describe, test, expect } from "vitest";
+import { ErrorCode } from "../error-codes";
+import { ERROR_CATALOG } from "../../luchii-api-keys/api-key";
 
-describe('error code integrity', () => {
-  test('contains no duplicate values', () => {
-    const values = Object.values(ErrorCode);
-    expect(new Set(values).size).toBe(values.length);
+describe("error code integrity", () => {
+  test("every key equals its value", () => {
+    for (const [key, value] of Object.entries(ErrorCode)) {
+      expect(value).toBe(key);
+    }
   });
 
-  test('all values are uppercase and non-empty', () => {
-    for (const value of Object.values(ErrorCode)) {
-      expect(value).toBe(value.toUpperCase());
-      expect(value.length).toBeGreaterThan(0);
+  test("every code has a status and message in the catalog", () => {
+    for (const code of Object.values(ErrorCode)) {
+      expect(ERROR_CATALOG[code]).toBeDefined();
+      expect(ERROR_CATALOG[code].message.length).toBeGreaterThan(0);
+      expect(ERROR_CATALOG[code].status).toBeGreaterThanOrEqual(400);
     }
   });
 });

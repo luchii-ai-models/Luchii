@@ -1,7 +1,7 @@
-export function buildFormation(pattern: any) {
+export function buildFormation(pattern) {
   return {
     patternFormation: pattern.structure,
     dynamicsFormation: pattern.dynamics,
-    timestamp: Date.now(),
+    timestamp: Date.now()
   };
 }

@@ -1,8 +1,0 @@
-{
-  "secrets": [
-    {
-      "name": "GOVERNANCE_ADMIN_KEY",
-      "valueFrom": "arn:aws:secretsmanager:us-west-2:<ACCOUNT_ID>:secret:frasberg/runtime/governance-admin"
-    }
-  ]
-}

@@ -1,6 +1,4 @@
-import type { Identity } from "./identity-model";
-
-export function buildIdentityEnvelope(identity: Identity) {
+export function buildIdentityEnvelope(identity) {
   return {
     identityId: identity.identityId,
     self: identity.self,

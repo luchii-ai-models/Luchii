@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import Fastify, {
@@ -7,6 +7,7 @@ import Fastify, {
   FastifyRequest,
 } from 'fastify';
 import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
 import {
   ApiKeyRecord,
   AuthContext,
@@ -26,6 +27,20 @@ import {
   isEngineAwareness,
   type EngineDomain,
 } from '../../engine-flow/dist/engine-flow';
+import { registerEmergentRoutes } from './emergent-routes';
+import { registerCreatorRoutes } from './creator-routes';
+import { RaceStateRepository } from './race-state-repository';
+import { RuntimeAssetStore } from './runtime-asset-store';
+import { DynamoRuntimeStateStore } from './runtime-state-store';
+import {
+  LUCHII_KEY_ID_PREFIX,
+  RuntimeStoreApiKeyStore,
+  authenticateLuchiiKey,
+  registerApiKeyRoutes,
+  requiredScopeFor,
+} from './api-key-routes';
+import { buildError } from '@frasberg/core';
+import { registerReleaseRoutes } from './release-routes';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -75,6 +90,9 @@ export interface GatewayOptions {
   rateLimitMax?: number;
   rateLimitWindowMs?: number;
   apiQuotas?: Partial<Record<FrasbergDomain, ApiQuota>>;
+  runtimeStateStore?: DynamoRuntimeStateStore;
+  runtimeAssetStore?: RuntimeAssetStore;
+  studioRoot?: string;
 }
 
 export function buildApp(options: GatewayOptions = {}): FastifyInstance {
@@ -95,6 +113,12 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
   };
   const governanceConfig = loadGovernanceConfig();
   const existentialControlPlane = new ExistentialControlPlane();
+  const runtimeStateStore =
+    options.runtimeStateStore ?? new DynamoRuntimeStateStore();
+  const runtimeAssetStore =
+    options.runtimeAssetStore ?? new RuntimeAssetStore();
+  const raceStates = new RaceStateRepository(runtimeStateStore);
+  const luchiiKeyStore = new RuntimeStoreApiKeyStore(runtimeStateStore);
 
   const app = Fastify({
     logger: {
@@ -122,12 +146,16 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
     }
 
     const requiresSupabaseUser =
+      routePath === '/api/image' ||
+      routePath.startsWith('/api/jobs/') ||
       routePath.startsWith('/v1/identity/') ||
       routePath.startsWith('/v1/continuity/') ||
       routePath === '/v1/diagnostics' ||
       routePath.startsWith('/v1/diagnostics/') ||
       routePath === '/v1/policy' ||
-      routePath.startsWith('/v1/policy/');
+      routePath.startsWith('/v1/policy/') ||
+      routePath === '/v1/api-keys' ||
+      routePath.startsWith('/v1/api-keys/');
     if (requiresSupabaseUser) {
       const limited = rateLimitRequest(
         request,
@@ -146,7 +174,11 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
       typeof request.headers.authorization === 'string'
     ) {
       const accessToken = readBearerToken(request.headers.authorization);
-      if (accessToken) {
+      if (
+        accessToken &&
+        !accessToken.startsWith('luc_live_') &&
+        !apiKeys.some((candidate) => candidate.secret === accessToken)
+      ) {
         let userId: string | undefined;
         try {
           userId = await resolveSupabaseUserId(
@@ -191,6 +223,10 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
         permissions: ['governance:admin'],
       };
       return;
+    }
+
+    if (await authenticateLuchiiKey(request, reply, luchiiKeyStore)) {
+      return reply.sent ? reply : undefined;
     }
 
     const { context, error } = authenticateRequest(request.headers, apiKeys);
@@ -978,17 +1014,23 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
       return limited;
     }
 
-    const denied = requirePermission(request, reply, 'jobs:read');
-    if (denied) {
-      return denied;
-    }
-
     const params = request.params as { id: string };
     return proxyRequest(
       reply,
       fetchImpl,
       `${engineServiceUrl}/v1/jobs/${params.id}`,
     );
+  });
+
+  app.get('/v1/providers/status', async (request, reply) => {
+    const denied = requirePermission(request, reply, 'governance:admin');
+    if (denied) {
+      return denied;
+    }
+    return {
+      checkedAt: new Date().toISOString(),
+      providers: await frasbergGateway.diagnose(),
+    };
   });
 
   app.post('/api/music', frasbergRoute('media', 'music'));
@@ -999,6 +1041,39 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
   app.post('/api/tts', frasbergRoute('tts', 'tts'));
   app.post('/api/audio', frasbergRoute('audio', 'audio'));
   app.get('/api/jobs/:id', frasbergJobRoute());
+  registerEmergentRoutes(app, {
+    gateway: frasbergGateway,
+    requirePermission,
+    store: runtimeStateStore,
+    raceStates,
+    assets: runtimeAssetStore,
+  });
+  registerCreatorRoutes(app, {
+    requirePermission,
+    store: runtimeStateStore,
+    raceStates,
+    assets: runtimeAssetStore,
+  });
+  registerReleaseRoutes(app, { requirePermission, fetchImpl });
+  registerApiKeyRoutes(app, luchiiKeyStore);
+
+  const studioRoot = options.studioRoot ?? resolve(__dirname, 'public');
+  if (existsSync(resolve(studioRoot, 'index.html'))) {
+    void app.register(fastifyStatic, {
+      root: studioRoot,
+      prefix: '/',
+      wildcard: false,
+    });
+    app.setNotFoundHandler((request, reply) => {
+      if (
+        request.method === 'GET' &&
+        request.headers.accept?.includes('text/html')
+      ) {
+        return reply.type('text/html').sendFile('index.html');
+      }
+      return reply.code(404).send({ error: 'Not Found' });
+    });
+  }
 
   app.post('/v1/music/generations', frasbergRoute('media', 'music'));
   app.post('/v1/image', frasbergRoute('media', 'image'));
@@ -1023,7 +1098,10 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
         return limited;
       }
 
-      const denied = requirePermission(request, reply, permission);
+      const denied =
+        domain === 'image' && request.supabaseAccessToken
+          ? undefined
+          : requirePermission(request, reply, permission);
       if (denied) {
         return denied;
       }
@@ -1037,7 +1115,11 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
               'Speech-to-text requests require multipart/form-data with an audio file.',
           });
         }
-        const response = await routeFrasberg(domain, payload);
+        const response = await routeFrasberg(
+          domain,
+          payload,
+          request.supabaseAccessToken,
+        );
         return reply.code(200).send(response);
       } catch (error) {
         return reply.code(502).send({ error: (error as Error).message });
@@ -1058,18 +1140,22 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
         return limited;
       }
 
-      const denied = requirePermission(request, reply, 'jobs:read');
+      const params = request.params as { id: string };
+      const query = request.query as { domain?: string };
+      const parsedDomain = parseDomain(query.domain);
+      const denied = request.supabaseAccessToken
+        ? undefined
+        : requirePermission(request, reply, 'jobs:read');
       if (denied) {
         return denied;
       }
 
-      const params = request.params as { id: string };
-      const query = request.query as { domain?: string };
-      const parsedDomain = parseDomain(query.domain);
-
       try {
         const response = await frasbergGateway.job(params.id, {
           domain: parsedDomain,
+          ...(request.supabaseAccessToken
+            ? { accessToken: request.supabaseAccessToken }
+            : {}),
         });
         return reply.code(200).send(response);
       } catch (error) {
@@ -1078,14 +1164,20 @@ export function buildApp(options: GatewayOptions = {}): FastifyInstance {
     };
   }
 
-  function routeFrasberg(domain: FrasbergDomain, payload: unknown) {
+  function routeFrasberg(
+    domain: FrasbergDomain,
+    payload: unknown,
+    accessToken?: string,
+  ) {
     switch (domain) {
       case 'music':
         return frasbergGateway.music(payload);
       case 'video':
         return frasbergGateway.video(payload);
       case 'image':
-        return frasbergGateway.image(payload);
+        return accessToken
+          ? frasbergGateway.imageForUser(payload, accessToken)
+          : frasbergGateway.image(payload);
       case 'voice':
         return frasbergGateway.voice(payload);
       case 'stt':
@@ -1151,6 +1243,19 @@ function requirePermission(
   }
 
   if (!hasPermission(request.authContext, permission)) {
+    if (request.authContext.keyId?.startsWith(LUCHII_KEY_ID_PREFIX)) {
+      return reply
+        .code(403)
+        .send(
+          buildError(
+            request.id,
+            403,
+            'PERMISSION_DENIED',
+            'Permission denied.',
+            { required: requiredScopeFor(permission) ?? permission },
+          ).body,
+        );
+    }
     return reply.code(403).send(missingPermissionResponse());
   }
 

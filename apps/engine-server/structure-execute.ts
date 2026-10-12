@@ -1,6 +1,6 @@
 import { evolveStructure } from "../../packages/structure-engine/evolve";
 
-export async function executeStructure(structure: any, input: any) {
+export async function executeStructure(structure, input) {
   const evolution = evolveStructure(structure);
 
   return {

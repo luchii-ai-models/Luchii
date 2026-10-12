@@ -1,23 +1,28 @@
 {
-  "summary": "Iter61 — Frasberg Engine Runtime (44 TS engines + 6 systems) wired into backend & frontend. Backend: 17/17 pytest green sequentially (parallel xdist shows one race between TestPolicyGovernance.test_policy_blocks_action and TestExecute.test_continuity_persist_and_delete because both use owner=admin:...+engine=mind; tests pass fine in sequence — isolation nit, not a product bug). Covered: /api/engines/runtime auth (anon 401, non-admin 403, admin 200, platform-key 200, count=44 total=50 systems=6); POST /engines/{mind,logic}/execute returns 'Mind processed: hello' / 'Logic processed: abc' with requestId+coverage; continuity 'w-test-*' persists runs>=1 and DELETE returns {deleted}; POST /engines/chain with X-Frasberg-Key works; POST /engines/flow {domain:'structure'} returns exactly 10 stages identity..structure with awareness_valid=true; unknown domain 404; PUT /engines/policy {actions:['execute:mind']} then execute mind → 403 (reset to [] restores 200); PUT /engines/governance scope=global as admin blocks platform-key execute 403; platform-key PUT scope=global → 403 'Only admins can set global governance'; diagnostics counters, identity nodes, /engines/rules 401 anon/200 admin. Frontend: /engines → 301 to /status (SPA Navigate replace), Footer has no footer-engines-link, /models has no engine-runtime, /developers (ApiDocs gate) has no engines link; /status as admin shows engine-runtime-grid, engine-open-mind opens engine-run-panel, run yields engine-run-request-id with 'Enforced · request <uuid> · continuity w-ui-test'; engine-chain-add-logic + engine-chain-run present; engine-systems panel with engine-flow-run (fills engine-flow-output), engine-policy-input/save, engine-gov-owner-input, engine-gov-global-input, engine-diag-engine, engine-identity all mount. Regression: /, /create, title='Frasberg Creator | …' OK. Policy + governance were reset to empty after all tests; continuity 'w-ui-test' was deleted.",
-  "backend_issues": { "critical": [], "minor": [] },
-  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "summary": "Smoke/regression after UPDATE-MAIN branch import from luchii-ai-models/Luchii. Backend: 10/10 pytest tests pass in /app/backend/tests/test_iter61_import_smoke.py — API root ('Luchii API online', publisher Frasberg), admin login (admin@frasbergai.com/Federation20261+, role=admin), /api/auth/me after cookie-login, new-user register+login, documented test user login (test@luchii.ai/Test1234! — auto-registered if missing), creator app mount verified via /api/creator/gpu/v1/engines (200), /api/creator/auth/me (401 unauth / 200 authed), public endpoints /api/public/showcase + /api/public/models (<500), and chat endpoint. Frontend: homepage renders the Luchii/Frasberg site with hero 'Intelligence that truly gets you.' and full nav (Sign In, AI Models, Realms, API, Website Builder, Game Builder, Games, FrasbergOS) — visually matches the Frasberg reference preview. All 9 requested routes (/ai-models, /website-builder, /game-builder, /games, /os, /gallery, /about, /dashboard, /luchii) return HTTP 200 and render content with no crash banner. Login via /auth?mode=login succeeds and redirects to /chat. Frasberg Creator at /create renders behind AuthGate with its tab shell (Create, Features & Tools, Models) and AI Image Generator UI; /creator route also renders. Chat demo on homepage calls /api/chat (SSE) and returns a graceful fallback error stream ('⚠ Luchii hit turbulence on that reply — please resend your message.') with HTTP 200 — expected since user chose not to configure EMERGENT_LLM_KEY and the upstream LUCHII_UPSTREAM_URL is unreachable. No stacktrace, no 5xx.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
   "test_report_links": [
-    "/app/backend/tests/test_engines_runtime_iter61.py",
+    "/app/backend/tests/test_iter61_import_smoke.py",
     "/app/test_reports/pytest/iter61.xml"
   ],
   "action_items": [],
   "critical_code_review_comments": [
-    "backend/server.py is 2093 lines — exceeds the 700-line guideline. The engine-runtime block (~lines 1876-2027, ~150 lines) is a well-scoped unit that could be moved to backend/routers/engines.py (owner dep + /runtime, /execute, /chain, /flow, /policy, /governance, /diagnostics, /identity, /continuity, /rules) without any behaviour change.",
-    "engine_owner() rejects anonymous with 401 but non-admin logged-in with 403 — correct per spec; however the 403 message 'Admins only' doesn't hint that an X-Frasberg-Key header is also acceptable. Consider: 'Admins or a valid X-Frasberg-Key only'.",
-    "/api/engines/runtime response includes systems inline but systems have a separate GET /api/engines/systems endpoint — fine for convenience, but document on /developers (which currently has NO engine mention — intentional per spec, but a private admin cheat-sheet could help).",
-    "test parallelism: TestPolicyGovernance.test_policy_blocks_action and TestExecute.test_continuity_persist_and_delete both act on engine='mind' for owner=admin:admin.tester@luchiiapp.com concurrently when pytest-xdist is enabled. Not a product bug but tests are flaky under -n auto. Consider marking engine-mutating tests with pytest-xdist's @pytest.mark.serial or using distinct engines per test."
+    "Problem statement listed GET /api/gpu/v1/engines but the actual route is /api/creator/gpu/v1/engines (creator_app mounts with prefix=/api/creator). Harmless — tests updated — but worth noting for any consumer docs.",
+    "Chat demo returns a fallback SSE message with 200 OK when both EMERGENT_LLM_KEY and upstream LUCHII_UPSTREAM_URL are unavailable. UX-wise good (no crash), but there is no visible UI indicator that the model is offline/degraded.",
+    "/dashboard and /luchii render with very small content bodies (~300 chars) — likely gated/redirect shells. No crash, but worth confirming the gated UX is intentional and not an empty-state regression."
   ],
-  "updated_files": ["/app/backend/tests/test_engines_runtime_iter61.py"],
-  "success_rate": { "backend": "100% (17/17 sequential; 16/17 under parallel xdist due to admin+mind shared-state race, not a product bug)", "frontend": "100% — redirect, hidden-public, admin /status engine runtime + systems all green" },
-  "test_credentials": "admin.tester@luchiiapp.com / AdminTest123!; X-Frasberg-Key frb_live_***",
-  "seed_data_creation": "Tests created transient continuities (w-test-*, w-ui-test); all deleted. Policy and governance (owner + global) toggled during tests but reset to empty [] at end. One non-admin user registered per session (nonadmin_<hex>@luchiiapp.com / Plain1234!) — safe to leave.",
+  "updated_files": [
+    "/app/backend/tests/test_iter61_import_smoke.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@frasbergai.com / Federation20261+ (seeded from backend/.env ADMIN_EMAIL/ADMIN_PASSWORD); test@luchii.ai / Test1234! (auto-registered by smoke test if missing)",
+  "seed_data_creation": "test_iter61_import_smoke.py auto-registers a one-off TEST_user_<uuid>@luchii.ai user per run and ensures test@luchii.ai exists. No GPU jobs triggered.",
   "retest_needed": false,
-  "should_main_agent_self_test": true,
-  "context_for_next_testing_agent": "Backend: run `pytest backend/tests/test_engines_runtime_iter61.py -v -o addopts=''` (bypass xdist in pytest.ini) to avoid the admin+mind owner-level race between policy and continuity tests. All /api/engines/* routes live in server.py 1876-2027 behind engine_owner() dep (admin JWT OR platform key). Frontend EngineRuntime embed is admin-only on /status; signed-out users see engine-status-denied. The /engines route still exists as a React Navigate replace → /status (SEO-safe redirect, not a server 301). Do NOT exercise /api/gpu-admin/aws/start or image/video/3D generation."
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Creator endpoints live under /api/creator/* prefix (gpu/v1/engines, auth/me, etc.) — do NOT use /api/gpu/v1/engines (404). Admin password Federation20261+ comes from backend/.env ADMIN_PASSWORD. Chat endpoint is /api/chat and streams SSE. Register API lowercases email on persist, so assert case-insensitively. Node gateway (apps/gateway) is out of scope on UPDATE-MAIN branch. linq_governance scheduler errors in backend logs about missing Anthropic key are expected per user choice."
 }

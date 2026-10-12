@@ -1,14 +1,10 @@
-import { executeBehavior } from '../engine-server/behavior-execute';
+import { executeBehavior } from "../../apps/engine-server/behavior-execute";
 
-export async function behavior(req: any, res: any) {
-  const result = await executeBehavior(req.behavior, req.body?.input);
+export async function behavior(req, res) {
+  const behavior = req.behavior;
+  const input = req.body.input;
 
-  res.json({
-    version: '1.0',
-    owner: req.ownerId,
-    continuity: req.continuityState,
-    diagnostics: req.diagnostics,
-    payload: result,
-    timestamp: Date.now(),
-  });
+  const result = await executeBehavior(behavior, input);
+
+  res.json(result);
 }

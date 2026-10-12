@@ -1,4 +1,4 @@
-# FrasbergAI Enterprise Compliance Packet
+# Frasberg Enterprise Compliance Packet
 Version 1.0 — August 2026
 
 ## 1. Certifications & Frameworks

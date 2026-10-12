@@ -1,23 +1,9 @@
-import { Structure } from './structure-model';
-
-export function buildStructureEnvelope(structure: Structure) {
-  const envelope = {
-    structureId: structure.structureId,
-    structureGraph: structure.structureGraph,
-    timestamp: Date.now(),
-  };
-
-  if (structure.formation !== undefined || structure.dynamics !== undefined) {
-    return {
-      ...envelope,
-      formation: structure.formation,
-      dynamics: structure.dynamics,
-    };
-  }
-
+export function buildStructureEnvelope(structure) {
   return {
-    ...envelope,
-    architecture: structure.architecture,
-    fabric: structure.fabric,
+    structureId: structure.structureId,
+    formation: structure.formation,
+    dynamics: structure.dynamics,
+    structureGraph: structure.structureGraph,
+    timestamp: Date.now()
   };
 }

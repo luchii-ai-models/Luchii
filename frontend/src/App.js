@@ -1,67 +1,192 @@
 import "./App.css";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { Toaster } from "./components/ui/sonner";
-import { AuthProvider } from "./context/AuthContext";
-import FrasbergStarfieldLayout from "./layouts/FrasbergStarfieldLayout";
-import Home from "./pages/Home";
-import Generator from "./pages/Generator";
-import Gallery from "./pages/Gallery";
-import Share from "./pages/Share";
-import Models from "./pages/Models";
+import { ReactLenis } from "lenis/react";
+import { BrowserRouter, Routes, Route, useLocation, Navigate, useSearchParams } from "react-router-dom";
+import { useEffect } from "react";
+import { Toaster } from "sonner";
+import { FontSizeToggle } from "./components/site/FontSizeToggle";
+import { ThemeProvider } from "./context/ThemeContext";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import Landing from "./pages/Landing";
+import Contact from "./pages/Contact";
+import DatabaseManager from "./pages/DatabaseManager";
+import Dashboard from "./pages/Dashboard";
+import ApiKeysSettings from "./pages/ApiKeysSettings";
+import Docs from "./pages/Docs";
 import Legal from "./pages/Legal";
-import TextToSpeech from "./pages/TextToSpeech";
-import ApiDocs from "./pages/ApiDocs";
-import VideoShare from "./pages/VideoShare";
-import Studio from "./pages/Studio";
-import EngineStatus from "./pages/EngineStatus";
-import SpeechToSpeech from "./pages/SpeechToSpeech";
-import VoiceClone from "./pages/VoiceClone";
-import Login from "./pages/Login";
-import Studio3D from "./pages/Studio3D";
-import ModelShare from "./pages/ModelShare";
-import Spaces from "./pages/Spaces";
-import SpaceEditor from "./pages/SpaceEditor";
-import SpaceView from "./pages/SpaceView";
-import AboutLuchii from "./pages/AboutLuchii";
-import LuchiiAgent from "./pages/LuchiiAgent";
+import Court from "./pages/Court";
+import Brand from "./pages/Brand";
+import About from "./pages/About";
+import AiModels from "./pages/AiModels";
+import LuchiiCode from "./pages/LuchiiCode";
+import CodingAgents from "./pages/CodingAgents";
+import Auth from "./pages/Auth";
+import Chat from "./pages/Chat";
+import AgentWorkspace from "./pages/AgentWorkspace";
+import WorkspaceHome from "./pages/WorkspaceHome";
+
+function ChatRoute() {
+  const [params] = useSearchParams();
+  const agent = (params.get("agent") || "").toLowerCase();
+  const workspaceAgents = ["architect", "builder", "reviewer", "debugger"];
+  return workspaceAgents.includes(agent) ? <AgentWorkspace /> : <Chat />;
+}
+import Profile from "./pages/Profile";
+import Admin from "./pages/Admin";
+import MeshControlCenter from "./pages/MeshControlCenter";
+import Laws from "./pages/Laws";
+import Pay from "./pages/Pay";
+import PaymentSuccess from "./pages/PaymentSuccess";
+import PaymentCancel from "./pages/PaymentCancel";
+import Builder from "./pages/Builder";
+import Gallery from "./pages/Gallery";
+import PlayGame from "./pages/PlayGame";
+import Downloads from "./pages/Downloads";
+import Status from "./pages/Status";
+import Software from "./pages/Software";
+import GamesLibrary from "./pages/GamesLibrary";
+import GamePlayerPage from "./pages/GamePlayerPage";
+import PlayerProfile from "./pages/PlayerProfile";
+import VisualStudio from "./pages/VisualStudio";
+import CreatureLibrary from "./pages/CreatureLibrary";
+import CharacterCreator from "./pages/CharacterCreator";
+import Linq from "./pages/Linq";
+import FrasbergCloud from "./pages/FrasbergCloud";
+import Marketplace from "./pages/Marketplace";
+import MarketplaceV3 from "./pages/MarketplaceV3";
+import Playground from "./pages/Playground";
+import CloudConsole from "./pages/CloudConsole";
+import DevPortal from "./pages/DevPortal";
+import Launch from "./pages/Launch";
+import OpsCenter from "./pages/OpsCenter";
+import Codex from "./pages/Codex";
+import ConstellationMap from "./pages/ConstellationMap";
+import GlyphGallery from "./pages/GlyphGallery";
+import AscensionHistory from "./pages/AscensionHistory";
+import VerifiedProvider from "./pages/VerifiedProvider";
+import CosmogenicKernels from "./pages/CosmogenicKernels";
+import TierBenchmark from "./pages/TierBenchmark";
+import { AscensionBanner } from "./components/site/AscensionBanner";
+import { CommandPalette } from "./components/site/CommandPalette";
+import FrasbergOS from "./pages/FrasbergOS";
+import CreativeStudio from "./pages/CreativeStudio";
+import FrasbergCreator from "./creator/FrasbergCreator";
+import CreatorRoutes from "./creator/CreatorRoutes";
+import SecurityShield from "./pages/SecurityShield";
+import ShieldDashboard from "./pages/ShieldDashboard";
+import DocsHub from "./pages/DocsHub";
+
+function ScrollToHash() {
+  const { pathname, hash } = useLocation();
+  useEffect(() => {
+    if (hash) {
+      const t = setTimeout(() => {
+        document.querySelector(hash)?.scrollIntoView({ behavior: "smooth" });
+      }, 350);
+      return () => clearTimeout(t);
+    }
+    window.scrollTo(0, 0);
+  }, [pathname, hash]);
+  return null;
+}
+
+function CourtGate({ children }) {
+  const { user } = useAuth();
+  if (user === undefined) return null;
+  if (!user || user.role !== "admin") return <Navigate to="/" replace />;
+  return children;
+}
+
+function AuthGate({ children }) {
+  const { user } = useAuth();
+  if (user === undefined) return null;
+  if (!user) return <Navigate to="/auth?mode=login" replace />;
+  return children;
+}
 
 function App() {
   return (
-    <div className="App">
+    <ThemeProvider>
       <AuthProvider>
-        <BrowserRouter>
-          <FrasbergStarfieldLayout>
+      <ReactLenis root options={{ lerp: 0.09, smoothWheel: true }}>
+        <div className="App grain">
+          <BrowserRouter>
+            <ScrollToHash />
+            <AscensionBanner />
+            <CommandPalette />
             <Routes>
-              <Route path="/" element={<Home />} />
-              <Route path="/create" element={<Generator />} />
+              <Route path="/" element={<Landing />} />
+              <Route path="/luchii" element={<ChatRoute />} />
+              <Route path="/ai-models" element={<AiModels />} />
+              <Route path="/luchii-code" element={<LuchiiCode />} />
+              <Route path="/coding-agents" element={<CodingAgents />} />
+              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/settings/api-keys" element={<AuthGate><ApiKeysSettings /></AuthGate>} />
+              <Route path="/docs" element={<Docs />} />
+              <Route path="/legal" element={<Legal />} />
+              <Route path="/court" element={<CourtGate><Court /></CourtGate>} />
+              <Route path="/brand" element={<Brand />} />
+              <Route path="/about" element={<About />} />
+              <Route path="/auth" element={<Auth />} />
+              <Route path="/chat" element={<ChatRoute />} />
+              <Route path="/apps" element={<WorkspaceHome />} />
+              <Route path="/contact" element={<Contact />} />
+              <Route path="/database" element={<AuthGate><DatabaseManager /></AuthGate>} />
+              <Route path="/security-shield" element={<SecurityShield />} />
+              <Route path="/shield-dashboard" element={<AuthGate><ShieldDashboard /></AuthGate>} />
+              <Route path="/create" element={<AuthGate><FrasbergCreator /></AuthGate>} />
+              <Route path="/create/classic" element={<AuthGate><CreativeStudio /></AuthGate>} />
+              <Route path="/creator/*" element={<AuthGate><CreatorRoutes /></AuthGate>} />
+              <Route path="/profile" element={<Profile />} />
+              <Route path="/admin" element={<Admin />} />
+              <Route path="/admin/mesh" element={<MeshControlCenter />} />
+              <Route path="/laws" element={<CourtGate><Laws /></CourtGate>} />
+              <Route path="/pay" element={<Pay />} />
+              <Route path="/payment/success" element={<PaymentSuccess />} />
+              <Route path="/payment/cancel" element={<PaymentCancel />} />
+              <Route path="/website-builder" element={<Builder type="website" />} />
+              <Route path="/game-builder" element={<Builder type="game" />} />
+              <Route path="/app-builder" element={<Builder type="app" />} />
+              <Route path="/landing-builder" element={<Builder type="landing" />} />
+              <Route path="/builder" element={<Builder type="website" />} />
               <Route path="/gallery" element={<Gallery />} />
-              <Route path="/models" element={<Models />} />
-              <Route path="/tts" element={<TextToSpeech />} />
-              <Route path="/developers" element={<ApiDocs />} />
-              <Route path="/engines" element={<Navigate to="/status" replace />} />
-              <Route path="/legal/:doc" element={<Legal />} />
-              <Route path="/s/:id" element={<Share />} />
-              <Route path="/video" element={<Studio kind="video" />} />
-              <Route path="/v/:id" element={<VideoShare />} />
-              <Route path="/audio" element={<Studio kind="music" />} />
-              <Route path="/status" element={<EngineStatus />} />
-              <Route path="/sts" element={<SpeechToSpeech />} />
-              <Route path="/voice-clone" element={<VoiceClone />} />
-              <Route path="/login" element={<Login />} />
-              <Route path="/3d" element={<Studio3D />} />
-              <Route path="/3d/s/:id" element={<ModelShare />} />
-              <Route path="/spaces" element={<Spaces />} />
-              <Route path="/spaces/:id" element={<SpaceEditor />} />
-              <Route path="/spaces/:id/view" element={<SpaceView />} />
-              <Route path="/agent" element={<LuchiiAgent />} />
-              <Route path="/about-luchii" element={<AboutLuchii />} />
-              <Route path="/signup" element={<Login mode="register" />} />
+              <Route path="/play/:slug" element={<PlayGame />} />
+              <Route path="/downloads" element={<CourtGate><Downloads /></CourtGate>} />
+              <Route path="/status" element={<Status />} />
+              <Route path="/software" element={<Software />} />
+              <Route path="/games" element={<GamesLibrary />} />
+              <Route path="/games/profile" element={<PlayerProfile />} />
+              <Route path="/games/play/:gameId" element={<GamePlayerPage />} />
+              <Route path="/studio" element={<AuthGate><FrasbergCreator /></AuthGate>} />
+              <Route path="/visual-studio" element={<VisualStudio />} />
+              <Route path="/studio/creatures" element={<CreatureLibrary />} />
+              <Route path="/studio/characters" element={<CharacterCreator />} />
+              <Route path="/linq" element={<Linq />} />
+              <Route path="/cloud" element={<FrasbergCloud />} />
+              <Route path="/marketplace" element={<Marketplace />} />
+              <Route path="/marketplace/:page" element={<MarketplaceV3 />} />
+              <Route path="/os" element={<FrasbergOS />} />
+              <Route path="/playground" element={<Playground />} />
+              <Route path="/console" element={<CloudConsole />} />
+              <Route path="/developers/portal" element={<DevPortal />} />
+              <Route path="/launch" element={<Launch />} />
+              <Route path="/ops" element={<OpsCenter />} />
+              <Route path="/codex" element={<Codex />} />
+              <Route path="/codex/constellation" element={<ConstellationMap />} />
+              <Route path="/glyphs" element={<GlyphGallery />} />
+              <Route path="/ascensions" element={<AscensionHistory />} />
+              <Route path="/verified-provider" element={<VerifiedProvider />} />
+              <Route path="/kernels" element={<CosmogenicKernels />} />
+              <Route path="/benchmark" element={<TierBenchmark />} />
+              <Route path="/developers/docs" element={<DocsHub />} />
+              <Route path="/developers/docs/:doc" element={<DocsHub />} />
             </Routes>
-          </FrasbergStarfieldLayout>
-        </BrowserRouter>
-        <Toaster position="top-center" theme="dark" />
+          </BrowserRouter>
+          <Toaster position="top-center" richColors />
+          <FontSizeToggle />
+        </div>
+      </ReactLenis>
       </AuthProvider>
-    </div>
+    </ThemeProvider>
   );
 }
 

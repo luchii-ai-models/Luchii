@@ -1,4 +1,4 @@
-export function buildPersonaModel(identity: any) {
+export function buildPersonaModel(identity) {
   return {
     identityModel: identity.self,
     integrationModel: identity.integration,

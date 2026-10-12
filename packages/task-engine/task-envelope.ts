@@ -1,6 +1,4 @@
-import type { Task } from "./task-model";
-
-export function buildTaskEnvelope(task: Task) {
+export function buildTaskEnvelope(task) {
   return {
     taskId: task.taskId,
     action: task.action,

@@ -1,21 +1,25 @@
-import request from 'supertest';
-import express from 'express';
-import { describe, test, expect } from 'vitest';
-import { ownerResolver } from '../src/resolvers';
+import request from "supertest";
+import express from "express";
+import { describe, test, expect } from "vitest";
 
-describe('owner resolver rejection', () => {
+import { ownerResolver } from "../owner-resolver";
+
+describe("owner resolver rejection", () => {
   const app = express();
-  app.get('/owner', ownerResolver, (_req, res) => res.json({ success: true }));
 
-  test('rejects missing owner', async () => {
-    const response = await request(app).get('/owner');
+  app.get("/owner", ownerResolver, (_, res) => res.json({ success: true }));
+
+  test("rejects missing owner", async () => {
+    const response = await request(app).get("/owner");
+
     expect(response.status).toBe(401);
-    expect(response.body.error.code).toBe('OWNER_NOT_FOUND');
+    expect(response.body.error.code).toBe("OWNER_NOT_FOUND");
   });
 
-  test('rejects invalid owner format', async () => {
-    const response = await request(app).get('/owner').set('x-owner-id', '%%%');
+  test("rejects invalid owner format", async () => {
+    const response = await request(app).get("/owner").set("x-owner-id", "%%%");
+
     expect(response.status).toBe(400);
-    expect(response.body.error.code).toBe('INVALID_OWNER_ID');
+    expect(response.body.error.code).toBe("INVALID_OWNER_ID");
   });
 });

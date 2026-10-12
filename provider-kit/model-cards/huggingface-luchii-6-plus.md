@@ -1,15 +1,15 @@
 ---
 license: mit
 tags:
-  - frasbergai
+  - frasberg
   - luchii
   - chat-model
   - sse-streaming
 ---
 
-# Luchii-6-Plus (FrasbergAI)
+# Luchii-6-Plus (Frasberg)
 
-Luchii-6-Plus is a long-context chat model built by FrasbergAI, supporting 128k tokens, SSE streaming, and OpenAI-compatible chat completions.
+Luchii-6-Plus is a long-context chat model built by Frasberg, supporting 128k tokens, SSE streaming, and OpenAI-compatible chat completions.
 
 ## Usage
 ```python

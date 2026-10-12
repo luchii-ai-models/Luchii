@@ -1,6 +1,4 @@
-import type { Behavior } from "./behavior-model";
-
-export function evolveBehavior(behavior: Behavior) {
+export function evolveBehavior(behavior) {
   return {
     behaviorId: behavior.behaviorId,
     evolutionScore: Math.random(),

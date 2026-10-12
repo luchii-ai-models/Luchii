@@ -1,4 +1,4 @@
-export function buildPattern(action: any) {
+export function buildPattern(action) {
   return {
     actionPattern: action.motion,
     dynamicsPattern: action.dynamics,

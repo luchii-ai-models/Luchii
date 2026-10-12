@@ -1,25 +1,42 @@
-import request from 'supertest';
-import express from 'express';
-import { describe, test, expect, vi } from 'vitest';
-import { requestIdMiddleware } from '../src/request-id';
-import { requestLogger } from '../src/request-logger';
+import { describe, test, expect, vi } from "vitest";
 
-describe('request logger redaction', () => {
-  test('never logs credentials', async () => {
-    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const app = express();
-    app.use(requestIdMiddleware);
-    app.use(requestLogger);
-    app.get('/x', (_req, res) => res.json({ ok: true }));
+import { requestLogger } from "../../../apps/gateway/src/request-logger";
 
-    await request(app)
-      .get('/x')
-      .set('authorization', 'Bearer super-secret')
-      .set('x-api-key', 'luc_live_secret');
+describe("logger redaction", () => {
+  test("does not log secret values", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-    const logged = spy.mock.calls.map((c) => String(c[0])).join('\n');
+    const req: any = {
+      requestId: "req_123",
+      ownerId: "owner_1",
+      workspaceId: "ws_prod",
+      path: "/v1/chat",
+      method: "POST",
+      headers: {
+        "x-api-key": "luc_live_secret",
+        authorization: "Bearer luc_live_secret",
+        cookie: "session=abc",
+        "content-type": "application/json",
+      },
+    };
+
+    const res: any = {
+      statusCode: 200,
+      on: (event: string, callback: () => void) => {
+        if (event === "finish") callback();
+      },
+    };
+
+    requestLogger(req, res, () => {});
+
+    const logOutput = JSON.stringify(spy.mock.calls);
+
+    expect(logOutput).not.toContain("luc_live_secret");
+    expect(logOutput).not.toContain("Bearer ");
+    expect(logOutput).not.toContain("session=abc");
+    expect(logOutput).toContain("[REDACTED]");
+    expect(logOutput).toContain("req_123");
+
     spy.mockRestore();
-    expect(logged).not.toContain('super-secret');
-    expect(logged).not.toContain('luc_live_secret');
   });
 });

@@ -1,337 +1,212 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { LuchiiBadge, luchiiModelFor } from "../components/LuchiiBadge";
-import { downloadWithLuchii } from "../lib/luchiiMark";
-import { Link, useNavigate } from "react-router-dom";
-import axios from "axios";
-import { Sparkles, ArrowLeft, Download, ImageIcon, Loader2, Wand2, Share2, Trash2, AudioLines, Box, Search, Clapperboard, RotateCcw, ExternalLink, History } from "lucide-react";
-import { shareVideo, isPreviewEngine } from "./Studio";
-import { Input } from "../components/ui/input";
-import { Button } from "../components/ui/button";
-import { SelectBar, SelectMark } from "../components/GallerySelect";
-import { useAuth } from "../context/AuthContext";
-import { brand } from "../mock";
+import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
+import { Moon, Sun, ArrowLeft, Globe, Gamepad2, AppWindow, ExternalLink, Play, Sparkles, GitFork, Trophy, Star, Share2, Search } from "lucide-react";
 import { toast } from "sonner";
-import "@google/model-viewer";
+import { useTheme } from "../context/ThemeContext";
+import Starfield from "../components/site/Starfield";
+import Seo from "../components/site/Seo";
+import Footer from "../components/site/Footer";
 
-const BACKEND = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND}/api`;
+const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
 const TABS = [
-  { id: "images", label: "Images", icon: ImageIcon },
-  { id: "videos", label: "Videos", icon: Clapperboard },
-  { id: "takes", label: "Voice takes", icon: AudioLines },
-  { id: "models", label: "3D models", icon: Box },
+  { id: "all", label: "All builds" },
+  { id: "website", label: "Websites" },
+  { id: "app", label: "Apps" },
+  { id: "game", label: "Games" },
+  { id: "landing", label: "Landing pages" },
 ];
 
-function Empty({ text, to, cta }) {
-  const navigate = useNavigate();
-  return (
-    <div className="grid place-items-center py-24 text-center" data-testid="gallery-empty">
-      <p className="text-neutral-400">{text}</p>
-      <Button onClick={() => navigate(to)} className="mt-4 bg-[#00F0FF] text-black hover:bg-[#00d4de] font-semibold rounded-full">{cta}</Button>
-    </div>
-  );
-}
-
-function TakesList({ takes }) {
-  const [q, setQ] = useState("");
-  const [voice, setVoice] = useState("all");
-  const voices = useMemo(() => ["all", ...new Set(takes.map((t) => t.voice))], [takes]);
-  const shown = takes.filter((t) => (voice === "all" || t.voice === voice) && t.text.toLowerCase().includes(q.trim().toLowerCase()));
-  if (!takes.length) return <Empty text="No saved voice takes yet." to="/sts" cta="Open Speech to Speech" />;
-  return (
-    <div className="space-y-5">
-      <div className="flex flex-col md:flex-row gap-3 md:items-center" data-testid="takes-filters">
-        <div className="relative md:w-80">
-          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" />
-          <Input data-testid="takes-search-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search what was said…"
-            className="pl-9 bg-black/40 border-white/10 focus-visible:ring-[#00F0FF]" />
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {voices.map((v) => (
-            <button key={v} data-testid={`takes-voice-${v}`} onClick={() => setVoice(v)}
-              className={`rounded-full px-3 py-1 text-xs border capitalize transition-colors ${voice === v ? "bg-[#00F0FF] text-black border-[#00F0FF] font-semibold" : "border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10"}`}>
-              {v === "clone" ? "My cloned voice" : v === "all" ? "All voices" : v}
-            </button>
-          ))}
-        </div>
-        <span className="md:ml-auto text-xs text-neutral-500" data-testid="takes-count">{shown.length} of {takes.length}</span>
-      </div>
-      {!shown.length && <p className="text-sm text-neutral-500 py-10 text-center" data-testid="takes-no-match">No takes match your search.</p>}
-    <div className="grid md:grid-cols-2 gap-4" data-testid="gallery-takes">
-      {shown.map((t) => (
-        <div key={t.id} data-testid={`gallery-take-${t.id}`} className="rounded-xl border border-white/10 bg-[#1E2327] p-4 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs uppercase tracking-wider text-[#00F0FF]">{t.voice === "clone" ? "My cloned voice" : t.voice}</span>
-            <a href={`${BACKEND}${t.audio_url}`} download className="text-white/70 hover:text-white" title="Download"><Download className="w-4 h-4" /></a>
-          </div>
-          <p className="text-sm text-neutral-300 line-clamp-2">“{t.text}”</p>
-          <audio controls preload="none" src={`${BACKEND}${t.audio_url}`} className="w-full" />
-        </div>
-      ))}
-    </div>
-    </div>
-  );
-}
-
-function VideoCard({ v }) {
-  const ref = React.useRef(null);
-  const src = `${BACKEND}${v.url}`;
-  const replay = () => { const el = ref.current; if (el) { el.currentTime = 0; el.play().catch(() => {}); } };
-  const aspect = v.aspect_ratio === "9:16" ? "aspect-[9/16]" : v.aspect_ratio === "1:1" ? "aspect-square" : "aspect-video";
-  return (
-    <div data-testid={`gallery-video-${v.id}`} className="rounded-xl border border-white/10 bg-[#1E2327] overflow-hidden flex flex-col">
-      <div className={`relative bg-black ${aspect}`}>
-        <video ref={ref} src={`${src}#t=0.1`} muted loop playsInline preload="metadata" controls
-          onMouseEnter={(e) => e.currentTarget.play().catch(() => {})} onMouseLeave={(e) => e.currentTarget.pause()}
-          className="absolute inset-0 w-full h-full object-contain" data-testid={`gallery-video-player-${v.id}`} />
-        <LuchiiBadge overlay model={videoModel(v)} className="!bottom-12" testId={`gallery-video-luchii-badge-${v.id}`} />
-        <span className="absolute top-2 left-2 rounded-full bg-black/70 px-2 py-0.5 text-[10px] uppercase tracking-wider text-[#00F0FF]">
-          {v.mode === "image-to-video" ? "Photo → video" : "Text → video"}
-        </span>
-        {isPreviewEngine(v.engine) && (
-          <span data-testid={`gallery-video-preview-${v.id}`} className="absolute top-2 right-2 rounded-full bg-amber-400/90 px-2 py-0.5 text-[10px] font-semibold text-black">Preview</span>
-        )}
-      </div>
-      <div className="p-3 space-y-2 mt-auto">
-        <p className="text-xs text-neutral-300 line-clamp-2" title={v.prompt}>{v.prompt}</p>
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[10px] text-neutral-500 truncate">{v.duration}s · {v.aspect_ratio}</span>
-          <div className="flex items-center gap-2.5 shrink-0">
-            <button onClick={replay} title="Replay" data-testid={`gallery-video-replay-${v.id}`} className="text-white/70 hover:text-white"><RotateCcw className="w-4 h-4" /></button>
-            <button onClick={() => shareVideo(v.id)} title="Share" data-testid={`gallery-video-share-${v.id}`} className="text-white/70 hover:text-white"><Share2 className="w-4 h-4" /></button>
-            <a href={`${src}/download`} download={`luchii-video-${v.id.slice(0, 8)}.mp4`} title="Download" data-testid={`gallery-video-download-${v.id}`} className="text-white/70 hover:text-white"><Download className="w-4 h-4" /></a>
-            <Link to={`/v/${v.id}`} title="Open" data-testid={`gallery-video-open-${v.id}`} className="text-white/70 hover:text-white"><ExternalLink className="w-4 h-4" /></Link>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ModelFilter({ options, value, onChange }) {
-  if (options.length < 2) return null;
-  return (
-    <div className="flex flex-wrap gap-2 mb-5" data-testid="gallery-model-filter">
-      {["All", ...options].map((m) => (
-        <button key={m} onClick={() => onChange(m)} data-testid={`gallery-model-filter-${m.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
-          className={`inline-flex items-center gap-1.5 rounded-full pl-1 pr-3 py-1 text-xs border transition-colors ${value === m
-            ? "bg-[#00F0FF]/15 border-[#00F0FF]/60 text-white" : "border-white/10 bg-white/5 text-neutral-400 hover:text-white"}`}>
-          {m === "All" ? <span className="w-5 h-5 grid place-items-center">·</span> : <img src={brand.luchiiLogo} alt="" className="w-5 h-5 rounded-full object-contain" />}
-          {m}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-const useModelFilter = (list, modelOf) => {
-  const [model, setModel] = useState("All");
-  const options = useMemo(() => [...new Set(list.map(modelOf))].sort(), [list]); // eslint-disable-line
-  const active = options.includes(model) ? model : "All";
-  const shown = active === "All" ? list : list.filter((x) => modelOf(x) === active);
-  return { model: active, setModel, options, shown };
-};
-
-const videoModel = (v) => luchiiModelFor("video", null, v.mode, v.luchii_model);
-const imageModel = (g) => luchiiModelFor(g.kind, g.style, null, g.model);
-
-function VideosList({ videos }) {
-  const f = useModelFilter(videos, videoModel);
-  if (!videos.length) return <Empty text="No Frasberg Motion clips yet." to="/video" cta="Open Video Creator" />;
-  return (
-    <>
-    <ModelFilter options={f.options} value={f.model} onChange={f.setModel} />
-    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 items-start" data-testid="gallery-videos">
-      {f.shown.map((v) => <VideoCard key={v.id} v={v} />)}
-    </div>
-    </>
-  );
-}
-
-function ModelsList({ models }) {
-  const done = models.filter((m) => m.status === "completed");
-  if (!done.length) return <Empty text="No 3D models yet." to="/3d" cta="Open 3D Studio" />;
-  return (
-    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4" data-testid="gallery-models">
-      {done.map((m) => (
-        <div key={m.id} data-testid={`gallery-model-${m.id}`} className="rounded-xl border border-white/10 bg-[#1E2327] overflow-hidden">
-          <div className="relative">
-            <model-viewer src={`${BACKEND}${m.model_url}`} alt={m.prompt} camera-controls auto-rotate
-              style={{ width: "100%", height: "220px", background: "#11161A" }} />
-            <LuchiiBadge overlay model="Luchii Sculpt 3D" className="!top-2 !bottom-auto" testId={`gallery-model-luchii-badge-${m.id}`} />
-          </div>
-          <div className="p-3 flex items-center justify-between gap-2">
-            <p className="text-xs text-neutral-300 line-clamp-1">{m.prompt}</p>
-            <a href={`${BACKEND}${m.model_url}`} download className="text-white/70 hover:text-white" title="Download .glb"><Download className="w-4 h-4" /></a>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export default function Gallery() {
-  const { user, loading, authHeader } = useAuth();
-  const navigate = useNavigate();
-  const [items, setItems] = useState([]);
-  const [busy, setBusy] = useState(true);
-  const [tab, setTab] = useState("images");
-  const [takes, setTakes] = useState([]);
-  const [models, setModels] = useState([]);
-  const [videos, setVideos] = useState([]);
-  const imgFilter = useModelFilter(items, imageModel);
-  const [selecting, setSelecting] = useState(false);
-  const [selected, setSelected] = useState(new Set());
-  const [deleting, setDeleting] = useState(false);
-  const toggleSel = (id) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const bulkDelete = async () => {
-    if (!window.confirm(`Delete ${selected.size} image(s) from your gallery?`)) return;
-    setDeleting(true);
-    try {
-      const { data } = await axios.post(`${API}/generations/bulk-delete`, { ids: [...selected] }, { headers: authHeader });
-      setItems((xs) => xs.filter((x) => !selected.has(x.id)));
-      toast.success(`${data.deleted} image(s) deleted`);
-      setSelected(new Set()); setSelecting(false);
-    } catch (_) { toast.error("Could not delete the selected images"); }
-    setDeleting(false);
-  };
+  const { theme, toggle } = useTheme();
+  const [tab, setTab] = useState("all");
+  const [query, setQuery] = useState("");
+  const [items, setItems] = useState(null);
+  const [board, setBoard] = useState(null);
 
   useEffect(() => {
-    if (loading) return;
-    if (!user) { navigate("/"); return; }
-    const load = async () => {
-      try {
-        const [res, tk, md, vd] = await Promise.all([
-          axios.get(`${API}/my/generations`, { headers: authHeader, params: { limit: 60 } }),
-          axios.get(`${API}/voice/takes`, { headers: authHeader }).catch(() => ({ data: [] })),
-          axios.get(`${API}/3d`, { headers: authHeader, params: { limit: 60 } }).catch(() => ({ data: [] })),
-          axios.get(`${API}/videos`, { headers: authHeader, params: { limit: 60 } }).catch(() => ({ data: [] })),
-        ]);
-        setVideos(vd.data);
-        setItems(res.data);
-        setTakes(tk.data);
-        setModels(md.data);
-      } catch (e) {
-        // ignore
-      } finally {
-        setBusy(false);
-      }
-    };
-    load();
-  }, [user, loading]); // eslint-disable-line
+    fetch(`${API}/builder/leaderboard`).then((r) => r.json()).then(setBoard).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const q = tab === "all" ? "" : `?type=${tab}`;
+    fetch(`${API}/builder/gallery${q}`).then((r) => r.json()).then(setItems).catch(() => setItems([]));
+  }, [tab]);
 
   return (
-    <div className="min-h-screen bg-transparent">
-      <header className="sticky top-0 z-40 bg-[#12171B]/85 backdrop-blur-xl border-b border-white/5">
-        <div className="max-w-[1400px] mx-auto px-5 md:px-8 h-16 flex items-center justify-between">
-          <Link to="/" className="flex items-center gap-2">
-            <img src={brand.logo} alt="Frasberg Creator logo" className="w-9 h-9 rounded-full object-contain" />
-            <span className="font-display text-lg font-bold">Frasberg</span>
+    <main className="relative z-10 min-h-screen bg-lux-bg text-lux-text" data-testid="gallery-page">
+      <Seo title="Builder Gallery — Luchii by Frasberg" description="Explore websites and games built with the Luchii Website & Game Builders on Frasberg infrastructure." />
+      <div className="pointer-events-none absolute inset-0 opacity-40"><Starfield /></div>
+
+      <header className="glass sticky top-0 z-40 border-b border-lux-border">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-4 sm:px-8">
+          <Link to="/" className="flex items-center gap-2.5" data-testid="gallery-home-link">
+            <ArrowLeft size={16} className="text-lux-text2" />
+            <img src="/frasberg-mark-circle.png" alt="Frasberg" className="h-8 w-8 rounded-full" />
+            <span className="font-display text-lg font-700 tracking-tight">Builder Gallery</span>
           </Link>
-          <Link to="/create" className="inline-flex items-center gap-1.5 text-sm text-neutral-400 hover:text-white">
-            <ArrowLeft className="w-4 h-4" /> Back to create
-          </Link>
+          <button onClick={toggle} aria-label="Toggle theme" data-testid="gallery-theme-toggle"
+            className="grid h-10 w-10 place-items-center rounded-full border border-lux-border transition-colors hover:border-lux-accent hover:text-lux-accent">
+            {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+          </button>
         </div>
       </header>
 
-      <div className="max-w-[1400px] mx-auto px-5 md:px-8 py-10">
-        <div className="flex items-end justify-between mb-8">
-          <div>
-            <h1 className="font-display text-3xl font-bold">My gallery</h1>
-            <p className="text-sm text-neutral-500 mt-1">Everything you've created with Luchii models.</p>
+      <div className="relative mx-auto max-w-6xl px-5 py-12 sm:px-8">
+        <div className="text-center">
+          <img src="/luchii-mark-circle.png" alt="Luchii" className="mx-auto h-16 w-16 rounded-full" style={{ boxShadow: "0 0 44px var(--lux-glow)" }} />
+          <h1 className="mt-6 font-display text-4xl font-700 tracking-tighter sm:text-5xl">Built with Luchii</h1>
+          <p className="mx-auto mt-4 max-w-2xl text-lux-text2">
+            A public gallery of websites and games created with the Luchii Builders on Frasberg infrastructure.
+            Explore, play, get inspired — then build your own.
+          </p>
+          <div className="mt-6 flex flex-wrap justify-center gap-2">
+            <Link to="/website-builder" data-testid="gallery-cta-website"
+              className="inline-flex items-center gap-2 rounded-full bg-lux-accent px-6 py-3 text-sm font-600 text-lux-bg transition-transform hover:-translate-y-0.5">
+              <Globe size={15} /> Build a website
+            </Link>
+            <Link to="/game-builder" data-testid="gallery-cta-game"
+              className="inline-flex items-center gap-2 rounded-full border border-lux-accent px-6 py-3 text-sm font-600 text-lux-accent transition-transform hover:-translate-y-0.5">
+              <Gamepad2 size={15} /> Build a game
+            </Link>
           </div>
-          <Button onClick={() => navigate("/create")}
-            className="bg-[#00F0FF] text-black hover:bg-[#00d4de] font-semibold rounded-full">
-            <Wand2 className="w-4 h-4 mr-2" /> Create new
-          </Button>
         </div>
 
-        <div className="flex gap-2 mb-6" data-testid="gallery-tabs">
+        <div className="mt-10 flex flex-wrap items-center justify-center gap-2" data-testid="gallery-tabs">
           {TABS.map((t) => (
-            <button key={t.id} data-testid={`gallery-tab-${t.id}`} onClick={() => setTab(t.id)}
-              className={`inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-sm border transition-colors ${tab === t.id
-                ? "bg-[#00F0FF] text-black border-[#00F0FF] font-semibold" : "border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10"}`}>
-              <t.icon className="w-4 h-4" /> {t.label}
+            <button key={t.id} onClick={() => setTab(t.id)} data-testid={`gallery-tab-${t.id}`}
+              className={`rounded-full border px-5 py-2 text-sm transition-colors ${tab === t.id ? "border-lux-accent bg-lux-surface text-lux-text" : "border-lux-border text-lux-text2 hover:text-lux-text"}`}>
+              {t.label}
             </button>
           ))}
         </div>
+        <div className="mx-auto mt-4 max-w-md">
+          <div className="relative">
+            <Search size={15} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-lux-text2" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search builds…"
+              data-testid="gallery-search-input"
+              className="w-full rounded-full border border-lux-border bg-lux-surface/60 py-2.5 pl-11 pr-4 text-sm text-lux-text outline-none transition-colors placeholder:text-lux-text2 focus:border-lux-accent"
+            />
+          </div>
+        </div>
 
-        {!busy && tab === "videos" ? <VideosList videos={videos} /> : !busy && tab === "takes" ? <TakesList takes={takes} /> : !busy && tab === "models" ? <ModelsList models={models} /> : busy ? (
-          <div className="grid place-items-center py-32 text-neutral-500">
-            <Loader2 className="w-8 h-8 animate-spin text-[#00F0FF]" />
-          </div>
-        ) : items.length === 0 ? (
-          <div className="grid place-items-center py-32 text-center">
-            <ImageIcon className="w-12 h-12 text-neutral-700 mb-4" />
-            <p className="text-neutral-400">No creations yet.</p>
-            <Button onClick={() => navigate("/create")}
-              className="mt-4 bg-[#00F0FF] text-black hover:bg-[#00d4de] font-semibold rounded-full">
-              Start creating
-            </Button>
-          </div>
-        ) : (
-          <>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <ModelFilter options={imgFilter.options} value={imgFilter.model} onChange={imgFilter.setModel} />
-            <div className="mb-6"><SelectBar selecting={selecting} setSelecting={setSelecting} selected={selected} setSelected={setSelected}
-              allIds={imgFilter.shown.map((g) => g.id)} onDelete={bulkDelete} busy={deleting} /></div>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4" data-testid="gallery-images">
-            {imgFilter.shown.map((g) => (
-              <div key={g.id} className="group relative rounded-xl overflow-hidden border border-white/10 bg-[#1E2327]">
-                <img src={g.image_base64} alt={g.prompt} className="w-full aspect-square object-cover" />
-                {selecting && <SelectMark id={g.id} checked={selected.has(g.id)} onToggle={toggleSel} />}
-                <LuchiiBadge overlay model={imageModel(g)} className="!top-2 !bottom-auto" testId={`gallery-luchii-badge-${g.id}`} />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent md:opacity-0 md:group-hover:opacity-100 transition-opacity" />
-                <div className="absolute bottom-0 inset-x-0 p-3 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
-                  <p className="text-xs text-neutral-200 line-clamp-2">{g.prompt}</p>
-                  <div className="flex items-center justify-between mt-2">
-                    <span className="text-[10px] uppercase tracking-wide text-[#00F0FF]">{g.style}</span>
-                    <div className="flex items-center gap-2.5">
-                      {g.root_id && (
-                        <button onClick={() => navigate(`/create?gen=${g.id}`)} data-testid={`gallery-history-${g.id}`}
-                          className="text-white/80 hover:text-white" title="Open remix history">
-                          <History className="w-4 h-4" />
+        <div className="mt-8 pb-16">
+          {items === null ? (
+            <p className="text-center font-mono text-[15px] uppercase tracking-[0.2em] text-lux-text2">Loading gallery…</p>
+          ) : (() => {
+            const shown = items.filter((p) => !query || p.title.toLowerCase().includes(query.toLowerCase()));
+            return shown.length === 0 ? (
+            <div className="rounded-2xl border border-lux-border bg-lux-surface/60 p-10 text-center" data-testid="gallery-empty">
+              <Sparkles size={22} className="mx-auto text-lux-accent" />
+              <p className="mt-3 font-display text-lg font-600">{query ? `No builds match "${query}"` : "Nothing published here yet"}</p>
+              <p className="mt-1 text-sm text-lux-text2">{query ? "Try a different search." : "Be the first — build and publish with Luchii Pro."}</p>
+            </div>
+          ) : (
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3" data-testid="gallery-grid">
+              {shown.map((p) => (
+                <div key={p.id} className="relative overflow-hidden rounded-2xl border border-lux-border bg-lux-surface/60 transition-transform hover:-translate-y-1" data-testid={`gallery-card-${p.slug}`}>
+                  {p.featured && (
+                    <span className="absolute right-3 top-3 z-10 inline-flex items-center gap-1 rounded-full bg-lux-accent px-2.5 py-1 font-mono text-[15.5px] font-600 uppercase tracking-wide text-lux-bg" data-testid={`gallery-featured-${p.slug}`}>
+                      <Star size={10} /> Featured
+                    </span>
+                  )}
+                  <div className="relative h-44 overflow-hidden border-b border-lux-border bg-white">
+                    <iframe
+                      src={`${process.env.REACT_APP_BACKEND_URL}/api/p/${p.slug}`}
+                      title={p.title}
+                      sandbox="allow-scripts"
+                      loading="lazy"
+                      scrolling="no"
+                      className="pointer-events-none absolute left-0 top-0 h-[400%] w-[400%] origin-top-left scale-[0.25] border-0"
+                    />
+                  </div>
+                  <div className="p-5">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="min-w-0 truncate font-display text-base font-600 tracking-tight">{p.title}</p>
+                      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-lux-border px-2.5 py-1 font-mono text-[15.5px] uppercase tracking-wide text-lux-text2">
+                        {p.type === "game" ? <Gamepad2 size={11} /> : p.type === "app" ? <AppWindow size={11} /> : <Globe size={11} />} {p.type}
+                      </span>
+                    </div>
+                    <div className="mt-4 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        {p.type === "game" ? (
+                          <Link to={`/play/${p.slug}`} data-testid={`gallery-play-${p.slug}`}
+                            className="inline-flex items-center gap-1.5 rounded-full bg-lux-accent px-4 py-2 text-[15px] font-600 text-lux-bg transition-transform hover:-translate-y-0.5">
+                            <Play size={12} /> Play
+                          </Link>
+                        ) : (
+                          <a href={`${process.env.REACT_APP_BACKEND_URL}/api/p/${p.slug}`} target="_blank" rel="noreferrer" data-testid={`gallery-visit-${p.slug}`}
+                            className="inline-flex items-center gap-1.5 rounded-full bg-lux-accent px-4 py-2 text-[15px] font-600 text-lux-bg transition-transform hover:-translate-y-0.5">
+                            <ExternalLink size={12} /> {p.type === "app" ? "Open app" : "Visit site"}
+                          </a>
+                        )}
+                        <Link to={`/${p.type}-builder?remix=${p.slug}`} data-testid={`gallery-remix-${p.slug}`}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-lux-border px-4 py-2 text-[15px] text-lux-text2 transition-colors hover:border-lux-accent hover:text-lux-text">
+                          <GitFork size={12} /> Remix
+                        </Link>
+                        <button type="button" data-testid={`gallery-share-${p.slug}`} aria-label="Copy share link"
+                          onClick={() => {
+                            const url = p.type === "game" ? `${window.location.origin}/play/${p.slug}` : `${process.env.REACT_APP_BACKEND_URL}/api/p/${p.slug}`;
+                            navigator.clipboard.writeText(url).then(() => toast.success("Link copied — anyone can open it, no account needed")).catch(() => toast.error("Copy failed"));
+                          }}
+                          className="grid h-8 w-8 place-items-center rounded-full border border-lux-border text-lux-text2 transition-colors hover:border-lux-accent hover:text-lux-accent">
+                          <Share2 size={12} />
                         </button>
+                      </div>
+                      {p.type === "game" && (
+                        <span className="font-mono text-[15px] uppercase tracking-wide text-lux-text2" data-testid={`gallery-plays-${p.slug}`}>
+                          {p.plays || 0} play{(p.plays || 0) === 1 ? "" : "s"}
+                        </span>
                       )}
-                      <button
-                        onClick={() => {
-                          navigator.clipboard.writeText(`${window.location.origin}/s/${g.id}`);
-                          toast.success("Share link copied!");
-                        }}
-                        className="text-white/80 hover:text-white" title="Copy share link">
-                        <Share2 className="w-4 h-4" />
-                      </button>
-                      <button onClick={async () => {
-                          let src = g.image_base64;
-                          if (g.has_full) { // list shows a light preview of HD/4K images; download the full file
-                            try { src = (await axios.get(`${API}/share/${g.id}`)).data.image_base64 || src; } catch (_) { /* use preview */ }
-                          }
-                          downloadWithLuchii(src, `frasberg-creator-${g.id.slice(0, 8)}.${g.has_full ? "jpg" : "png"}`, luchiiModelFor(g.kind, g.style, null, g.model));
-                        }}
-                        data-testid={`gallery-download-${g.id}`} className="text-white/80 hover:text-white" title="Download">
-                        <Download className="w-4 h-4" />
-                      </button>
-                      <button onClick={async () => {
-                          if (!window.confirm("Delete this image from your gallery?")) return;
-                          try {
-                            await axios.delete(`${API}/generations/${g.id}`, { headers: authHeader });
-                            setItems((xs) => xs.filter((x) => x.id !== g.id));
-                            toast.success("Image deleted");
-                          } catch (_) { toast.error("Could not delete this image"); }
-                        }}
-                        data-testid={`gallery-delete-${g.id}`} className="text-white/80 hover:text-red-400" title="Delete">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
                     </div>
                   </div>
                 </div>
+              ))}
+            </div>
+          );
+          })()}
+        </div>
+
+        {board?.top?.length > 0 && (
+          <section className="mt-4 pb-16" data-testid="gallery-leaderboard">
+            <div className="flex items-center gap-3">
+              <span className="grid h-10 w-10 place-items-center rounded-full border border-lux-accent/50 text-lux-accent"><Trophy size={17} /></span>
+              <h2 className="font-display text-2xl font-700 tracking-tight">Game leaderboard</h2>
+            </div>
+            {board.spotlight && (
+              <div className="mt-5 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-lux-accent/50 bg-lux-accent/5 p-6" data-testid="leaderboard-spotlight">
+                <div>
+                  <p className="font-mono text-[15.5px] uppercase tracking-[0.25em] text-lux-accent">Most played this week · {board.week}</p>
+                  <p className="mt-2 font-display text-xl font-700 tracking-tight">{board.spotlight.title}</p>
+                  <p className="mt-1 font-mono text-[15px] uppercase tracking-wide text-lux-text2">{board.spotlight.weekly_plays} play{board.spotlight.weekly_plays === 1 ? "" : "s"} this week · {board.spotlight.plays} all-time</p>
+                </div>
+                <Link to={`/play/${board.spotlight.slug}`} data-testid="leaderboard-spotlight-play"
+                  className="inline-flex items-center gap-2 rounded-full bg-lux-accent px-6 py-3 text-sm font-600 text-lux-bg transition-transform hover:-translate-y-0.5">
+                  <Play size={14} /> Play now
+                </Link>
               </div>
-            ))}
-          </div>
-          </>
+            )}
+            <div className="mt-4 space-y-2" data-testid="leaderboard-list">
+              {board.top.map((g, i) => (
+                <div key={g.slug} className="flex items-center justify-between gap-4 rounded-xl border border-lux-border bg-lux-surface/60 px-5 py-3">
+                  <div className="flex min-w-0 items-center gap-4">
+                    <span className={`font-display text-lg font-700 ${i === 0 ? "text-lux-accent" : "text-lux-text2"}`}>#{i + 1}</span>
+                    <p className="truncate text-sm text-lux-text">{g.title}</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-4">
+                    <span className="font-mono text-[15px] uppercase tracking-wide text-lux-text2">{g.plays} plays</span>
+                    <Link to={`/play/${g.slug}`} className="rounded-full border border-lux-accent px-4 py-1.5 text-[15px] font-600 text-lux-accent" data-testid={`leaderboard-play-${g.slug}`}>Play</Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
         )}
       </div>
-    </div>
+      <Footer />
+    </main>
   );
 }

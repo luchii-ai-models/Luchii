@@ -1,6 +1,4 @@
-import type { Behavior } from "./behavior-model";
-
-export function buildBehaviorEnvelope(behavior: Behavior) {
+export function buildBehaviorEnvelope(behavior) {
   return {
     behaviorId: behavior.behaviorId,
     pattern: behavior.pattern,

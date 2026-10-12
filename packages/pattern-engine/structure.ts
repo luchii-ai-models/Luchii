@@ -1,7 +1,7 @@
-export function buildStructure(exchange: any) {
+export function buildStructure(behavior) {
   return {
-    exchangeStructure: exchange.flow,
-    mechanicStructure: exchange.mechanic,
+    behaviorStructure: behavior.pattern,
+    dynamicsStructure: behavior.dynamics,
     timestamp: Date.now()
   };
 }
