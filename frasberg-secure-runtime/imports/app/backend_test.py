@@ -11,7 +11,7 @@ from datetime import datetime
 import uuid
 
 # Backend URL from frontend .env
-BACKEND_URL = "https://intellichat-173.preview.emergentagent.com"
+BACKEND_URL = "https://luchii-import.preview.emergentagent.com"
 
 class SofiaBackendTester:
     def __init__(self, base_url):

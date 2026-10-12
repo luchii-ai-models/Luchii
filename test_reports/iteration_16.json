@@ -15,7 +15,7 @@
   },
   "verified_pass": {
     "court_seal": "data-testid=court-seal, src=/court-seal.png, naturalWidth=512, complete=true",
-    "laws_court_seal": "data-testid=laws-court-seal, 512x512, loaded from https://ai-gateway-demo.preview.emergentagent.com/court-seal.png",
+    "laws_court_seal": "data-testid=laws-court-seal, 512x512, loaded from https://luchii-import.preview.emergentagent.com/court-seal.png",
     "downloads_court_seal": "data-testid=downloads-court-seal, 512x512 loaded — sits above the 'Sign in to see your downloads' gate as expected",
     "court_flow_e2e": "Filled court-input + clicked court-submit — data-testid=court-ruling appeared with 'VERDICT ... REASONING ...' text",
     "chat_stream_no_mesh_error": "Sent 'In one sentence, what is a neural network?' — got full streamed Luchii reply; body scanned every 1s for 30s, 'Connection to the mesh failed' never present",

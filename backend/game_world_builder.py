@@ -53,7 +53,7 @@ ENGINES: Dict[str, Dict[str, Any]] = {
         "title": "Street Vybz", "genre": "Open World", "kind": "open-world",
         "description": "Open-world city crime sim — carjacks, contracts, mob debt timer, police and fire crews.",
         "keywords": ["street", "streets", "gang", "mob", "mafia", "crime", "hood", "jack city", "pizza", "taxi",
-                     "hustle", "debt", "vybz", "boss", "contract", "hitman", "open world city", "on foot"],
+                     "hustle", "debt", "vybz", "mob boss", "crime boss", "contract", "hitman", "open world city", "on foot"],
         "tunables": {
             "startCash": ("Starting cash", 0, 10000, 50, (800, 0, 0)),
             "debtDue": ("Mob cut ($)", 500, 10000, 50, (1500, 2500, 4500)),
@@ -91,7 +91,8 @@ ENGINES: Dict[str, Dict[str, Any]] = {
         "description": "Space shoot-'em-up — enemy formations, motherships, power-ups and weapon unlocks.",
         "keywords": ["space", "galaxy", "alien", "aliens", "spaceship", "ship", "star", "stars", "asteroid",
                      "asteroids", "invader", "invaders", "shmup", "shoot em up", "shoot-em-up", "planet", "orbit",
-                     "constellation", "mothership", "ufo", "laser"],
+                     "constellation", "mothership", "ufo", "laser", "space shooter", "space battle",
+                     "starship", "starfighter", "cosmic"],
         "tunables": {
             "lives": ("Lives", 1, 15, 1, (5, 3, 2)),
             "enemySpeed": ("Enemy speed", 0.4, 2.5, 0.05, (0.8, 1.0, 1.35)),
@@ -154,8 +155,13 @@ def _hits(text: str, words: List[str]) -> int:
     return sum(1 for w in words if re.search(rf"\b{re.escape(w)}\b", text))
 
 
+def _score(text: str, words: List[str]) -> int:
+    """Multi-word phrases ("space shooter", "police chase") are stronger signals than single words."""
+    return sum(2 if " " in w or "-" in w else 1 for w in words if re.search(rf"\b{re.escape(w)}\b", text))
+
+
 def pick_engine(text: str) -> str:
-    scores = {e: _hits(text, ENGINES[e]["keywords"]) for e in ENGINE_ORDER}
+    scores = {e: _score(text, ENGINES[e]["keywords"]) for e in ENGINE_ORDER}
     best = max(ENGINE_ORDER, key=lambda e: (scores[e], -ENGINE_ORDER.index(e)))
     if scores[best] == 0:
         if _hits(text, ["car", "cars", "drive", "driving", "vehicle"]):

@@ -38,7 +38,7 @@
     "profile_voice_rename": "/profile shows 'My Voice' and does NOT contain 'My Sovereign Voice'",
     "game_builder_page": "/game-builder loads with 'Luchii Game Builder' title and builder-switch-link href=/website-builder",
     "website_builder_signed_out": "builder-signin-card is visible to guests at /website-builder",
-    "website_builder_generate_publish_serve": "Admin generation of 'a one page site for a bakery' produced real streamed HTML (~11k chars, ~55s), builder-preview-iframe renders. builder-projects-list has entries. builder-publish-btn produces builder-live-link at https://ai-gateway-demo.preview.emergentagent.com/api/p/a-one-page-site-for-a-ba-7c4910 which returns HTTP 200 with 10,533-byte body.",
+    "website_builder_generate_publish_serve": "Admin generation of 'a one page site for a bakery' produced real streamed HTML (~11k chars, ~55s), builder-preview-iframe renders. builder-projects-list has entries. builder-publish-btn produces builder-live-link at https://luchii-import.preview.emergentagent.com/api/p/a-one-page-site-for-a-ba-7c4910 which returns HTTP 200 with 10,533-byte body.",
     "chat_no_suggestion_chips": "0 elements with data-testid starting 'chat-suggestion' found on /chat (even though the page itself crashed, the absence of any such element in the rendered DOM is consistent with the code review — no suggestion chip JSX in ChatDemo.jsx)."
   },
   "test_report_links": [],

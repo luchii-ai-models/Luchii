@@ -612,3 +612,9 @@ See /app/memory/test_credentials.md (admin@frasberg.com / LuchiiAdmin2026!, doct
 ## 2026-10-12 — Re-import UPDATE-MAIN + nav cleanup
 - /app working tree replaced with branch UPDATE-MAIN (Luchii site + Frasberg Creator at /create, /creator, /studio) via git archive (no git writes). backend/.env + frontend/.env recreated (DB_NAME=luchii, models in /opt/luchii-models because /app volume is 9.8G). Admin seeded from ADMIN_EMAIL/ADMIN_PASSWORD. Smoke test iteration_61: 100%.
 - Navbar top links now: Sign in/Sign out, AI Models, Luchii Code, Games, FrasbergOS, Explore. Explore > Build and Footer: Website/App/Game Builder merged into one "Builder" -> /builder. GitHub sign-in button removed from /auth.
+
+## 2026-10-12 (b) — Re-import main @ b5a9322b + env restore + engine-only Game Builder
+- /app already matched GitHub main b5a9322b (only preview URL rewrites). Recreated backend/.env (user-provided secrets, DB_NAME=luchii, models /opt/luchii-models{,/scratch,/photo}, FRASBERG_BASE_URL=https://frasberg.com/api, FRASBERG_API_KEYS=6 frb_live keys, FRASBERG_KEY_ROUTES, generated FRASBERG_WORKER_SECRET) + frontend/.env. No EMERGENT_LLM_KEY (by design). KAGGLE_USERNAME + S3_MEDIA_BUCKET + RESEND_API_KEY not provided.
+- Game Builder now ENGINE-ONLY: removed "AI-written code" toggle in Builder.jsx (type game always renders GameEngineBuilder); POST /api/builder/generate type=game → 400. Website/App/Landing untouched.
+- game_world_builder.py: weighted keyword scoring (_score: phrases=2) + "space shooter"/"starship" keywords, streets "boss"→"mob boss"/"crime boss" (fixed space shooter prompts routing to streets).
+- Frasberg server refinement currently unreachable: api.frasberg.com → 403 (Cloudflare), frasberg.com/api/v1/chat/completions → 500 → plans fall back to rules (enriched_by "rules").

@@ -4,7 +4,7 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://frasberg-com-dev.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://luchii-import.preview.emergentagent.com").rstrip("/")
 
 USER_EMAIL = "localtest@frasberg.com"
 USER_PASS = "LocalTest!2026x"

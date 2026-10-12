@@ -22,7 +22,7 @@
     "voice_roundtrip": "POST /api/voice/speak returns audio_base64; POST /api/voice/transcribe (multipart 'file') transcribes it back to non-empty text",
     "builder_page_copy": "Sub copy 'Describe your idea — build websites, games & apps with Luchii...' present; tabs = ['Website','Mobile App','Game','Landing Page']",
     "landing_builder": "/landing-builder loads with Luchii branding",
-    "builder_generate_publish": "Admin generation of 'a one-button color changer' streamed to preview iframe; publish produced https://ai-gateway-demo.preview.emergentagent.com/api/p/a-one-button-color-chang-300fc4 (HTTP 200, 7070 bytes, valid HTML)",
+    "builder_generate_publish": "Admin generation of 'a one-button color changer' streamed to preview iframe; publish produced https://luchii-import.preview.emergentagent.com/api/p/a-one-button-color-chang-300fc4 (HTTP 200, 7070 bytes, valid HTML)",
     "gallery_tabs": "Body contains both 'Apps' and 'Landing' tab labels",
     "admin_console": "Loads with system stats and user list; contains 'gallery' section reference",
     "docs_unlock_guest_401": "POST /api/docs/unlock without auth returns 401",

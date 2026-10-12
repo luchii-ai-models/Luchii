@@ -152,6 +152,9 @@ async def builder_generate(body: GenerateReq, user: dict = Depends(auth_module.g
         raise HTTPException(status_code=400, detail="Describe what you want to build")
     if body.type not in _SYSTEMS:
         raise HTTPException(status_code=400, detail="Unknown builder type")
+    if body.type == "game":
+        # Games are never AI-written code: they are WorldGraph worlds played by the bundled Frasberg engines.
+        raise HTTPException(status_code=400, detail="Games are built from Frasberg engines — use POST /api/game-builder/worlds")
     limit = PRO_DAILY if _is_pro(user) else FREE_DAILY
     used = await db.builder_generations.count_documents({"user_id": user["id"], "day": _today()})
     if used >= limit:
