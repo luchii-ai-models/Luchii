@@ -32,13 +32,14 @@ import aws_gpu
 import engine_rules
 import engine_runtime
 import engine_systems
+import media_store
 
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
-fs = AsyncIOMotorGridFSBucket(db, bucket_name="voice_samples")
-takes_fs = AsyncIOMotorGridFSBucket(db, bucket_name="voice_takes")
-models_fs = AsyncIOMotorGridFSBucket(db, bucket_name="models3d")
-media_fs = AsyncIOMotorGridFSBucket(db, bucket_name="media")
+fs = media_store.Bucket(AsyncIOMotorGridFSBucket(db, bucket_name="voice_samples"), "voice_samples")
+takes_fs = media_store.Bucket(AsyncIOMotorGridFSBucket(db, bucket_name="voice_takes"), "voice_takes")
+models_fs = media_store.Bucket(AsyncIOMotorGridFSBucket(db, bucket_name="models3d"), "models3d")
+media_fs = media_store.Bucket(AsyncIOMotorGridFSBucket(db, bucket_name="media"), "media")
 frasberg_gpu.init(db)
 kaggle_gpu.init(db)
 aws_gpu.init(db)
@@ -340,11 +341,7 @@ async def resolve_parent(parent_id: Optional[str], src_image: str, session_id: O
            "image_base64": src_image, "session_id": session_id, "user_id": user["id"] if user else None,
            "author": user.get("name") if user else None, "step": 0, "created_at": now_iso()}
     src["root_id"] = src["id"]
-    if len(src_image) > LIST_THUMB_OVER:
-        try:
-            src["thumb_base64"] = await asyncio.to_thread(local_engines.preview, src_image)
-        except Exception:  # noqa: BLE001
-            logger.exception("Preview for source failed")
+    await _store_image(src)
     await db.generations.insert_one(src.copy())
     return {"parent_id": src["id"], "root_id": src["id"], "step": 1}
 
@@ -377,16 +374,40 @@ async def save_generation(kind: str, prompt: str, image: str, session_id: Option
     }
     if wants_publish(user, publish):
         doc.update(public=True, published_at=doc["created_at"])
-    if image and len(image) > LIST_THUMB_OVER:
-        try:  # 4K / HD images: lists send a light preview, the full file loads on open/download
-            doc["thumb_base64"] = await asyncio.to_thread(local_engines.preview, image)
-        except Exception:  # noqa: BLE001
-            logger.exception("Preview for generation failed")
+    await _store_image(doc)
     await db.generations.insert_one(doc.copy())
     return doc
 
 
 LIST_THUMB_OVER = 900_000  # base64 chars
+
+
+async def _store_image(doc: dict):
+    """Lists get a light preview; with S3 active the full file goes to S3 and Mongo keeps only the preview."""
+    image = doc.get("image_base64")
+    if not image:
+        return
+    if media_store.ready():
+        try:
+            key = await media_store.put_image(doc["id"], image)
+            thumb = await asyncio.to_thread(local_engines.preview, image)
+            doc.update(s3_key=key, image_base64=thumb, thumb_base64=thumb)
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("S3 image upload failed for %s; keeping it in Mongo", doc["id"])
+    if len(image) > LIST_THUMB_OVER:
+        try:  # 4K / HD images: lists send a light preview, the full file loads on open/download
+            doc["thumb_base64"] = await asyncio.to_thread(local_engines.preview, image)
+        except Exception:  # noqa: BLE001
+            logger.exception("Preview for generation failed")
+
+
+async def _delete_s3_images(query: dict):
+    async for g in db.generations.find({**query, "s3_key": {"$ne": None}}, {"_id": 0, "s3_key": 1}):
+        try:
+            await media_store.delete(g["s3_key"])
+        except Exception:  # noqa: BLE001
+            logger.exception("S3 delete failed for %s", g["s3_key"])
 
 
 def _listed(doc: dict) -> dict:
@@ -646,8 +667,8 @@ async def image_job_status(job_id: str):
             await db.image_jobs.update_one({"id": job_id}, {"$set": {"status": "failed", "error": job["error"]}})
     out = {"job_id": job["id"], "kind": job["kind"], "status": job["status"], "error": job.get("error"), "model": job.get("model")}
     if job["status"] == "completed" and job.get("result"):
-        gen = await db.generations.find_one({"id": job["result"]["id"]}, {"_id": 0, "image_base64": 1})
-        out["result"] = {**job["result"], "image_base64": (gen or {}).get("image_base64")}
+        gen = await db.generations.find_one({"id": job["result"]["id"]}, {"_id": 0, "image_base64": 1, "s3_key": 1})
+        out["result"] = {**job["result"], "image_base64": await media_store.full_image(gen)}
     return out
 
 
@@ -681,12 +702,14 @@ class BulkDeleteIn(BaseModel):
 
 @api.post("/generations/bulk-delete")
 async def bulk_delete_generations(body: BulkDeleteIn, user: dict = Depends(current_user)):
+    await _delete_s3_images({"id": {"$in": body.ids}, "user_id": user["id"]})
     res = await db.generations.delete_many({"id": {"$in": body.ids}, "user_id": user["id"]})
     return {"deleted": res.deleted_count}
 
 
 @api.delete("/generations/{gen_id}")
 async def delete_generation(gen_id: str, user: dict = Depends(current_user)):
+    await _delete_s3_images({"id": gen_id, "user_id": user["id"]})
     res = await db.generations.delete_one({"id": gen_id, "user_id": user["id"]})
     if not res.deleted_count:
         raise HTTPException(status_code=404, detail="Not found")
@@ -726,9 +749,11 @@ async def remix_history(gen_id: str):
 async def share(gen_id: str):
     doc = await db.generations.find_one({"id": gen_id},
                                         {"_id": 0, "id": 1, "kind": 1, "model": 1, "prompt": 1, "style": 1, "image_base64": 1, "author": 1,
-                                         "parent_id": 1, "root_id": 1, "step": 1, "public": 1, "instruction": 1})
+                                         "parent_id": 1, "root_id": 1, "step": 1, "public": 1, "instruction": 1, "s3_key": 1})
     if not doc:
         raise HTTPException(status_code=404, detail="Not found")
+    doc["image_base64"] = await media_store.full_image(doc)
+    doc.pop("s3_key", None)
     doc["public"] = bool(doc.get("public"))
     return doc
 
@@ -1538,6 +1563,18 @@ async def admin_user(user: dict = Depends(current_user)) -> dict:
     return user
 
 
+@api.get("/admin/media/storage")
+async def media_storage(_: dict = Depends(admin_user)):
+    return {"backend": "s3" if media_store.ready() else "gridfs", **media_store.state}
+
+
+@api.post("/admin/media/migrate")
+async def media_migrate(_: dict = Depends(admin_user)):
+    if not media_store.ready():
+        raise HTTPException(status_code=409, detail=f"S3 is not active: {media_store.state['error']}")
+    return await media_store.migrate(local_engines.preview)
+
+
 @api.get("/engines/status")
 async def engines_status(refresh: bool = False, _: dict = Depends(admin_user)):
     cached = _status_cache.get("data")
@@ -2154,6 +2191,7 @@ async def startup():
     await _resume_interrupted_jobs()
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, local_engines.warm_up)
+    asyncio.create_task(media_store.activate_loop(db, local_engines.preview))
     await aws_gpu.load_settings()
     base = os.environ.get("FRASBERG_PUBLIC_URL", "").rstrip("/")
     if aws_gpu.enabled() and base:

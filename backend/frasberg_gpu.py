@@ -26,6 +26,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+
+import media_store
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api/gpu")
@@ -85,7 +87,7 @@ outputs_fs = None
 def init(database):
     global db, outputs_fs
     db = database
-    outputs_fs = AsyncIOMotorGridFSBucket(database, bucket_name="gpu_outputs")
+    outputs_fs = media_store.Bucket(AsyncIOMotorGridFSBucket(database, bucket_name="gpu_outputs"), "gpu_outputs")
 
 
 async def ensure_indexes():
