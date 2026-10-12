@@ -1,0 +1,41 @@
+{
+  "summary": "Smoke-tested freshly re-imported Frasberg Creator (branch conflict_111026_2245). All 9 backend smoke tests pass and the frontend home/gallery/create/login flows all work with admin credentials. Local SD-Turbo image generation produced a real base64 image end-to-end (~45s cold). Encountered and resolved an environment issue (/data/db partition at 100% causing mongodb to crash; cleared pip cache to free space).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/me", "issue": "Response payload does not include an is_admin / role flag; admin status is enforced server-side only. Frontend works because it probes admin-only endpoints directly, but exposing an explicit admin flag would make UI gating cleaner."},
+      {"endpoint": "/api/generations", "issue": "Documented as 'public' in the review request but actually requires a session_id query param (returns 422 without it). Behaviour is correct for session-scoped listing — just a naming/doc mismatch."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "LoginDialog", "issue": "When navigating directly to /login, the DialogOverlay intercepts pointer events and blocks the submit button; clicking 'Log in' link in header or pressing Enter in password field works fine.", "selector": "div[x-component='DialogOverlay']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_import_smoke.py",
+    "/app/test_reports/pytest/import_smoke.xml"
+  ],
+  "action_items": [
+    "ENVIRONMENT: /data/db is on a 9.8GB partition shared with /app and is at ~96% usage after one cold image gen. Consider pruning /app/backend/models_photo (2.9G) or /app/backend/models (390M) if not required locally, or expanding the volume. Mongo will crash again if the disk fills.",
+    "(Optional) Expose is_admin in GET /api/auth/me so the frontend can gate admin UI without probing endpoints.",
+    "(Optional) Investigate /login route rendering: DialogOverlay blocks clicks on direct navigation; works via header link."
+  ],
+  "critical_code_review_comments": [
+    "backend/server.py is 2204 lines — well over the 700-line guideline. Should be split into modules (auth, generations, admin, gpu-admin, engines).",
+    "ADMIN_EMAILS/JWT_SECRET/MONGO_URL accessed via os.environ[...] with KeyError if missing — fails fast which is good; just ensure .env always has them.",
+    "Local SD-Turbo pulls model weights to /root/.cache on first run; combined with existing /app/backend/models_photo (2.9G), this blew the 9.8G data partition."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_import_smoke.py"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin.tester@luchiiapp.com / AdminTest123! and test@luchii.ai / Test1234! (both verified; both have admin via ADMIN_EMAILS).",
+  "seed_data_creation": "Registered the two admin accounts (DB was empty after re-import). One image generation created 2 image rows under admin.tester for the admin user's gallery.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend smoke tests live at /app/backend/tests/test_import_smoke.py. Run with: python -m pytest backend/tests/test_import_smoke.py -v -o addopts=''. Watch /data/db disk usage — it is a shared 9.8G partition and the local SD-Turbo cache + models_photo nearly fill it. If mongodb goes FATAL, clear /root/.cache/pip and restart mongodb then backend.",
+  "rca of the issue": "Mongo repeatedly entered FATAL state mid-test because /data/db partition (9.8G) is shared with /app and reached 100%. Root cause: /app/backend/models_photo (2.9G) + /app/backend/models (390M) + /root/.venv (2.2G) + /root/.cache (444M including HuggingFace downloads from SD-Turbo first run) + mongodb journal (298M). Mitigation applied: removed /root/.cache/pip and /root/.cache/node-gyp, bringing usage to 96% so mongo could run. Permanent fix: move model weights off the data partition or increase volume size."
+}
