@@ -628,3 +628,8 @@ See /app/memory/test_credentials.md (admin@frasberg.com / LuchiiAdmin2026!, doct
 ## 2026-10-12 (d) — Honest chat/builder failure messages (no more "turbulence — please resend")
 - server.py: UPSTREAM_STATUS {host, reason} recorded by prober + _try_upstream (detects Cloudflare 403). With no EMERGENT_LLM_KEY the backup loop is skipped (no wasted retries). _stream_error_reply states the true cause (server host + HTTP status, no backup model, "resending won't help"). Admin notification kind chat_down (or llm_budget) with real cause. guard_stream fallback + mesh_ws fallback also honest.
 - builder.py: _honest_build_error() replaces "please try again"; failed builds refund BUILD_TOKEN_COST via new auth.refund_tokens.
+
+## 2026-10-12 (e) — Luchii replies restored in preview
+- Root cause (preview): backend/.env was rebuilt WITHOUT EMERGENT_LLM_KEY (fallback model), and api.frasberg.com upstream returns Cloudflare 1034 (Edge IP Restricted, DNS config). The frasberg-com-dev preview the user referenced had the Emergent key; user asked for "all same keys" → EMERGENT_LLM_KEY added. Chat + website builder verified answering.
+- Customer-facing failure text is now generic ("Luchii is busy for a moment… Our team is on it."); technical cause only in admin notification (kind chat_down / llm_budget). Game Builder server pill + "Add server detail" admin-only.
+- Production frasberg.com still runs old code and fails chat (500 on /api/v1/chat/completions) — needs active EMERGENT_LLM_KEY in prod secrets + redeploy.

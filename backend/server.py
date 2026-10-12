@@ -423,23 +423,8 @@ class KeyCreate(BaseModel):
 
 
 def _stream_error_reply(exc_text: str) -> str:
-    """Tell the user the REAL reason a reply failed — never ask them to resend when resending can't help."""
-    low = (exc_text or "").lower()
-    up = UPSTREAM_STATUS.get("reason") or "not answering"
-    host = UPSTREAM_STATUS.get("host") or "the Frasberg model server"
-    if low == "no_backup_model":
-        return (f"⚠ Luchii can't answer right now: the Frasberg model server ({host}) is not accepting requests "
-                f"({up}), and no backup model is configured. Resending won't help until that server is back online — "
-                "the admin has been notified.")
-    if "budget" in low or "429" in low:
-        return ("⚠ Luchii couldn't finish this reply — the backup model's compute balance is exhausted "
-                f"and the Frasberg model server ({host}) is not answering ({up}). Resending won't help until capacity "
-                "is added — the admin has been notified.")
-    if "key" in low and ("invalid" in low or "inactive" in low or "401" in low or "auth" in low):
-        return (f"⚠ Luchii can't answer right now: the backup model key was rejected and the Frasberg model server "
-                f"({host}) is not answering ({up}). Resending won't help until the admin fixes the key or the server.")
-    return (f"⚠ Luchii's reply failed: the Frasberg model server ({host}) is not answering ({up}) and the backup "
-            "model returned an error. This is a server-side problem, not your message — the admin has been notified.")
+    """Customer-facing text when no model could answer. Technical cause goes ONLY to the admin notification."""
+    return "Luchii is busy for a moment and couldn't finish this reply. Our team is on it."
 
 
 async def _notify_admins_budget(detail: str):
@@ -624,7 +609,7 @@ def _luchii_stream(message: str, session_id: str, model: str, key_id: Optional[s
 
     return StreamingResponse(
         guard_stream(event_generator(), [
-            {"delta": "⚠ Luchii's reply was cut off by a server error (not your message) — the admin has been notified."},
+            {"delta": "Luchii is busy for a moment and couldn't finish this reply. Our team is on it."},
             {"done": True, "session_id": session_id},
         ]),
         media_type="text/event-stream",

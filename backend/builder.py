@@ -146,18 +146,8 @@ async def builder_quota(user: dict = Depends(auth_module.get_current_user)):
 
 
 def _honest_build_error() -> str:
-    """The TRUE reason a build produced nothing — never 'please try again' when retrying can't help."""
-    try:
-        from server import UPSTREAM_STATUS
-        host = UPSTREAM_STATUS.get("host") or "the Frasberg model server"
-        up = UPSTREAM_STATUS.get("reason") or "not answering"
-    except Exception:  # noqa: BLE001
-        host, up = "the Frasberg model server", "not answering"
-    if not EMERGENT_LLM_KEY:
-        return (f"Luchii Builder can't build right now: {host} is not accepting requests ({up}) and no backup "
-                "model is configured. Retrying won't help until that server is back online.")
-    return (f"Luchii Builder couldn't finish this build: {host} is not answering ({up}) and the backup model "
-            "returned an error. This is a server-side problem, not your prompt.")
+    """Customer-facing text when a build produced nothing (tokens are refunded)."""
+    return "Luchii Builder is busy for a moment and couldn't finish this build. Your tokens were refunded."
 
 
 @router.post("/builder/generate")
@@ -310,7 +300,7 @@ async def builder_generate(body: GenerateReq, user: dict = Depends(auth_module.g
 
     return StreamingResponse(
         guard_stream(event_gen(), [
-            {"error": "The build was cut off by a server error (not your prompt) — the admin has been notified."},
+            {"error": "Luchii Builder is busy for a moment and couldn't finish this build."},
         ]),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

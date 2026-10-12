@@ -362,7 +362,7 @@ async def mesh_websocket(websocket: WebSocket, client_id: str):
                     from server import _stream_error_reply
                     full = _stream_error_reply("" if os.environ.get("EMERGENT_LLM_KEY") else "no_backup_model")
                 except Exception:  # noqa: BLE001
-                    full = "⚠ Luchii can't answer right now — the model server is not accepting requests (server-side problem, not your message)."
+                    full = "Luchii is busy for a moment and couldn't finish this reply. Our team is on it."
             response = {"role": "assistant", "content": full, "mesh": "frasberg-secure-v1",
                         "timestamp": time.time()}
             STATS["messages_out"] += 1

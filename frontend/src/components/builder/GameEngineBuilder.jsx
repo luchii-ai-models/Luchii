@@ -205,6 +205,7 @@ export default function GameEngineBuilder({ user, onSignIn }) {
               {busy ? <Loader2 size={15} className="animate-spin" /> : <Boxes size={15} />} {busy ? "Building world…" : "Build world"}
             </button>
           </div>
+          {user?.role === "admin" && (
           <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px]" data-testid="frasberg-server-status">
             <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 ${server?.reachable ? "border-emerald-500/50 text-emerald-400" : "border-amber-500/50 text-amber-400"}`}>
               <Server size={12} />
@@ -217,6 +218,7 @@ export default function GameEngineBuilder({ user, onSignIn }) {
               <RefreshCw size={12} className={checking ? "animate-spin" : ""} /> Re-check
             </button>
           </div>
+          )}
           <p className="mt-3 text-[13px] text-lux-text2">
             Your prompt becomes a WorldDefinition (scenes, NPC groups, track, vehicles, rules) saved to WorldGraph, then runs on a real Frasberg engine. No AI-written code.
           </p>
@@ -236,7 +238,7 @@ export default function GameEngineBuilder({ user, onSignIn }) {
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                {current.enriched_by !== "rules+frasberg" && (
+                {user?.role === "admin" && current.enriched_by !== "rules+frasberg" && (
                   <button type="button" onClick={refine} disabled={refining} data-testid="engine-refine-btn"
                     title="Ask the Frasberg server to add detail to this world"
                     className="inline-flex items-center gap-1.5 rounded-full border border-lux-border px-4 py-2 text-sm hover:border-lux-accent disabled:opacity-60">
