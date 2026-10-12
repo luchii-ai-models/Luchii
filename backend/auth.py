@@ -329,6 +329,12 @@ async def spend_tokens(user_id: str, amount: int, kind: str, note: str = "") -> 
     return False
 
 
+async def refund_tokens(user_id: str, amount: int, kind: str, note: str = "") -> None:
+    """Give tokens back when the service failed to deliver (e.g. model server down)."""
+    await db.users.update_one({"id": user_id}, {"$inc": {"tokens": amount}})
+    await _ledger(user_id, kind, amount, f"{note} — refunded")
+
+
 @router.get("/gift")
 async def gift_status(request: Request):
     user = await get_current_user(request)

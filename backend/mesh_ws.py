@@ -358,7 +358,11 @@ async def mesh_websocket(websocket: WebSocket, client_id: str):
                 logger.exception("mesh inference failed")
             LATENCIES.append((time.time(), (time.time() - _t0) * 1000))
             if not full:
-                full = "Let's try that again — please resend your message."
+                try:
+                    from server import _stream_error_reply
+                    full = _stream_error_reply("" if os.environ.get("EMERGENT_LLM_KEY") else "no_backup_model")
+                except Exception:  # noqa: BLE001
+                    full = "⚠ Luchii can't answer right now — the model server is not accepting requests (server-side problem, not your message)."
             response = {"role": "assistant", "content": full, "mesh": "frasberg-secure-v1",
                         "timestamp": time.time()}
             STATS["messages_out"] += 1

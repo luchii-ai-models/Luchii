@@ -73,6 +73,12 @@ _env_upstream = os.environ.get("LUCHII_UPSTREAM_URL", "").strip()
 UPSTREAM_CANDIDATES = [_env_upstream] if _env_upstream else []
 LUCHII_UPSTREAM_API_KEY = os.environ.get("LUCHII_UPSTREAM_API_KEY", "")
 ACTIVE_UPSTREAM = None    # set by background prober once an endpoint answers
+# Why the Frasberg model server is (not) answering — used to tell users the TRUE reason a reply failed.
+UPSTREAM_STATUS = {"host": None, "reason": "not checked yet" if _env_upstream else "LUCHII_UPSTREAM_URL is not set"}
+
+
+def _upstream_host(url: str) -> str:
+    return url.split("://", 1)[-1].split("/", 1)[0]
 
 
 async def _probe_upstreams():
@@ -91,8 +97,12 @@ async def _probe_upstreams():
                 # 403 (WAF block) or 404 (routes missing) must NOT count as a working gateway
                 if r.status_code < 400:
                     found = url
+                    UPSTREAM_STATUS.update({"host": _upstream_host(url), "reason": "online"})
                     break
-            except Exception:
+                cf = " — blocked by Cloudflare" if r.status_code == 403 and "cloudflare" in (r.text or "").lower() else ""
+                UPSTREAM_STATUS.update({"host": _upstream_host(url), "reason": f"HTTP {r.status_code}{cf}"})
+            except Exception as e:
+                UPSTREAM_STATUS.update({"host": _upstream_host(url), "reason": f"unreachable ({type(e).__name__})"})
                 continue
         if found != ACTIVE_UPSTREAM:
             logger.info("Luchii upstream changed: %s -> %s", ACTIVE_UPSTREAM, found)
@@ -147,11 +157,14 @@ async def _try_upstream(message: str, system_base: str, model: str):
             )
         if r.status_code >= 400:
             logger.warning("upstream %s returned %s", ACTIVE_UPSTREAM, r.status_code)
+            cf = " — blocked by Cloudflare" if r.status_code == 403 and "cloudflare" in (r.text or "").lower() else ""
+            UPSTREAM_STATUS.update({"host": _upstream_host(url), "reason": f"HTTP {r.status_code}{cf}"})
             return None
         data = r.json()
         return data["choices"][0]["message"]["content"]
-    except Exception:
+    except Exception as e:
         logger.exception("upstream call failed")
+        UPSTREAM_STATUS.update({"host": _upstream_host(url), "reason": f"unreachable ({type(e).__name__})"})
         return None
 
 
@@ -410,26 +423,49 @@ class KeyCreate(BaseModel):
 
 
 def _stream_error_reply(exc_text: str) -> str:
+    """Tell the user the REAL reason a reply failed — never ask them to resend when resending can't help."""
     low = (exc_text or "").lower()
+    up = UPSTREAM_STATUS.get("reason") or "not answering"
+    host = UPSTREAM_STATUS.get("host") or "the Frasberg model server"
+    if low == "no_backup_model":
+        return (f"⚠ Luchii can't answer right now: the Frasberg model server ({host}) is not accepting requests "
+                f"({up}), and no backup model is configured. Resending won't help until that server is back online — "
+                "the admin has been notified.")
     if "budget" in low or "429" in low:
-        return ("⚠ Luchii couldn't finish this reply — the platform's compute balance is exhausted. "
-                "The team has been notified to add capacity. Please resend your message shortly.")
-    return "⚠ Luchii hit turbulence on that reply — please resend your message."
+        return ("⚠ Luchii couldn't finish this reply — the backup model's compute balance is exhausted "
+                f"and the Frasberg model server ({host}) is not answering ({up}). Resending won't help until capacity "
+                "is added — the admin has been notified.")
+    if "key" in low and ("invalid" in low or "inactive" in low or "401" in low or "auth" in low):
+        return (f"⚠ Luchii can't answer right now: the backup model key was rejected and the Frasberg model server "
+                f"({host}) is not answering ({up}). Resending won't help until the admin fixes the key or the server.")
+    return (f"⚠ Luchii's reply failed: the Frasberg model server ({host}) is not answering ({up}) and the backup "
+            "model returned an error. This is a server-side problem, not your message — the admin has been notified.")
 
 
 async def _notify_admins_budget(detail: str):
     try:
         hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+        low = (detail or "").lower()
+        host = UPSTREAM_STATUS.get("host") or "LUCHII_UPSTREAM_URL"
+        up = UPSTREAM_STATUS.get("reason") or "not answering"
+        if "budget" in low or "429" in low:
+            kind, title = "llm_budget", "Compute balance exhausted"
+            body = f"Backup model budget exceeded and Frasberg server {host} is {up} — chats are failing."
+        else:
+            kind, title = "chat_down", "Luchii chat is failing"
+            body = (f"Frasberg model server {host} is not accepting requests ({up})"
+                    + (" and no backup model is configured." if low == "no_backup_model" else f"; backup model error: {detail[:120]}")
+                    + " Fix the server (e.g. allow this app through Cloudflare) to restore replies.")
         res = await db.notifications.update_one(
-            {"kind": "llm_budget", "hour": hour},
-            {"$setOnInsert": {"id": str(uuid.uuid4()), "kind": "llm_budget", "hour": hour,
-                              "title": "Compute balance exhausted",
-                              "body": "The Universal LLM key budget was exceeded — chats are failing. Top up the key balance to restore Luchii.",
+            {"kind": kind, "hour": hour},
+            {"$setOnInsert": {"id": str(uuid.uuid4()), "kind": kind, "hour": hour,
+                              "title": title,
+                              "body": body,
                               "detail": detail[:300], "audience": "admin",
                               "ts": datetime.now(timezone.utc).isoformat()}},
             upsert=True)
         if res.upserted_id:
-            logger.error("LLM BUDGET EXCEEDED — admin notification created")
+            logger.error("%s — admin notification created", title)
     except Exception:
         pass
 
@@ -522,8 +558,8 @@ def _luchii_stream(message: str, session_id: str, model: str, key_id: Optional[s
                 await asyncio.sleep(0.01)
         else:
             # 2) Sovereign reasoning core — retry once on transient failure, NEVER a canned demo reply
-            last_err = ""
-            for attempt in range(2):
+            last_err = "" if EMERGENT_LLM_KEY else "no_backup_model"
+            for attempt in range(2 if EMERGENT_LLM_KEY else 0):
                 llm = LlmChat(
                     api_key=EMERGENT_LLM_KEY, session_id=session_id,
                     system_message=sb + history,
@@ -552,8 +588,7 @@ def _luchii_stream(message: str, session_id: str, model: str, key_id: Optional[s
                     full = fallback(message, model or "luchii-70b")
                 else:
                     full = _stream_error_reply(last_err)
-                    if "budget" in last_err.lower() or "429" in last_err:
-                        asyncio.create_task(_notify_admins_budget(last_err))
+                    asyncio.create_task(_notify_admins_budget(last_err))
                 for word in full.split(" "):
                     yield f"data: {json.dumps({'delta': word + ' '})}\n\n"
                     await asyncio.sleep(0.03)
@@ -589,7 +624,7 @@ def _luchii_stream(message: str, session_id: str, model: str, key_id: Optional[s
 
     return StreamingResponse(
         guard_stream(event_generator(), [
-            {"delta": "Let's try that again — please resend your message."},
+            {"delta": "⚠ Luchii's reply was cut off by a server error (not your message) — the admin has been notified."},
             {"done": True, "session_id": session_id},
         ]),
         media_type="text/event-stream",

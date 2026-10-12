@@ -624,3 +624,7 @@ See /app/memory/test_credentials.md (admin@frasberg.com / LuchiiAdmin2026!, doct
 - New tunables: racer3d laps (0=endless) + lapLength; streets/carjack policeAggression (0.25–2.5); maze3d "choices" mazeTheme (neon/ice/lava/jungle/crypt/desert/gold, type select). Rules parse "N laps", "4 km circuit", "relentless/lazy/no cops", "police aggression 2.2", maze theme words. CORE_WORDS weight engine-naming words (+2).
 - Engines: racer3d lap HUD + finish screen (win sfx); streets police count/turn/speed/ram/bust scaled by AGG; carjack built bundle patched (games/carjack/assets/engine-*.js) + source frasberg-carjack/src/PoliceAI.js; maze3d MAZE_THEMES colors.
 - Frontend: pages/GameWorldShare.jsx at /g/:worldId (cover, title, chips, Play fullscreen overlay, Share, settings grid); GameEngineBuilder: server status pill + Re-check, Add server detail, Share page link, select tunables.
+
+## 2026-10-12 (d) — Honest chat/builder failure messages (no more "turbulence — please resend")
+- server.py: UPSTREAM_STATUS {host, reason} recorded by prober + _try_upstream (detects Cloudflare 403). With no EMERGENT_LLM_KEY the backup loop is skipped (no wasted retries). _stream_error_reply states the true cause (server host + HTTP status, no backup model, "resending won't help"). Admin notification kind chat_down (or llm_budget) with real cause. guard_stream fallback + mesh_ws fallback also honest.
+- builder.py: _honest_build_error() replaces "please try again"; failed builds refund BUILD_TOKEN_COST via new auth.refund_tokens.
