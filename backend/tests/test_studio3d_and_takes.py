@@ -11,7 +11,7 @@ import pytest
 import requests
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL",
-                          "https://frb-secure-runtime.preview.emergentagent.com").rstrip("/")
+                          "https://import-conflict.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
 TEST_EMAIL = "test@luchii.ai"

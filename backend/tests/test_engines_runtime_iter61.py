@@ -13,7 +13,7 @@ import uuid
 import requests
 import pytest
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://media-engine-hub.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://import-conflict.preview.emergentagent.com").rstrip("/")
 ADMIN_EMAIL = "admin.tester@luchiiapp.com"
 ADMIN_PWD = "AdminTest123!"
 PLATFORM_KEY = os.environ["FRASBERG_API_KEYS"].split(",")[0]

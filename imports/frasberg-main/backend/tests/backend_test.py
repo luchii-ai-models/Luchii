@@ -8,7 +8,7 @@ import requests
 
 BASE_URL = os.environ.get(
     "REACT_APP_BACKEND_URL",
-    "https://ai-gateway-demo.preview.emergentagent.com",
+    "https://import-conflict.preview.emergentagent.com",
 ).rstrip("/")
 
 

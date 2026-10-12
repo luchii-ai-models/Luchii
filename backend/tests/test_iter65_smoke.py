@@ -4,7 +4,7 @@ import time
 import pytest
 import requests
 
-BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://luchii-media.preview.emergentagent.com").rstrip("/")
+BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://import-conflict.preview.emergentagent.com").rstrip("/")
 ADMIN_EMAIL = "admin.tester@luchiiapp.com"
 ADMIN_PASS = "AdminTest123!"
 USER_EMAIL = "test@luchii.ai"

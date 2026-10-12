@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import requests
 
-PUBLIC_URL = "https://luchii-media.preview.emergentagent.com"
+PUBLIC_URL = "https://import-conflict.preview.emergentagent.com"
 LOCAL_URL = "http://localhost:8001"
 
 ADMIN = {"email": "admin.tester@luchiiapp.com", "password": "AdminTest123!"}
