@@ -1,0 +1,22 @@
+{
+  "summary": "Post-reimport regression on Frasberg Game Builder. Backend: 19/19 pytest pass in /app/backend/tests/test_iter62_game_builder.py (engines catalog returns 6 engines racer3d/streets/carjack/dungeon3d/spaceshooter/maze3d with tunables; auth-gated create; unknown engine->400; prompt rules map correctly to racer3d (neon night street race), carjack ($5000 rain), spaceshooter (7 lives + bossEvery=3), dungeon3d (12 enemies), maze3d ('Mist Hollow'), streets ($900); PATCH clamps config (maxSpeed 9999->120); unknown setting->400; GET /play public, HTML contains window.FRASBERG_WORLD and /api/games/assets/world.js; DELETE then GET->404; carjack present in /api/games; frasberg-image-xl in creator engines list). Additional ad-hoc curl verified: admin@frasbergai.com/Federation20261+ login returns 200 w/ cookie; POST /api/builder/generate type=game returns 400 with detail 'Games are built from Frasberg engines — use POST /api/game-builder/worlds'; type=website returns 200 and streams SSE (graceful upstream-down 'turbulence' error, not 400). Frontend: /game-builder renders Luchii Game Builder with original Builder.jsx tabs (Website/Mobile App/Game/Landing Page) — Game tab shows 7 engine chips (Auto-pick + 6 engines Las Vegas Racer, Street Vybz, Frasberg Carjack, Luchii Dungeon, Constellation Wars, Meta Maze) and the prompt textarea; the AI-code mode toggle is absent (no data-testid='game-mode-toggle' on the page) — engine-only as required. /website-builder renders the original Luchii Website Builder UI with the Build it button unchanged. Frasberg upstream unreachable (403 observed in backend logs) so enriched_by='rules' consistently — per user design, not a bug.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter62_game_builder.py",
+    "/app/test_reports/pytest/iter63.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "frasberg_complete logs 'Frasberg server unreachable/returned 403' at INFO on every world creation — consider log-once or DEBUG to reduce noise under the current no-upstream design.",
+    "PATCH /api/game-builder/worlds/{id} mutates scenes[0].components['engine'].props with new cfg but does not re-validate the full WorldDefinition pydantic model; _clamp allow-list currently prevents issues but a future invariant could slip through.",
+    "pick_engine fallback (no keyword hits, no car/shoot cues) defaults to spaceshooter — document this behaviour or expose as a configurable default."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "100% on checked flows (page loads, engine-only UI, no AI toggle, website-builder preserved)"},
+  "test_credentials": "admin@frasbergai.com / Federation20261+ (seeded); test@luchii.ai / Test1234! (auto-registered by pytest fixture)",
+  "seed_data_creation": "Pytest fixture test@luchii.ai creates ~7 WorldGraph records (racer3d, carjack, spaceshooter, dungeon3d, maze3d x2, streets); last is deleted. One additional record may remain from frontend check if logged-in build was triggered (not performed in this iteration because /login route doesn't exist and no logged-in UI build was executed; previous iteration 62 covered that already).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend is slow to start after supervisor restart (~2 min — TTS/XTTS/Whisper preload). If initial curl/pytest returns 502, wait and retry. Frontend has no standalone /login route — login UI is a modal on the builder page via 'Sign in / Sign up free'. For logged-in UI testing, prefer injecting the session cookie from POST /api/auth/login then navigating to /game-builder."
+}
