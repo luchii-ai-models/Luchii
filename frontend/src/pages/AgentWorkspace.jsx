@@ -912,7 +912,6 @@ export default function AgentWorkspace() {
           <NotificationBell />
           <div className="mx-1.5 h-5 w-px" style={{ background: T.border }} />
           <AccountMenu />
-          <span className="ml-2 hidden font-mono text-[15.5px] uppercase tracking-wide lg:block" style={{ color: T.muted }}>{agent.role}</span>
         </div>
       </div>
 
@@ -1050,9 +1049,13 @@ export default function AgentWorkspace() {
                     </div>
                   )}
                 </div>
+                <label className="relative inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 font-mono text-[14px]"
+                  style={{ borderColor: T.border, background: T.inset, color: T.text }} title={`${agent.name} · ${agent.role}`} data-testid="workspace-model-pill">
+                  <span data-testid="workspace-model-label">{agent.model.replace("luchii", "Luchii")}</span>
+                  <ChevronDown size={12} style={{ color: T.text2 }} />
                 <select value={agentKey} onChange={(e) => { const k = e.target.value; navigate(`/chat?model=${AGENTS[k].model}&agent=${k}`); }}
-                  data-testid="workspace-model-select" title={`${agent.name} · ${agent.role}`}
-                  className="rounded-md border px-3 py-1.5 font-mono text-[15px] outline-none" style={{ borderColor: T.border, background: T.inset, color: T.text }}>
+                  data-testid="workspace-model-select" aria-label="Choose Luchii agent"
+                  className="absolute inset-0 h-full w-full cursor-pointer opacity-0">
                   {Object.entries(AGENTS).map(([k, a]) => (
                     <option key={k} value={k} data-testid={`workspace-agent-option-${k}`}>
                       ✳ {a.name} · {a.model.replace("luchii", "Luchii")} — {a.role}
@@ -1062,6 +1065,7 @@ export default function AgentWorkspace() {
                   <option value="frasberg-ai" disabled>◈ Frasberg — coming soon</option>
                   <option value="luchii-vision" disabled>✳ Luchii Earth 7 — coming soon</option>
                 </select>
+                </label>
                 <button className={`${iconBtn} ml-auto`} style={{ borderColor: listening ? T.accent : T.borderSub, color: listening ? T.accent : T.muted }} onClick={toggleMic} aria-label="Mic" data-testid="workspace-mic"><Mic size={14} className={listening ? "animate-pulse" : ""} /></button>
                 {running ? (
                   <button onClick={stopAgent} data-testid="workspace-stop"
